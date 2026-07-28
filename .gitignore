@@ -1,0 +1,13 @@
+# dependency & build caches (regenerable — not committed)
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+.next/
+frontend/.next/
+# runtime logs
+*.log
+data/*.parquet
+# NOTE: .env and data/*.sqlite ARE committed at the user's request.
+#   .env currently holds only a placeholder DB password.
+#   The 106 MB sqlite is tracked via Git LFS (see .gitattributes).
