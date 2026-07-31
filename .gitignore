@@ -8,6 +8,9 @@ frontend/.next/
 # runtime logs
 *.log
 data/*.parquet
+# generated experiment artefacts (re-created by: python -m experiments.gbt_trial)
+experiments/models/
+experiments/out/
 # NOTE: .env and data/*.sqlite ARE committed at the user's request.
 #   .env currently holds only a placeholder DB password.
 #   The 106 MB sqlite is tracked via Git LFS (see .gitattributes).

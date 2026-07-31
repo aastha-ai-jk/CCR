@@ -43,7 +43,24 @@
       "Bash(python \"C:/Users/PRAKHA~1.EXT/AppData/Local/Temp/claude/D--Digital-Twin/69bcd23f-4ee6-4cee-9d3e-4df2b139d0af/scratchpad/dump_mapping.py\")",
       "PowerShell($c = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { Stop-Process -Id $c.OwningProcess -Force; Start-Sleep 2 }; Write-Output \"3000 clear\")",
       "Bash(curl -s \"http://localhost:8000/api/live\")",
-      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('feed source:',d['source'],'age:',d.get\\('age_sec'\\),'s  calciner:',round\\(d['values']['423CI400_TT_4'],1\\),'coal:',round\\(d['values']['467RL400_TPH'],1\\)\\)\")"
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('feed source:',d['source'],'age:',d.get\\('age_sec'\\),'s  calciner:',round\\(d['values']['423CI400_TT_4'],1\\),'coal:',round\\(d['values']['467RL400_TPH'],1\\)\\)\")",
+      "Bash(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 prakhartripathi@10.53.2.10 'echo REMOTE_OK; whoami; hostname')",
+      "Bash(python -c \"import reportlab; print\\('reportlab', reportlab.Version\\)\")",
+      "Bash(python -c \"import pypdf; print\\('pypdf ok'\\)\")",
+      "Bash(python build_pdf.py)",
+      "Bash(python -m pip install --quiet --disable-pip-version-check pymupdf)",
+      "Bash(python -c \"import fitz; print\\('ok', fitz.__doc__[:30] if fitz.__doc__ else 'ok'\\)\")",
+      "Bash(rm -f page_*.png)",
+      "Bash(mkdir -p \"/d/Digital_Twin/docs\" *)",
+      "Bash(python \"C:/Users/PRAKHA~1.EXT/AppData/Local/Temp/claude/D--Digital-Twin/69bcd23f-4ee6-4cee-9d3e-4df2b139d0af/scratchpad/dump_outlier_report.py\")",
+      "Bash(python -m pip install --quiet --disable-pip-version-check lightgbm optuna)",
+      "Bash(python -m experiments.gbt_trial)",
+      "Bash(python -m experiments.optuna_trial)",
+      "Bash(curl -s --max-time 25 \"http://localhost:8000/api/advisory\" -o /tmp/adv.json)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(curl -s \"http://localhost:3000/twin\")",
+      "Bash(curl -s --max-time 20 \"http://localhost:8000/api/advisory\" -o adv.json)",
+      "Bash(curl -s -o /dev/null -w \"twin=%{http_code}\\\\n\" \"http://localhost:3000/twin\")"
     ]
   }
 }

@@ -83,7 +83,7 @@ export default function Simulator() {
     timer.current = setTimeout(() => api.simulate(levers, cond).then(setRes).catch(console.error), 200);
   }, [levers, conds, baseline]);
 
-  if (!defs) return <Loading label="Loading twin surrogate…" />;
+  if (!defs) return <Loading label="Loading digital twin…" />;
   const temp = res?.prediction?.["423CI400_TT_4"];
   const inBand = res?.temp_in_band;
   const actualTemp = baseline?.values?.["423CI400_TT_4"];

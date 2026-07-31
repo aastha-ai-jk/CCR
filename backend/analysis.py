@@ -227,6 +227,311 @@ def simulate(levers: dict, conditions: dict | None = None, k: int = 400) -> dict
     }
 
 
+# ---------------------------------------------------------------------------
+# LIVE ADVISORY / OPTIMISER
+# Searches the 4 calciner fuel-AFR levers for the cheapest mix that still holds
+# PC temperature in-band and every interlock safe, within +/-GUARDRAIL of the
+# current setpoint (the control doc's ramp limit). The matched neighbourhood
+# depends only on the confounders, never on the levers, so it is computed once
+# and the whole candidate grid is evaluated vectorised.
+COAL = "467RL400_TPH"
+AFR_LEVERS = ["LAFR_FT", "K3V10_F1", "261WF080_TPH"]
+OPT_LEVERS = [COAL] + AFR_LEVERS
+GUARDRAIL = 0.05          # +/-5% per move
+LAMBDA_AFR = 0.60         # weight on AFR substitution vs raw coal reduction
+# coal-equivalence of the AFR streams. ASSUMPTION: coal CV 5200, AFR CV 2500
+# kcal/kg (CCR screen) and ~1 kg/l for the liquid streams. Confirm with the
+# plant before treating any monetary figure as firm.
+_AFR_CV_RATIO = 2500.0 / 5200.0
+AFR_EQ = {"LAFR_FT": 1e-3 * _AFR_CV_RATIO,
+          "K3V10_F1": 1e-3 * _AFR_CV_RATIO,
+          "261WF080_TPH": _AFR_CV_RATIO}
+
+
+def advise(levers: dict, conditions: dict | None = None, k: int = 400,
+           guardrail: float = GUARDRAIL, lam: float = LAMBDA_AFR,
+           grid: int = 7) -> dict:
+    """Recommend a cheaper-but-safe fuel mix for the current plant state."""
+    m = _matrix()
+    conditions = conditions or {}
+
+    T0 = float(conditions.get("current_temp") or m["temp_med"])
+    trend = float(conditions.get("temp_trend", 0.0))
+    st = [float(conditions.get(s, m["state_med"][s])) for s in STATE_PLC]
+    cq = (np.array([T0, trend] + st) - m["cmu"]) / m["csd"]
+
+    d = np.sqrt(((m["Cn"] - cq) ** 2).sum(1))
+    k = min(k, len(d) - 1)
+    idx = np.argpartition(d, k)[:k]
+    w = 1.0 / (d[idx] + 1e-6)
+    dtemp_ref = float(np.average(m["y"][idx], weights=w))
+    Sbase = np.average(m["S"][idx], axis=0, weights=w)
+    Lref = dict(zip(MV, np.average(m["L"][idx], axis=0, weights=w)))
+
+    cur = {t: float(levers.get(t, m["lever_med"][t])) for t in MV}
+
+    # temperature contribution of the levers we are NOT moving
+    fixed_c = 0.0
+    for t in MV:
+        if t in OPT_LEVERS:
+            continue
+        sign, tier = MV_TEMP[t]
+        fixed_c += sign * TIER_DEG[tier] / m["ranges"][t] * (cur[t] - Lref[t])
+
+    # candidate grid: each optimised lever within +/-guardrail of its current value
+    axes = []
+    for t in OPT_LEVERS:
+        span = abs(cur[t]) * guardrail
+        axes.append(np.linspace(cur[t] - span, cur[t] + span, grid)
+                    if span > 1e-9 else np.array([cur[t]]))
+    mesh = np.meshgrid(*axes, indexing="ij")
+    cand = np.column_stack([g.ravel() for g in mesh])          # (N, 4)
+
+    # vectorised temperature prediction
+    temp = np.full(len(cand), T0 + dtemp_ref + fixed_c)
+    for j, t in enumerate(OPT_LEVERS):
+        sign, tier = MV_TEMP[t]
+        temp += sign * TIER_DEG[tier] / m["ranges"][t] * (cand[:, j] - Lref[t])
+
+    # vectorised safety prediction
+    safety = {}
+    for s_i, tag in enumerate(SAFETY):
+        val = np.full(len(cand), float(Sbase[s_i]))
+        for drv, coef in SAFETY_EFFECT.get(tag, {}).items():
+            if drv in OPT_LEVERS:
+                val += coef / m["ranges"][drv] * (cand[:, OPT_LEVERS.index(drv)] - Lref[drv])
+            else:
+                val += coef / m["ranges"][drv] * (cur[drv] - Lref[drv])
+        safety[tag] = np.maximum(0.0, val)
+
+    # active band (same 7-variable vote as simulate)
+    votes = {}
+    for key in STATE_RULES:
+        v = conditions.get(key)
+        s = _classify_state(key, None if v is None else float(v))
+        if s:
+            votes[key] = s
+    state_num = int(round(np.mean(list(votes.values())))) if votes else 2
+    state_num = min(3, max(1, state_num))
+    state = f"State {state_num}"
+    band = config.TEMP_STATE_BANDS[state]
+
+    ok = (temp >= band[0]) & (temp <= band[1])
+    for tag, (op, lim) in config.INTERLOCKS.items():
+        if tag in safety:
+            ok &= (safety[tag] < lim) if op == "<" else (safety[tag] > lim)
+
+    def afr_equiv(vals):                # t/h coal-equivalent
+        return sum(vals[..., OPT_LEVERS.index(t)] * AFR_EQ[t] for t in AFR_LEVERS)
+
+    cur_coal = cur[COAL]
+    cur_afr_eq = float(sum(cur[t] * AFR_EQ[t] for t in AFR_LEVERS))
+    base = {"coal": round(cur_coal, 2), "afr_coal_equiv": round(cur_afr_eq, 3)}
+
+    # Safety is never relaxed. Reaching the band, however, may take more than one
+    # guarded move - the control logic itself steps +/-5% repeatedly "until the
+    # target range is restored". So:
+    #   mode HOLD    : in-band candidates exist -> pick the cheapest fuel mix
+    #   mode APPROACH: none in band -> take the best SAFE step toward the band
+    safe = np.ones(len(cand), dtype=bool)
+    for tag, (op, lim) in config.INTERLOCKS.items():
+        if tag in safety:
+            safe &= (safety[tag] < lim) if op == "<" else (safety[tag] > lim)
+    if not safe.any():
+        return {"feasible": False, "mode": "blocked", "operating_state": state,
+                "target_band": {"low": band[0], "high": band[1]},
+                "reason": ("Every setting within +/-{:.0%} of the current setpoints "
+                           "would breach a combustion-safety interlock. No fuel move "
+                           "can be recommended.").format(guardrail),
+                "current": base, "assumptions": _assumptions(guardrail, lam)}
+
+    centre = 0.5 * (band[0] + band[1])
+    cost = cand[:, 0] - lam * afr_equiv(cand)
+    if ok.any():
+        mode = "hold"
+        obj = np.where(ok, cost, np.inf)
+    else:
+        # move toward the band (primary), cheapest fuel as the tie-break
+        mode = "approach"
+        gap = np.abs(temp - centre)
+        obj = np.where(safe, gap + 1e-3 * cost, np.inf)
+    b = int(np.argmin(obj))
+    steps_to_band = None
+    if mode == "approach":
+        gap_now = abs((T0 + dtemp_ref + fixed_c +
+                       sum(MV_TEMP[t][0] * TIER_DEG[MV_TEMP[t][1]] / m["ranges"][t]
+                           * (cur[t] - Lref[t]) for t in OPT_LEVERS)) - centre)
+        gap_after = abs(float(temp[b]) - centre)
+        made = gap_now - gap_after
+        steps_to_band = int(np.ceil(gap_after / made)) + 1 if made > 0.05 else None
+
+    rec = {t: round(float(cand[b, j]), 2) for j, t in enumerate(OPT_LEVERS)}
+    rec_afr_eq = float(afr_equiv(cand[b]))
+    saving_tph = cur_coal - float(cand[b, 0])
+    names = db.tag_names()
+    return {
+        "feasible": True,
+        "mode": mode,
+        "mode_note": ("Cheapest fuel mix that holds the band." if mode == "hold" else
+                      "Temperature is outside the band; this is the best SAFE step "
+                      "toward it within one guarded move (the control logic repeats "
+                      "such steps until the range is restored)."),
+        "steps_to_band": steps_to_band,
+        "operating_state": state,
+        "target_band": {"low": band[0], "high": band[1]},
+        "current": base,
+        "recommended": {"coal": rec[COAL], "afr_coal_equiv": round(rec_afr_eq, 3)},
+        "predicted_temp": round(float(temp[b]), 1),
+        "predicted_safety": {t: round(float(safety[t][b]), 1) for t in SAFETY},
+        "moves": [{"tag": t, "name": names.get(t, t),
+                   "from": round(cur[t], 2), "to": rec[t],
+                   "delta": round(rec[t] - cur[t], 2)} for t in OPT_LEVERS],
+        "saving": {
+            "coal_tph": round(saving_tph, 3),
+            "coal_pct": round(100 * saving_tph / cur_coal, 2) if cur_coal else None,
+            "coal_tpd": round(saving_tph * 24, 1),
+            "coal_tpy": round(saving_tph * 24 * 330, 0),      # 330 operating days
+            "afr_equiv_gain_tph": round(rec_afr_eq - cur_afr_eq, 3),
+        },
+        "candidates_evaluated": int(len(cand)),
+        "in_band_candidates": int(ok.sum()),
+        "safe_candidates": int(safe.sum()),
+        "assumptions": _assumptions(guardrail, lam),
+    }
+
+
+# --------------------------------------------------------------------------
+# SAVINGS BREAKDOWN — per fuel stream: rate change -> thermal energy -> money
+# Every stream is converted to MASS first (liquid AFR is metered in l/h, so it
+# needs a density) and only then to kcal, so units can never be mixed.
+FUEL_STREAMS = [
+    # tag, label, native unit, native->tonnes/h, CV attr, price attr
+    ("467RL400_TPH", "Calciner coal", "t/h", 1.0, "COAL_CV_KCAL_KG", "COAL_PRICE_PER_T"),
+    ("467RL300_TPH", "Kiln coal", "t/h", 1.0, "COAL_CV_KCAL_KG", "KILN_COAL_PRICE_PER_T"),
+    ("LAFR_FT", "LAFR — precalciner", "l/h", None, "AFR_LIQ_CV_KCAL_KG", "LAFR_PRICE_PER_L"),
+    ("K3V10_F1", "LAFR — tertiary air duct", "l/h", None, "AFR_LIQ_CV_KCAL_KG", "LAFR_PRICE_PER_L"),
+    ("261WF080_TPH", "SAFR (solid AFR)", "t/h", 1.0, "AFR_SOL_CV_KCAL_KG", "SAFR_PRICE_PER_T"),
+]
+AFR_TAGS = {"LAFR_FT", "K3V10_F1", "261WF080_TPH"}
+
+
+def _to_tph(tag: str, native: float, factor) -> float:
+    if factor is not None:
+        return native * factor
+    # litres/h -> tonnes/h via density
+    return native * config.LAFR_DENSITY_KG_PER_L / 1000.0
+
+
+def savings_breakdown(adv: dict, snapshot: dict | None = None,
+                      days_per_year: int = 330) -> dict:
+    """Per-parameter energy and cost effect of following the advisory."""
+    if not adv.get("feasible"):
+        return {"available": False,
+                "reason": adv.get("reason", "No advisory available.")}
+
+    rec_by_tag = {m["tag"]: m for m in adv.get("moves", [])}
+    snapshot = snapshot or {}
+    rows, priced_any, missing_price = [], False, []
+    tot = {"kcal_h": 0.0, "cost_h": 0.0}
+    heat_now = heat_rec = afr_now = afr_rec = 0.0
+
+    for tag, label, unit, factor, cv_attr, price_attr in FUEL_STREAMS:
+        mv = rec_by_tag.get(tag)
+        cur = float(mv["from"]) if mv else (
+            float(snapshot[tag]) if snapshot.get(tag) is not None else None)
+        rec = float(mv["to"]) if mv else cur          # not optimised -> unchanged
+        if cur is None:
+            continue
+        cv = getattr(config, cv_attr)
+        price = getattr(config, price_attr) or 0.0
+
+        t_now, t_rec = _to_tph(tag, cur, factor), _to_tph(tag, rec, factor)
+        kcal_now, kcal_rec = t_now * 1000 * cv, t_rec * 1000 * cv
+        d_kcal = kcal_rec - kcal_now                  # negative = heat saved
+        d_cost = (rec - cur) * price if price else None
+
+        heat_now += kcal_now
+        heat_rec += kcal_rec
+        if tag in AFR_TAGS:
+            afr_now += kcal_now
+            afr_rec += kcal_rec
+        tot["kcal_h"] += d_kcal
+        if d_cost is not None:
+            tot["cost_h"] += d_cost
+            priced_any = True
+        elif abs(rec - cur) > 1e-9:
+            missing_price.append(label)
+
+        rows.append({
+            "tag": tag, "name": label, "unit": unit,
+            "current": round(cur, 2), "recommended": round(rec, 2),
+            "delta": round(rec - cur, 2),
+            "delta_tph": round(t_rec - t_now, 4),
+            "cv_kcal_kg": cv,
+            "energy_gj_h": round(d_kcal * config.KCAL_TO_GJ, 3),
+            "energy_saved_gj_h": round(-d_kcal * config.KCAL_TO_GJ, 3),
+            "cost_change_per_h": None if d_cost is None else round(d_cost, 1),
+            "cost_saved_per_h": None if d_cost is None else round(-d_cost, 1),
+            "price_configured": bool(price),
+        })
+
+    saved_kcal_h = -tot["kcal_h"]
+    saved_cost_h = -tot["cost_h"] if priced_any else None
+
+    # thermal substitution rate (AFR share of total fuel heat)
+    tsr_now = 100 * afr_now / heat_now if heat_now else None
+    tsr_rec = 100 * afr_rec / heat_rec if heat_rec else None
+
+    # specific heat consumption (kcal per kg clinker) from kiln feed
+    shc = None
+    feed = snapshot.get(config.KILN_FEED_TAG)
+    if feed:
+        clinker_kg_h = float(feed) * config.CLINKER_PER_FEED * 1000.0
+        if clinker_kg_h > 0:
+            shc = {"now": round(heat_now / clinker_kg_h, 1),
+                   "recommended": round(heat_rec / clinker_kg_h, 1),
+                   "saved": round(saved_kcal_h / clinker_kg_h, 2),
+                   "clinker_tph": round(float(feed) * config.CLINKER_PER_FEED, 1)}
+
+    out = {
+        "available": True,
+        "currency": config.CURRENCY,
+        "streams": rows,
+        "total": {
+            "energy_saved_gj_h": round(saved_kcal_h * config.KCAL_TO_GJ, 3),
+            "energy_saved_gj_day": round(saved_kcal_h * config.KCAL_TO_GJ * 24, 1),
+            "energy_saved_gj_year": round(saved_kcal_h * config.KCAL_TO_GJ * 24 * days_per_year, 0),
+            "energy_saved_mkcal_h": round(saved_kcal_h / 1e6, 2),
+            "heat_now_gj_h": round(heat_now * config.KCAL_TO_GJ, 2),
+            "heat_rec_gj_h": round(heat_rec * config.KCAL_TO_GJ, 2),
+        },
+        "tsr": None if tsr_now is None else {
+            "now_pct": round(tsr_now, 2), "recommended_pct": round(tsr_rec, 2),
+            "change_pct_points": round(tsr_rec - tsr_now, 2)},
+        "specific_heat_kcal_per_kg_clinker": shc,
+        "cost": None if saved_cost_h is None else {
+            "saved_per_h": round(saved_cost_h, 1),
+            "saved_per_day": round(saved_cost_h * 24, 0),
+            "saved_per_year": round(saved_cost_h * 24 * days_per_year, 0),
+        },
+        "prices_configured": priced_any,
+        "streams_missing_price": sorted(set(missing_price)),
+        "days_per_year": days_per_year,
+    }
+    return out
+
+
+def _assumptions(guardrail: float, lam: float) -> dict:
+    return {
+        "guardrail_pct": round(100 * guardrail, 1),
+        "lambda_afr": lam,
+        "operating_days_per_year": 330,
+        "coal_price_per_t": config.COAL_PRICE_PER_T or None,
+        "coal_cv_kcal_kg": 5200,
+        "afr_cv_kcal_kg": 2500,
+    }
+
+
 def correlation(tags: list[str], start: str | None, end: str | None,
                 bucket: str = "15min") -> dict:
     tags = db.safe_tags(tags)

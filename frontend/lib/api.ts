@@ -44,6 +44,9 @@ export const api = {
   roadmap: () => get<Milestone[]>("/api/roadmap"),
   overview: () => get("/api/overview"),
   latest: () => get("/api/latest"),
+  advisory: () => get("/api/advisory"),
+  trend: (tag = "423CI400_TT_4", minutes = 60) =>
+    get(`/api/trend?tag=${tag}&minutes=${minutes}`),
   series: (tags: string[], p: { start?: string; end?: string; bucket?: string; in_load?: boolean } = {}) => {
     const q = new URLSearchParams({ tags: tags.join(",") });
     if (p.start) q.set("start", p.start);

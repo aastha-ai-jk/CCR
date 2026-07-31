@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime as _dt
 
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -159,21 +160,27 @@ def lab_clinker(limit: int = 500):
         "SELECT * FROM lab_clinker ORDER BY ts DESC LIMIT :n", {"n": limit}))
 
 
-@app.get("/api/overview")
-def overview():
-    s = _snapshot()
-    snap = dict(s["values"])
-    snap["ts"] = s["ts"]
+def _lab_conditions() -> dict:
+    """Latest lab quality values that vote the operating-state band."""
     lime = db.q("SELECT free_lime, liter_weight, liq FROM lab_clinker "
                 "WHERE free_lime IS NOT NULL ORDER BY ts DESC LIMIT 1")
     doc = db.q("SELECT doc FROM lab_hotmeal WHERE doc IS NOT NULL ORDER BY ts DESC LIMIT 1")
-    conditions = {}
+    conditions: dict = {}
     if len(lime):
         conditions.update({"free_lime": float(lime["free_lime"][0]),
                            "liter_weight": float(lime["liter_weight"][0]),
                            "liquid": float(lime["liq"][0])})
     if len(doc):
         conditions["doc"] = float(doc["doc"][0])
+    return conditions
+
+
+@app.get("/api/overview")
+def overview():
+    s = _snapshot()
+    snap = dict(s["values"])
+    snap["ts"] = s["ts"]
+    conditions = _lab_conditions()
     # PLC state-setting vars + current temp so the band/state votes use live data
     conditions["current_temp"] = snap.get("423CI400_TT_4")
     for t in analysis.STATE_PLC:
@@ -212,6 +219,94 @@ def latest():
 def live():
     """Alias of /api/latest kept explicit for the live dashboards."""
     return latest()
+
+
+@app.get("/api/trend")
+def trend(tag: str = "423CI400_TT_4", minutes: int = 60, max_points: int = 300):
+    """Rolling trend for one tag. Streams from the live OPC feed (`process_live`)
+    when it has data, otherwise falls back to the newest historical window.
+
+    Live and historical are never mixed: the two are ~2 weeks apart, so joining
+    them would draw a misleading straight line across the gap.
+    """
+    tag = (db.safe_tags([tag]) or ["423CI400_TT_4"])[0]
+    src, df = "live", None
+    try:                                    # ~2 s cadence -> 30 rows/min, allow margin
+        df = db.q(f'SELECT ts, "{tag}" AS v FROM process_live '
+                  f'ORDER BY ts DESC LIMIT :n', {"n": int(minutes * 45)})
+        df = df.dropna(subset=["v"]) if df is not None else None
+    except Exception:
+        df = None
+    if df is None or len(df) < 2:
+        src = "historical"
+        df = db.q(f'SELECT ts, "{tag}" AS v FROM process_1min '
+                  f'ORDER BY ts DESC LIMIT :n', {"n": int(minutes)})
+        df = df.dropna(subset=["v"])
+
+    if not len(df):
+        return {"tag": tag, "source": src, "points": []}
+
+    df["ts"] = pd.to_datetime(df["ts"])
+    df = df.sort_values("ts")
+    df = df[df["ts"] >= df["ts"].max() - pd.Timedelta(minutes=minutes)]
+    if len(df) > max_points:                # even downsample, always keep the last point
+        step = int(np.ceil(len(df) / max_points))
+        df = pd.concat([df.iloc[::step], df.iloc[[-1]]]).drop_duplicates(subset=["ts"])
+    df["v"] = pd.to_numeric(df["v"], errors="coerce").round(2)
+    fmt = "%H:%M" if src == "live" else "%d-%b %H:%M"
+    return {
+        "tag": tag, "name": db.tag_names().get(tag, tag), "source": src,
+        "window_min": minutes,
+        "from": df["ts"].min().strftime("%Y-%m-%d %H:%M:%S"),
+        "to": df["ts"].max().strftime("%Y-%m-%d %H:%M:%S"),
+        "points": [{"t": t.strftime(fmt), "v": (None if pd.isna(v) else float(v))}
+                   for t, v in zip(df["ts"], df["v"])],
+    }
+
+
+@app.get("/api/advisory")
+def advisory():
+    """Live fuel-saving advisory for the CURRENT plant state: the cheapest
+    in-band, interlock-safe fuel mix within one guarded move, plus the saving
+    that would represent. Estimate of potential — see `assumptions`."""
+    s = _snapshot()
+    snap = s["values"]
+    conditions = _lab_conditions()
+    conditions["current_temp"] = snap.get("423CI400_TT_4")
+    for t in analysis.STATE_PLC:
+        if snap.get(t) is not None:
+            conditions[t] = snap[t]
+    levers = {k: snap[k] for k in analysis.MV if snap.get(k) is not None}
+
+    now = analysis.simulate(levers, conditions)
+    adv = analysis.advise(levers, conditions)
+    adv["ts"] = s["ts"]
+    adv["source"] = s["source"]
+    p = now["prediction"]["423CI400_TT_4"]
+    adv["baseline"] = {
+        "predicted_temp": p["mean"], "p10": p["p10"], "p90": p["p90"],
+        "temp_in_band": now["temp_in_band"],
+        "all_interlocks_ok": now["all_interlocks_ok"],
+        "horizon_min": now["horizon_min"],
+    }
+    adv["live_actual_temp"] = snap.get("423CI400_TT_4")
+    if config.COAL_PRICE_PER_T and adv.get("feasible"):
+        sv = adv["saving"]
+        adv["saving"]["cost_per_year"] = round(
+            sv["coal_tpy"] * config.COAL_PRICE_PER_T, 0)
+        adv["saving"]["currency"] = config.CURRENCY
+    # per-parameter energy + money breakdown
+    adv["breakdown"] = analysis.savings_breakdown(
+        adv, snap, days_per_year=adv["assumptions"]["operating_days_per_year"])
+    return adv
+
+
+@app.get("/api/savings")
+def savings():
+    """Per-parameter fuel / energy / cost effect of following the live advisory."""
+    a = advisory()
+    return {"ts": a.get("ts"), "source": a.get("source"), "mode": a.get("mode"),
+            "moves": a.get("moves", []), "breakdown": a.get("breakdown")}
 
 
 @app.get("/api/simulate/defaults")
