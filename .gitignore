@@ -8,6 +8,13 @@ frontend/.next/
 # runtime logs
 *.log
 data/*.parquet
+# raw historian exports (large; live outside git)
+data/*.csv
+# trained model binaries (regenerable via twin/train_* and twin/bench);
+# the small metrics/results JSONs ARE committed
+models/*.pkl
+models/*.pt
 # NOTE: .env and data/*.sqlite ARE committed at the user's request.
 #   .env currently holds only a placeholder DB password.
 #   The 106 MB sqlite is tracked via Git LFS (see .gitattributes).
+.gstack/

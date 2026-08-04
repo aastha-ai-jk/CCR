@@ -13,18 +13,31 @@ const TILES: { tag: string; label: string; unit: string }[] = [
   { tag: "433MD140_TQ", label: "Kiln Torque", unit: "Nm" },
 ];
 
+type Window = "day" | "week" | "month";
+const WINDOWS: { key: Window; label: string }[] = [
+  { key: "day", label: "Day" },
+  { key: "week", label: "Week" },
+  { key: "month", label: "Month" },
+];
+
 export default function Overview() {
   const [ov, setOv] = useState<any>(null);
   const [trend, setTrend] = useState<any[]>([]);
+  const [win, setWin] = useState<Window>("week");
 
   useEffect(() => {
     const load = () => api.overview().then(setOv).catch(console.error);
     load();
     const id = setInterval(load, 2500);
-    api.series(["423CI400_TT_4"], { bucket: "30min", start: "2026-07-11", end: "2026-07-19" })
-      .then((r: any) => setTrend(r.points)).catch(console.error);
     return () => clearInterval(id);
   }, []);
+
+  // Reload the temperature trend whenever the Day/Week/Month window changes.
+  useEffect(() => {
+    setTrend([]);
+    api.series(["423CI400_TT_4"], { window: win })
+      .then((r: any) => setTrend(r.points)).catch(console.error);
+  }, [win]);
 
   if (!ov) return <Loading label="Connecting to Kiln-3 twin backend…" />;
   const src = ov.source;
@@ -56,7 +69,21 @@ export default function Overview() {
       </header>
 
       <div className="grid grid-cols-12 gap-4">
-        <Panel title="Calciner Outlet Temperature — the controlled variable" className="col-span-12 lg:col-span-8">
+        <Panel title="Calciner Outlet Temperature — the controlled variable" className="col-span-12 lg:col-span-8"
+          right={
+            <div className="flex items-center gap-1 panel-2 p-0.5 rounded-md">
+              {WINDOWS.map((w) => (
+                <button key={w.key} onClick={() => setWin(w.key)}
+                  className={`px-2.5 py-1 text-xs rounded transition-colors ${
+                    win === w.key
+                      ? "bg-[var(--accent)] text-[#0b1220] font-semibold"
+                      : "text-[var(--muted)] hover:text-[var(--ink)]"
+                  }`}>
+                  {w.label}
+                </button>
+              ))}
+            </div>
+          }>
           <div className="flex items-end gap-6 mb-2">
             <div className="mono text-5xl font-bold glow" style={{ color: inBand ? "var(--ok)" : "var(--warn)" }}>
               {temp?.toFixed(0)}<span className="text-lg text-[var(--muted)] ml-1">°C</span>
