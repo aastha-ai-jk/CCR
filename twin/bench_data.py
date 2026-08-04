@@ -27,35 +27,14 @@ SEQ_COLS: list[str] = [*MV, *STATE_PLC, CV]
 
 _GAP_LO, _GAP_HI = 4 * 60, 7 * 60  # forward-gap guard (s), like the twin
 
-# ---- enriched feature set (GBT v2) — all regime-safe by construction --------
-_EXTRA_MOM = (10, 15, 30)          # longer temperature-momentum windows (min)
-_DEV_TAGS = ["423CN150_TT_1", "423CN250_TT_1", "423KR405_TT_3",
-             "423KR405_TT_4", "423DU415_TT"]   # hot-side temps as DEVIATION from CV
-_RAW_EXTRA = ["443KH050_TT1", "423CN_TEMP"]     # secondary air + PH outlet temp
-_SMOOTH_W = 3                      # smoothed target: 3-min centred mean at t+Δ
+# The v2 enrichment now lives in the production module (twin.features) since
+# its promotion; the bench simply uses the (extended) production feature set.
+_SMOOTH_W = F.SMOOTH_W             # smoothed target: 3-min centred mean at t+Δ
 
 
 def extended_columns() -> list[str]:
-    """Production feature set + the v2 enrichment columns (order fixed)."""
-    return (F.feature_columns()
-            + [f"{CV}__mom{n}" for n in _EXTRA_MOM]
-            + [f"{CV}__roll15_std"]
-            + [f"{t}__devCV" for t in _DEV_TAGS]
-            + list(_RAW_EXTRA)
-            + ["hod_sin", "hod_cos"])
-
-
-def _enrich(df: pd.DataFrame) -> pd.DataFrame:
-    """Add the v2 columns: long momentum, hot-side deviations, time-of-day."""
-    for n in _EXTRA_MOM:
-        df[f"{CV}__mom{n}"] = df[CV].shift(n) - df[CV]
-    df[f"{CV}__roll15_std"] = df[CV].rolling(15, min_periods=5).std()
-    for t in _DEV_TAGS:
-        df[f"{t}__devCV"] = df[t] - df[CV]
-    hour = df["ts"].dt.hour + df["ts"].dt.minute / 60.0
-    df["hod_sin"] = np.sin(2 * np.pi * hour / 24)
-    df["hod_cos"] = np.cos(2 * np.pi * hour / 24)
-    return df
+    """The production feature set (v2 enrichment included since promotion)."""
+    return F.feature_columns()
 
 
 def _load_engineered() -> pd.DataFrame:
@@ -71,9 +50,9 @@ def _load_engineered() -> pd.DataFrame:
     # feed gate (control actions only apply above this — same rule as the twin)
     df = df[df[config.KILN_FEED_TAG] > config.KILN_FEED_MIN_TPH].reset_index(drop=True)
 
-    # analyser-valid masking + lags/rolls/rates from the production feature
-    # module, then the v2 enrichment columns
-    return _enrich(F._engineer(df))
+    # analyser-valid masking + lags/rolls/rates + v2 enrichment, all from the
+    # production feature module (single source of truth since promotion)
+    return F._engineer(df)
 
 
 def build(sample: int | None = None) -> dict:

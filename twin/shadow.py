@@ -140,6 +140,14 @@ def tick(eng) -> str:
     for t in analysis.STATE_PLC:
         if _num(snap.get(t)) is not None:
             conditions[t] = _num(snap.get(t))
+    # v2 twin context: hot-side temps + secondary-air/PH-outlet from the live snapshot
+    try:
+        from twin.features import SERVE_CONTEXT_TAGS
+        for t in SERVE_CONTEXT_TAGS:
+            if _num(snap.get(t)) is not None:
+                conditions[t] = _num(snap.get(t))
+    except Exception:
+        pass
     conditions.update(_lab_conditions(eng))
     levers = {mv: _num(snap.get(mv)) for mv in analysis.MV if _num(snap.get(mv)) is not None}
 

@@ -24,18 +24,19 @@ MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 PKL_PATH = MODELS_DIR / "twin_gbt.pkl"
 METRICS_PATH = MODELS_DIR / "metrics.json"
 
+# v2 recipe (validated on the Model Bench, 2026-08-04): L1 objective for the
+# temperature mean, deeper trees, more rounds with early stopping.
 _BASE_PARAMS = {
-    "learning_rate": 0.05,
-    "num_leaves": 31,
-    "min_data_in_leaf": 100,
+    "learning_rate": 0.03,
+    "num_leaves": 127,
+    "min_data_in_leaf": 20,
     "feature_fraction": 0.8,
     "bagging_fraction": 0.8,
     "bagging_freq": 1,
-    "lambda_l2": 2.0,
     "max_depth": -1,
     "verbose": -1,
 }
-_NUM_ROUNDS = 600
+_NUM_ROUNDS = 2000
 _EARLY_STOP = 40
 
 
@@ -94,22 +95,27 @@ def train(sample: int | None) -> dict:
     }
 
     # --- temperature: mean + prediction interval --------------------------
-    # Predict the 5-min *change* (regime-invariant); serving adds back CV(t).
-    # Absolute-temp trees fail under the plant's ~30 degC band shifts between
-    # operating states — the delta target mirrors analysis._matrix's dtemp.
+    # v2: TRAIN on the noise-smoothed 5-min *change* (regime-invariant; the
+    # 3-min centred mean strips ~sensor-noise from the label), but REPORT
+    # accuracy against the raw target — no metric flattery.
     # NB: boosters output temp(t+Δ) - CV(t); callers add current_temp (CV(t)).
-    delta = y["temp"] - cv0
-    temp = _folds(x, delta, split, extra=cv0)
-    (x_tr, dy_tr, _), (x_val, dy_val, _), (x_te, dy_te, cv_te) = (
+    delta_s = y["temp_smooth"] - cv0
+    delta_raw = y["temp"] - cv0
+    mask_t = delta_s.notna() & delta_raw.notna()
+    temp = _folds(x[mask_t.values], delta_s[mask_t.values],
+                  split[mask_t.values], extra=cv0[mask_t.values])
+    raw_te = delta_raw[mask_t.values][(split[mask_t.values] == "test").values]
+    (x_tr, dy_tr, _), (x_val, dy_val, _), (x_te, _, cv_te) = (
         temp["train"], temp["val"], temp["test"])
-    mean = _fit(x_tr, dy_tr, x_val, dy_val, "regression")          # l2
+    mean = _fit(x_tr, dy_tr, x_val, dy_val, "regression_l1")       # v2: L1
     p10 = _fit(x_tr, dy_tr, x_val, dy_val, "quantile", alpha=0.1)
     p90 = _fit(x_tr, dy_tr, x_val, dy_val, "quantile", alpha=0.9)
     bundle["temp"] = {"mean": mean, "p10": p10, "p90": p90}
     bundle["temp_delta"] = True     # boosters predict temp(t+Δ) - CV(t); add CV(t)
+    bundle["version"] = "v2"
 
     cv_te = cv_te.to_numpy(float)
-    yt = dy_te.to_numpy(float) + cv_te                             # absolute truth
+    yt = raw_te.to_numpy(float) + cv_te                            # RAW absolute truth
     pred = mean.predict(x_te) + cv_te
     lo, hi = p10.predict(x_te) + cv_te, p90.predict(x_te) + cv_te
     temp_metrics = _scores(yt, pred)

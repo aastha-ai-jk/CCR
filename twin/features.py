@@ -35,6 +35,15 @@ _SAFETY_GROUPS = {
 _LAG_MIN = (1, 3, 5)                     # short lags for CV momentum + calciner coal
 _ROLL_WIN = 5                           # 5-min rolling window
 _RATE_MIN = 3                           # rate-of-change span per lever
+# --- v2 enrichment (promoted from the Model Bench winner, 2026-08-04) -------
+_EXTRA_MOM = (10, 15, 30)               # longer CV-momentum windows (min)
+_DEV_TAGS = ["423CN150_TT_1", "423CN250_TT_1", "423KR405_TT_3",
+             "423KR405_TT_4", "423DU415_TT"]   # hot-side temps as DEVIATION from CV
+_RAW_EXTRA = ["443KH050_TT1", "423CN_TEMP"]     # secondary air + PH outlet temp
+SMOOTH_W = 3                            # training target: 3-min centred mean at t+Δ
+# live tags the serving layer should pass through in `conditions` so the
+# deviation features use real values instead of medians
+SERVE_CONTEXT_TAGS: list[str] = [*_DEV_TAGS, *_RAW_EXTRA]
 _O2_MAX = 15.0                          # analyser reading above this = purge/invalid
 _GAP_LO, _GAP_HI = 4 * 60, 7 * 60       # forward-gap guard (s), like analysis._matrix
 _DOC_LO, _DOC_HI = 85.0, 100.0          # valid hot-meal degree-of-calcination window
@@ -56,12 +65,18 @@ def feature_columns() -> list[str]:
     cols += [f"{CALCINER_COAL}__roll{_ROLL_WIN}_mean",
              f"{CALCINER_COAL}__roll{_ROLL_WIN}_std"]
     cols += [f"{mv}__rate{_RATE_MIN}" for mv in MV]  # lever rate-of-change
+    # v2 enrichment
+    cols += [f"{CV}__mom{n}" for n in _EXTRA_MOM]
+    cols += [f"{CV}__roll15_std"]
+    cols += [f"{t}__devCV" for t in _DEV_TAGS]
+    cols += list(_RAW_EXTRA)
+    cols += ["hod_sin", "hod_cos"]
     return cols
 
 
 def _raw_columns() -> list[str]:
     """DB columns needed to engineer features (deduplicated, order-preserving)."""
-    need = [CV, *MV, *DV_STATE]
+    need = [CV, *MV, *DV_STATE, *_DEV_TAGS, *_RAW_EXTRA]
     for run_tag, tags, o2_tag in _SAFETY_GROUPS.values():
         need += [run_tag, o2_tag, *tags]
     return list(dict.fromkeys(need))
@@ -92,6 +107,17 @@ def _engineer(df: pd.DataFrame) -> pd.DataFrame:
 
     for mv in MV:
         df[f"{mv}__rate{_RATE_MIN}"] = df[mv].diff(_RATE_MIN)
+
+    # v2 enrichment: long momentum, 15-min volatility, hot-side deviations,
+    # time-of-day encoding (all regime-safe by construction)
+    for n in _EXTRA_MOM:
+        df[f"{CV}__mom{n}"] = df[CV].shift(n) - df[CV]
+    df[f"{CV}__roll15_std"] = df[CV].rolling(15, min_periods=5).std()
+    for t in _DEV_TAGS:
+        df[f"{t}__devCV"] = df[t] - df[CV]
+    hour = df["ts"].dt.hour + df["ts"].dt.minute / 60.0
+    df["hod_sin"] = np.sin(2 * np.pi * hour / 24)
+    df["hod_cos"] = np.cos(2 * np.pi * hour / 24)
     return df
 
 
@@ -152,6 +178,10 @@ def build_training_data(sample: int | None = None) -> dict:
     dt_fwd = (df["ts"].shift(-DELTA) - df["ts"]).dt.total_seconds()
     fwd_ok = dt_fwd.between(_GAP_LO, _GAP_HI)
     y: dict[str, pd.Series] = {"temp": df[CV].shift(-DELTA).where(fwd_ok)}
+    # noise-reduced training target (v2): 3-min centred mean of CV around t+Δ.
+    # Models TRAIN on this; accuracy is always REPORTED against the raw target.
+    y["temp_smooth"] = (df[CV].rolling(SMOOTH_W, center=True).mean()
+                        .shift(-DELTA).where(fwd_ok))
     for tag in SAFETY:
         y[f"safety_{tag}"] = df[tag].shift(-DELTA).where(fwd_ok)
 
@@ -217,7 +247,23 @@ def build_feature_row(levers: dict, conditions: dict) -> pd.DataFrame:
     trend = float(conditions.get("temp_trend", 0.0) or 0.0)  # CV(t) - CV(t-DELTA)
     for n in _LAG_MIN:                               # CV(t-n) - CV(t) ~ -trend*n/DELTA
         row[f"{CV}__mom{n}"] = -trend * (n / DELTA)
+    for n in _EXTRA_MOM:                             # same linearised momentum, v2
+        row[f"{CV}__mom{n}"] = -trend * (n / DELTA)
     row[f"{CV}__roll{_ROLL_WIN}_dev"] = -trend / 2
+
+    # v2 serving: hot-side deviations + raw context from live conditions when
+    # provided (see SERVE_CONTEXT_TAGS); otherwise the recent-median default.
+    cur = conditions.get("current_temp")
+    for t in _DEV_TAGS:
+        if conditions.get(t) is not None and cur is not None:
+            row[f"{t}__devCV"] = float(conditions[t]) - float(cur)
+    for t in _RAW_EXTRA:
+        if conditions.get(t) is not None:
+            row[t] = float(conditions[t])
+    from datetime import datetime as _dt
+    _h = _dt.now().hour + _dt.now().minute / 60.0
+    row["hod_sin"] = float(np.sin(2 * np.pi * _h / 24))
+    row["hod_cos"] = float(np.cos(2 * np.pi * _h / 24))
 
     coal = row[CALCINER_COAL]                         # assume steady coal history
     for n in _LAG_MIN:

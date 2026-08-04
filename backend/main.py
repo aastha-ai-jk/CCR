@@ -193,6 +193,14 @@ def overview():
     for t in analysis.STATE_PLC:
         if snap.get(t) is not None:
             conditions[t] = snap[t]
+    # v2 twin context: hot-side temps + secondary-air/PH-outlet, live not median
+    try:
+        from twin.features import SERVE_CONTEXT_TAGS
+        for t in SERVE_CONTEXT_TAGS:
+            if snap.get(t) is not None:
+                conditions[t] = snap[t]
+    except Exception:
+        pass
 
     # actual (not predicted) interlock status from the latest snapshot
     names = db.tag_names()
