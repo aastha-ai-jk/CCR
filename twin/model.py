@@ -88,11 +88,37 @@ def _t0(conditions: dict) -> float:
         return 900.0  # mid of the 880-940 degC operating bands
 
 
+def _conformal_q() -> float | None:
+    """Live conformal width for the t+5 interval (see twin.monitor).
+
+    ``models/conformal.json`` holds q80 of matured |shadow residuals| over the
+    last few days — an 80%-coverage half-width measured on the LIVE plant, not
+    the offline test split. Cached with an mtime check so serving stays fast.
+    """
+    path = MODEL_PATH.parent / "conformal.json"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    cached = _CACHE.get("conformal")
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        import json
+        q = float(json.loads(path.read_text())["q80"])
+        _CACHE["conformal"] = (mtime, q)
+        return q
+    except Exception:
+        return None
+
+
 def _temp_from(bundle: dict, X, conditions: dict) -> tuple[float, float, float]:
     """Predict (mean, p10, p90) calciner temp, reconstructing the delta target.
 
     The temp boosters are trained on the regime-invariant 5-min *change*
     (bundle['temp_delta'] == True), so absolute temp = current_temp + delta.
+    When a live conformal width is available it REPLACES the offline quantile
+    interval — calibrated on the running plant via shadow mode.
     """
     t = bundle["temp"]
     raw_mean = float(t["mean"].predict(X)[0])
@@ -102,6 +128,9 @@ def _temp_from(bundle: dict, X, conditions: dict) -> tuple[float, float, float]:
         base = _t0(conditions)
         raw_mean, raw_p10, raw_p90 = base + raw_mean, base + raw_p10, base + raw_p90
     lo, hi = min(raw_p10, raw_p90), max(raw_p10, raw_p90)
+    q = _conformal_q()
+    if q is not None:
+        lo, hi = raw_mean - q, raw_mean + q
     return raw_mean, lo, hi
 
 

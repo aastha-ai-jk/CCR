@@ -42,5 +42,17 @@ module.exports = {
       max_restarts: 30,
       env: { PYTHONUNBUFFERED: "1" },
     },
+    {
+      // 6-hourly monitoring job: accuracy trail, conformal recalibration,
+      // AFR summary, followed-vs-ignored M&V. Appends models/monitor_log.jsonl.
+      name: "ccr-monitor",
+      cwd: "/home/antpc/CCR-Project",
+      script: "/home/antpc/CCR-Project/.venv/bin/python",
+      args: "-m twin.monitor",
+      interpreter: "none",
+      autorestart: false,
+      cron_restart: "0 */6 * * *",
+      env: { PYTHONUNBUFFERED: "1" },
+    },
   ],
 };

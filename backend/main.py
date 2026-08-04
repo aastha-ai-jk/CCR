@@ -388,6 +388,30 @@ def bench():
     return _json_safe({"available": True, **_json.loads(p.read_text())})
 
 
+@app.get("/api/monitor")
+def monitor(limit: int = 40):
+    """Multi-day monitoring: accuracy trail (monitor_log.jsonl), the live
+    conformal calibration, and the latest AFR fuel-quality readings."""
+    import json as _json
+    from pathlib import Path as _Path
+    mdir = _Path(__file__).resolve().parent.parent / "models"
+    out: dict = {"available": True}
+    log_p = mdir / "monitor_log.jsonl"
+    if log_p.exists():
+        lines = log_p.read_text().strip().splitlines()[-int(limit):]
+        out["log"] = [_json.loads(l) for l in lines]
+    else:
+        out["log"] = []
+    conf_p = mdir / "conformal.json"
+    out["conformal"] = _json.loads(conf_p.read_text()) if conf_p.exists() else None
+    try:
+        out["afr_recent"] = _clean_records(
+            db.q("SELECT * FROM afr_quality ORDER BY ts DESC LIMIT 120").iloc[::-1])
+    except Exception:
+        out["afr_recent"] = []
+    return _json_safe(out)
+
+
 @app.get("/api/shadow")
 def shadow(limit: int = 240):
     """Shadow mode: the twin's live prediction/recommendation log beside the CCR,
