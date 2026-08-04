@@ -242,6 +242,8 @@ def simulate(levers: dict, conditions: dict | None = None, k: int = 400) -> dict
         "contributions": contributions,
         "relationships": relationships,
         "t0": round(T0, 1), "horizon_min": DELTA, "method": method,
+        # v3: predicted temperature path (t+5/10/15/30) when the twin serves
+        "trajectory": (core or {}).get("trajectory"),
     }
 
 

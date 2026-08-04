@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, OptimizeResult } from "@/lib/api";
 import Mimic from "@/components/Mimic";
 import { Panel, Stat, Badge, Loading } from "@/components/ui";
+import { ComposedChart, Line, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceArea } from "recharts";
 
 const CONDITIONS = [
   { key: "free_lime", label: "Free lime (clinker)", min: 0.5, max: 2.5, step: 0.1, def: 1.2, live: false },
@@ -266,6 +267,32 @@ export default function Simulator() {
               </>
             )}
           </Panel>
+
+          {/* v3: predicted temperature trajectory (t+5/10/15/30) */}
+          {res?.trajectory && res.trajectory.length > 1 && (
+            <Panel title="Predicted trajectory — where these setpoints take the calciner">
+              <div style={{ height: 180 }}>
+                <ResponsiveContainer>
+                  <ComposedChart
+                    data={[{ min: 0, mean: res.t0, band: [res.t0, res.t0] },
+                           ...res.trajectory.map((p: any) => ({ min: p.min, mean: p.mean, band: [p.p10, p.p90] }))]}
+                    margin={{ top: 5, right: 10, left: -14, bottom: 0 }}>
+                    <CartesianGrid stroke="#223252" strokeDasharray="3 3" />
+                    <XAxis dataKey="min" type="number" domain={[0, 30]} ticks={[0, 5, 10, 15, 30]}
+                      tick={{ fill: "#8ea3c4", fontSize: 10 }} unit="m" />
+                    <YAxis domain={["auto", "auto"]} tick={{ fill: "#8ea3c4", fontSize: 10 }} />
+                    <Tooltip contentStyle={{ background: "#16233d", border: "1px solid #223252", borderRadius: 8, color: "#e6edf7" }} />
+                    <ReferenceArea y1={res.target_band.low} y2={res.target_band.high} fill="#22c55e" fillOpacity={0.1} />
+                    <Area type="monotone" dataKey="band" stroke="none" fill="#38bdf8" fillOpacity={0.15} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="mean" stroke="#38bdf8" strokeWidth={1.8} dot={{ r: 2.5 }} isAnimationActive={false} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="text-[11px] text-[var(--muted)] mt-1">
+                Mean path with P10–P90 uncertainty; green = the state target band. Horizons: now → +5 → +10 → +15 → +30 min at held setpoints.
+              </div>
+            </Panel>
+          )}
 
           {/* predicted-vs-live accuracy meter */}
           <Panel title="Twin vs live plant">

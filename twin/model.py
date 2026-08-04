@@ -138,8 +138,39 @@ def predict_core(levers: dict, conditions: dict) -> dict | None:
             bk = bundle.get("quality", {}).get(key)
             quality[key] = _r(float(bk.predict(X)[0]), 3) if bk is not None else None
 
-        return {"prediction": prediction, "contributions": contributions,
-                "quality": quality, "method": METHOD}
+        out = {"prediction": prediction, "contributions": contributions,
+               "quality": quality, "method": METHOD}
+        traj = predict_trajectory(levers, conditions)
+        if traj:
+            out["trajectory"] = traj
+        return out
+    except Exception:
+        return None
+
+
+def predict_trajectory(levers: dict, conditions: dict) -> list[dict] | None:
+    """Predicted temperature path over every trained horizon (v3 bundles).
+
+    Returns [{"min": h, "mean": ..., "p10": ..., "p90": ...}, ...] with the
+    delta reconstructed onto current_temp, or None when unavailable.
+    """
+    bundle = _load()
+    if bundle is None or not bundle.get("temp_multi"):
+        return None
+    try:
+        X = _feature_row(levers, conditions)
+        base = _t0(conditions)
+        out = []
+        for h in sorted(bundle["temp_multi"]):
+            heads = bundle["temp_multi"][h]
+            m = float(heads["mean"].predict(X)[0])
+            lo = float(heads["p10"].predict(X)[0])
+            hi = float(heads["p90"].predict(X)[0])
+            if bundle.get("temp_delta"):
+                m, lo, hi = base + m, base + lo, base + hi
+            lo, hi = min(lo, hi), max(lo, hi)
+            out.append({"min": int(h), "mean": _r(m), "p10": _r(lo), "p90": _r(hi)})
+        return out
     except Exception:
         return None
 

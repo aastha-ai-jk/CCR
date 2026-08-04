@@ -25,6 +25,19 @@ CV = analysis.CV
 # Penalty added to the objective for an infeasible trial so the study still
 # converges toward the feasible region even when early trials violate.
 _INFEASIBLE_PENALTY = 100.0
+_MOVE_W = 0.15        # movement penalty weight (calm, followable advice)
+_CONF_W = 0.20        # reward weight for band-confidence (chance constraint)
+
+
+def _band_confidence(point: dict, blo: float, bhi: float) -> float:
+    """P(temp in band) from a (mean, p10, p90) triple via a normal approx."""
+    import math
+    sigma = max((point["p90"] - point["p10"]) / 2.5631, 1e-6)
+
+    def cdf(v: float) -> float:
+        return 0.5 * (1 + math.erf((v - point["mean"]) / (sigma * math.sqrt(2))))
+
+    return max(0.0, min(1.0, cdf(bhi) - cdf(blo)))
 
 
 def _bounds() -> dict[str, tuple[float, float]]:
@@ -95,6 +108,7 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
     bounds = _bounds()
     state, blo, bhi, votes = _band(conditions)
     defaults = analysis.feature_defaults()
+    base_vals = {t: float(conditions.get(t, defaults.get(t, 0.0))) for t in OPT_LEVERS}
 
     def objective(trial: "optuna.Trial") -> float:
         levers = {t: trial.suggest_float(t, *bounds[t]) for t in OPT_LEVERS}
@@ -102,21 +116,37 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
         if core is None:
             raise optuna.TrialPruned()
         pred = core["prediction"]
-        temp = pred[CV]["mean"]
+        traj = core.get("trajectory") or [
+            {"min": analysis.DELTA, **pred[CV]}]        # fallback: single horizon
         inter = _interlocks(pred)
-        in_band = blo <= temp <= bhi
         ok_inter = all(i["pass"] for i in inter if i["pass"] is not None)
+
+        # trajectory feasibility: the plan must REACH the band at some horizon
+        # and still be there at the final one (a sustained move, not a spike)
+        reach = next((p["min"] for p in traj if blo <= p["mean"] <= bhi), None)
+        settled = traj[-1]
+        stays = blo <= settled["mean"] <= bhi
+        in_band = reach is not None and stays
+        conf = _band_confidence(settled, blo, bhi)      # chance constraint (P10/P90)
+
         coal_norm, afr_norm = _norms(levers, bounds)
-        raw = coal_norm - afr_norm
+        move_pen = float(np.mean([abs(levers[t] - base_vals[t])
+                                  / max(bounds[t][1] - bounds[t][0], 1e-6)
+                                  for t in OPT_LEVERS]))
+        raw = (coal_norm - afr_norm + _MOVE_W * move_pen - _CONF_W * conf
+               + 0.01 * ((reach or 30) / 5.0))          # prefer reaching sooner
 
         trial.set_user_attr("levers", levers)
         trial.set_user_attr("pred", pred)
+        trial.set_user_attr("traj", traj)
+        trial.set_user_attr("reach", reach)
+        trial.set_user_attr("conf", conf)
         trial.set_user_attr("raw", raw)
         trial.set_user_attr("feasible", bool(in_band and ok_inter))
 
         penalty = 0.0
         if not in_band:
-            penalty += _INFEASIBLE_PENALTY + abs(temp - (blo + bhi) / 2.0)
+            penalty += _INFEASIBLE_PENALTY + abs(settled["mean"] - (blo + bhi) / 2.0)
         if not ok_inter:
             penalty += _INFEASIBLE_PENALTY
         return raw + penalty
@@ -143,6 +173,9 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
     rec = best.user_attrs["levers"]
     pred = best.user_attrs["pred"]
     rec_temp = pred[CV]["mean"]
+    rec_traj = best.user_attrs.get("traj")
+    rec_reach = best.user_attrs.get("reach")
+    rec_conf = best.user_attrs.get("conf")
 
     # Baseline = current levers (fallback to recent medians) at current conditions.
     base_vals = {t: float(conditions.get(t, defaults.get(t, 0.0))) for t in OPT_LEVERS}
@@ -163,6 +196,10 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
            if in_band else
            "OUTSIDE the band — the gap is larger than one 5-min step can close; "
            "these setpoints move firing in the correct direction toward the band."),
+        (f"Trajectory reaches the band in ~{rec_reach} min and holds it; "
+         f"P(in band at t+30) ≈ {rec_conf:.0%}."
+         if rec_reach is not None and rec_conf is not None else
+         "Trajectory heads unavailable — single-horizon advisory."),
         ("All predicted interlocks satisfied."
          if all(i["pass"] for i in interlocks if i["pass"] is not None)
          else "WARNING: an interlock is predicted violated."),
@@ -194,4 +231,8 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
         "explanation": explanation,
         "n_trials": int(n_trials),
         "advisory": True,
+        # v3: predicted path under the recommendation + chance-constraint info
+        "trajectory": rec_traj,
+        "reach_min": rec_reach,
+        "band_confidence": _f(rec_conf, 3),
     }

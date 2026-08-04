@@ -3,7 +3,8 @@
     "mae": 7.372,
     "rmse": 10.294,
     "r2": 0.6853,
-    "interval_coverage": 0.8095
+    "interval_coverage": 0.8095,
+    "baseline_mae": 8.682
   },
   "baseline_persistence": {
     "temp": {
@@ -42,10 +43,40 @@
       "r2": -0.5415
     }
   },
-  "trained_at": "2026-08-04T04:55:55.796578+00:00",
+  "trained_at": "2026-08-04T05:27:25.481291+00:00",
   "nn": {
     "mae": 9.5642,
     "rmse": 12.205,
     "r2": 0.5414
+  },
+  "temp_horizons": {
+    "5": {
+      "mae": 7.372,
+      "rmse": 10.294,
+      "r2": 0.6853,
+      "interval_coverage": 0.8095,
+      "baseline_mae": 8.682
+    },
+    "10": {
+      "mae": 7.752,
+      "rmse": 11.14,
+      "r2": 0.6303,
+      "interval_coverage": 0.8133,
+      "baseline_mae": 9.574
+    },
+    "15": {
+      "mae": 7.905,
+      "rmse": 11.55,
+      "r2": 0.6016,
+      "interval_coverage": 0.8177,
+      "baseline_mae": 9.545
+    },
+    "30": {
+      "mae": 8.576,
+      "rmse": 12.544,
+      "r2": 0.5246,
+      "interval_coverage": 0.8291,
+      "baseline_mae": 10.185
+    }
   }
 }

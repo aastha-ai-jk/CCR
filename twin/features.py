@@ -23,6 +23,8 @@ from backend import db
 from backend.analysis import CV, DELTA, MV, SAFETY
 
 HORIZON_MIN = DELTA  # == analysis.DELTA (5 min calciner thermal dead-time)
+# v3: the twin predicts a TRAJECTORY — heads at each of these horizons (min).
+HORIZONS: tuple[int, ...] = (5, 10, 15, 30)
 
 # --- named process columns used as features -------------------------------
 CALCINER_COAL = "467RL400_TPH"          # strongest lever; gets its own lags/rolls
@@ -175,13 +177,20 @@ def build_training_data(sample: int | None = None) -> dict:
     feats = feature_columns()
 
     # dead-time-aligned targets: value at t+HORIZON, gap guarded to 4-7 min
+    y: dict[str, pd.Series] = {}
+    smooth_cv = df[CV].rolling(SMOOTH_W, center=True).mean()
+    for h in HORIZONS:
+        # per-horizon forward-gap guard: the row h steps ahead must really be
+        # ~h minutes ahead (rows are 1-min; tolerate one missing minute)
+        dt_h = (df["ts"].shift(-h) - df["ts"]).dt.total_seconds()
+        ok_h = dt_h.between(h * 60 - 60, h * 60 + 120)
+        y[f"temp_h{h}"] = df[CV].shift(-h).where(ok_h)              # raw truth
+        y[f"temp_smooth_h{h}"] = smooth_cv.shift(-h).where(ok_h)    # training target
+    # back-compat aliases for the primary 5-min horizon
+    y["temp"] = y[f"temp_h{DELTA}"]
+    y["temp_smooth"] = y[f"temp_smooth_h{DELTA}"]
     dt_fwd = (df["ts"].shift(-DELTA) - df["ts"]).dt.total_seconds()
     fwd_ok = dt_fwd.between(_GAP_LO, _GAP_HI)
-    y: dict[str, pd.Series] = {"temp": df[CV].shift(-DELTA).where(fwd_ok)}
-    # noise-reduced training target (v2): 3-min centred mean of CV around t+Δ.
-    # Models TRAIN on this; accuracy is always REPORTED against the raw target.
-    y["temp_smooth"] = (df[CV].rolling(SMOOTH_W, center=True).mean()
-                        .shift(-DELTA).where(fwd_ok))
     for tag in SAFETY:
         y[f"safety_{tag}"] = df[tag].shift(-DELTA).where(fwd_ok)
 

@@ -94,40 +94,46 @@ def train(sample: int | None) -> dict:
         "horizon_min": F.HORIZON_MIN,
     }
 
-    # --- temperature: mean + prediction interval --------------------------
-    # v2: TRAIN on the noise-smoothed 5-min *change* (regime-invariant; the
-    # 3-min centred mean strips ~sensor-noise from the label), but REPORT
-    # accuracy against the raw target — no metric flattery.
-    # NB: boosters output temp(t+Δ) - CV(t); callers add current_temp (CV(t)).
-    delta_s = y["temp_smooth"] - cv0
-    delta_raw = y["temp"] - cv0
-    mask_t = delta_s.notna() & delta_raw.notna()
-    temp = _folds(x[mask_t.values], delta_s[mask_t.values],
-                  split[mask_t.values], extra=cv0[mask_t.values])
-    raw_te = delta_raw[mask_t.values][(split[mask_t.values] == "test").values]
-    (x_tr, dy_tr, _), (x_val, dy_val, _), (x_te, _, cv_te) = (
-        temp["train"], temp["val"], temp["test"])
-    mean = _fit(x_tr, dy_tr, x_val, dy_val, "regression_l1")       # v2: L1
-    p10 = _fit(x_tr, dy_tr, x_val, dy_val, "quantile", alpha=0.1)
-    p90 = _fit(x_tr, dy_tr, x_val, dy_val, "quantile", alpha=0.9)
-    bundle["temp"] = {"mean": mean, "p10": p10, "p90": p90}
-    bundle["temp_delta"] = True     # boosters predict temp(t+Δ) - CV(t); add CV(t)
-    bundle["version"] = "v2"
+    # --- temperature: TRAJECTORY heads (mean + p10/p90 per horizon) --------
+    # v3: one head-set per horizon in features.HORIZONS. Each TRAINS on the
+    # noise-smoothed *change* over its horizon (regime-invariant) but is
+    # REPORTED against the raw target — no metric flattery.
+    # NB: boosters output temp(t+h) - CV(t); callers add current_temp (CV(t)).
+    bundle["temp_multi"] = {}
+    bundle["temp_delta"] = True
+    bundle["version"] = "v3"
+    metrics["temp_horizons"] = {}
+    for h in F.HORIZONS:
+        delta_s = y[f"temp_smooth_h{h}"] - cv0
+        delta_raw = y[f"temp_h{h}"] - cv0
+        mask_t = delta_s.notna() & delta_raw.notna()
+        temp = _folds(x[mask_t.values], delta_s[mask_t.values],
+                      split[mask_t.values], extra=cv0[mask_t.values])
+        raw_te = delta_raw[mask_t.values][(split[mask_t.values] == "test").values]
+        (x_tr, dy_tr, _), (x_val, dy_val, _), (x_te, _, cv_te) = (
+            temp["train"], temp["val"], temp["test"])
+        mean = _fit(x_tr, dy_tr, x_val, dy_val, "regression_l1")
+        p10 = _fit(x_tr, dy_tr, x_val, dy_val, "quantile", alpha=0.1)
+        p90 = _fit(x_tr, dy_tr, x_val, dy_val, "quantile", alpha=0.9)
+        bundle["temp_multi"][h] = {"mean": mean, "p10": p10, "p90": p90}
 
-    cv_te = cv_te.to_numpy(float)
-    yt = raw_te.to_numpy(float) + cv_te                            # RAW absolute truth
-    pred = mean.predict(x_te) + cv_te
-    lo, hi = p10.predict(x_te) + cv_te, p90.predict(x_te) + cv_te
-    temp_metrics = _scores(yt, pred)
-    temp_metrics["interval_coverage"] = round(
-        float(np.mean((yt >= lo) & (yt <= hi))), 4)
-    metrics["temp"] = temp_metrics
-
-    # persistence baseline: temp(t+Δ) == temp(t)
-    base = _scores(yt, cv_te)
-    metrics["baseline_persistence"] = {"temp": {"mae": base["mae"], "rmse": base["rmse"]}}
-    metrics["n_train"] = int(len(x_tr))
-    metrics["n_test"] = int(len(x_te))
+        cv_np = cv_te.to_numpy(float)
+        yt = raw_te.to_numpy(float) + cv_np                        # RAW absolute truth
+        pred = mean.predict(x_te) + cv_np
+        lo, hi = p10.predict(x_te) + cv_np, p90.predict(x_te) + cv_np
+        hm = _scores(yt, pred)
+        hm["interval_coverage"] = round(float(np.mean((yt >= lo) & (yt <= hi))), 4)
+        hm["baseline_mae"] = _scores(yt, cv_np)["mae"]              # persistence
+        metrics["temp_horizons"][str(h)] = hm
+        print(f"[twin] t+{h:>2}min  mae={hm['mae']}  r2={hm['r2']}  "
+              f"cov={hm['interval_coverage']}  persist={hm['baseline_mae']}")
+        if h == F.HORIZON_MIN:                                      # back-compat
+            bundle["temp"] = bundle["temp_multi"][h]
+            metrics["temp"] = hm
+            metrics["baseline_persistence"] = {
+                "temp": {"mae": hm["baseline_mae"], "rmse": _scores(yt, cv_np)["rmse"]}}
+            metrics["n_train"] = int(len(x_tr))
+            metrics["n_test"] = int(len(x_te))
 
     # --- safety signals ----------------------------------------------------
     bundle["safety"] = {}

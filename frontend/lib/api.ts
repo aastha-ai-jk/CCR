@@ -43,7 +43,11 @@ export interface Interval { mean: number; p10: number; p90: number; }
 export interface OptimizeInterlock {
   tag: string; name: string; rule: string; predicted: number | null; pass: boolean | null;
 }
+export interface TrajectoryPoint { min: number; mean: number; p10: number; p90: number }
 export interface OptimizeResult {
+  trajectory?: TrajectoryPoint[] | null;
+  reach_min?: number | null;
+  band_confidence?: number | null;
   recommended: Record<string, number>;
   predicted: { temp: Interval; safety: Record<string, number> };
   operating_state: string;
