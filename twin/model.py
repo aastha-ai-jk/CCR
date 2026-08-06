@@ -88,6 +88,40 @@ def _t0(conditions: dict) -> float:
         return 900.0  # mid of the 880-940 degC operating bands
 
 
+_BIAS_DAMP = 0.8      # apply 80% of the measured offset (stability margin)
+_BIAS_CLAMP = 10.0    # never shift more than this (degC) on a rolling estimate
+_BIAS_MIN_N = 30      # matured residuals needed before trusting the estimate
+
+
+def _live_bias() -> float:
+    """Offset-free correction: rolling 2-h signed bias of the RAW model vs the
+    realised plant (written by twin.shadow to ``models/live_bias.json``).
+
+    The model systematically over/under-predicts when running conditions drift
+    from the training year; adding back the (damped, clamped) measured offset
+    is the standard industrial fix. Returns the correction to ADD to raw
+    predictions (0.0 when unavailable). mtime-cached.
+    """
+    path = MODEL_PATH.parent / "live_bias.json"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return 0.0
+    cached = _CACHE.get("bias")
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        import json
+        d = json.loads(path.read_text())
+        c = 0.0
+        if int(d.get("n", 0)) >= _BIAS_MIN_N:
+            c = _BIAS_DAMP * max(-_BIAS_CLAMP, min(_BIAS_CLAMP, float(d["bias_2h"])))
+        _CACHE["bias"] = (mtime, c)
+        return c
+    except Exception:
+        return 0.0
+
+
 def _conformal_q() -> float | None:
     """Live conformal width for the t+5 interval (see twin.monitor).
 
@@ -127,11 +161,13 @@ def _temp_from(bundle: dict, X, conditions: dict) -> tuple[float, float, float]:
     if bundle.get("temp_delta"):
         base = _t0(conditions)
         raw_mean, raw_p10, raw_p90 = base + raw_mean, base + raw_p10, base + raw_p90
-    lo, hi = min(raw_p10, raw_p90), max(raw_p10, raw_p90)
+    c = _live_bias()                       # offset-free correction (may be 0)
+    mean = raw_mean + c
+    lo, hi = min(raw_p10, raw_p90) + c, max(raw_p10, raw_p90) + c
     q = _conformal_q()
     if q is not None:
-        lo, hi = raw_mean - q, raw_mean + q
-    return raw_mean, lo, hi
+        lo, hi = mean - q, mean + q
+    return mean, lo, hi
 
 
 def predict_core(levers: dict, conditions: dict) -> dict | None:
@@ -168,7 +204,8 @@ def predict_core(levers: dict, conditions: dict) -> dict | None:
             quality[key] = _r(float(bk.predict(X)[0]), 3) if bk is not None else None
 
         out = {"prediction": prediction, "contributions": contributions,
-               "quality": quality, "method": METHOD}
+               "quality": quality, "method": METHOD,
+               "bias_correction": _r(_live_bias(), 2)}
         traj = predict_trajectory(levers, conditions)
         if traj:
             out["trajectory"] = traj
@@ -189,6 +226,7 @@ def predict_trajectory(levers: dict, conditions: dict) -> list[dict] | None:
     try:
         X = _feature_row(levers, conditions)
         base = _t0(conditions)
+        c = _live_bias()                   # same offset applies along the path
         out = []
         for h in sorted(bundle["temp_multi"]):
             heads = bundle["temp_multi"][h]
@@ -197,6 +235,7 @@ def predict_trajectory(levers: dict, conditions: dict) -> list[dict] | None:
             hi = float(heads["p90"].predict(X)[0])
             if bundle.get("temp_delta"):
                 m, lo, hi = base + m, base + lo, base + hi
+            m, lo, hi = m + c, lo + c, hi + c
             lo, hi = min(lo, hi), max(lo, hi)
             out.append({"min": int(h), "mean": _r(m), "p10": _r(lo), "p90": _r(hi)})
         return out

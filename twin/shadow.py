@@ -140,13 +140,22 @@ def _afr_quality(eng, snap: dict, ts: str) -> str:
     """
     try:
         cut = (dt.datetime.now() - dt.timedelta(hours=2)).isoformat(timespec="seconds")
+        # residuals vs the RAW model output (pred_raw), so the serving-side
+        # offset correction cannot cancel this signal out of its own inputs
         r = pd.read_sql(text(
-            "SELECT actual_future - pred_mean AS resid FROM shadow_log "
-            "WHERE matured=1 AND ts >= :cut"), eng, params={"cut": cut})
+            "SELECT actual_future - COALESCE(pred_raw, pred_mean) AS resid "
+            "FROM shadow_log WHERE matured=1 AND ts >= :cut"),
+            eng, params={"cut": cut})
         n = int(len(r))
         if n < 6:
             return "afr: warming up"
         bias = float(r["resid"].mean())
+        # publish the rolling offset for the serving layer (offset-free correction)
+        import json as _json
+        from pathlib import Path as _Path
+        (_Path(__file__).resolve().parent.parent / "models" / "live_bias.json"
+         ).write_text(_json.dumps({"bias_2h": round(bias, 3), "n": n,
+                                   "updated": ts}))
         coal = _num(snap.get(COAL)) or 0.0
         afr_tph = ((_num(snap.get("261WF080_TPH")) or 0.0)
                    + ((_num(snap.get("LAFR_FT")) or 0.0)
@@ -207,7 +216,10 @@ def tick(eng) -> str:
     row = {
         "ts": ts, "horizon_ts": horizon_ts, "feed_gate": feed_gate,
         "actual_now": cur_temp, "pred_mean": pm["mean"], "pred_p10": pm["p10"],
-        "pred_p90": pm["p90"], "state": opt.get("operating_state"),
+        "pred_p90": pm["p90"],
+        # raw (pre-offset-correction) prediction — bias/AFR estimation input
+        "pred_raw": round(pm["mean"] - float(core.get("bias_correction") or 0.0), 2),
+        "state": opt.get("operating_state"),
         "band_lo": band.get("low"), "band_hi": band.get("high"),
         "in_band_now": int(bool(band.get("low") is not None
                                 and band["low"] <= cur_temp <= band["high"])),
@@ -237,6 +249,10 @@ def main():
     with eng.begin() as con:
         con.execute(text(_DDL))
         con.execute(text(_DDL_AFR))
+        try:                      # migration: raw-prediction column (2026-08-06)
+            con.execute(text("ALTER TABLE shadow_log ADD COLUMN pred_raw REAL"))
+        except Exception:
+            pass                  # already present
     print(f"[shadow] DB={config.database_url().split('/')[-1]} horizon={HORIZON}min "
           f"interval={args.interval}s — OBSERVE-ONLY")
     if args.once:

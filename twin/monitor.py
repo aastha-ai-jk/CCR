@@ -126,9 +126,19 @@ def main() -> None:
     m_24 = m_all[m_all["ts"] >= cut24]
     m_3d = m_all[m_all["ts"] >= cut3d]
 
+    # signed bias: raw model vs plant (drift signal) and served (post-correction,
+    # should hover near zero once the offset-free correction is active)
+    def _bias(df: pd.DataFrame) -> dict:
+        if not len(df):
+            return {}
+        raw_col = df["pred_raw"].fillna(df["pred_mean"]) if "pred_raw" in df else df["pred_mean"]
+        return {"raw": _r((df["actual_future"] - raw_col).mean()),
+                "served": _r((df["actual_future"] - df["pred_mean"]).mean())}
+
     entry = {
         "ts": now.isoformat(timespec="seconds"),
         "shadow_rows": int(len(log)), "matured_total": int(len(m_all)),
+        "bias_24h": _bias(m_24),
         "acc_24h": _accuracy(m_24),
         "acc_all": _accuracy(m_all),
         "conformal": _conformal(m_3d),
