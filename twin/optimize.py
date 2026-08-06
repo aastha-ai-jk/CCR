@@ -27,6 +27,12 @@ CV = analysis.CV
 _INFEASIBLE_PENALTY = 100.0
 _MOVE_W = 0.15        # movement penalty weight (calm, followable advice)
 _CONF_W = 0.20        # reward weight for band-confidence (chance constraint)
+# TRUST REGION: search only near the CURRENT setpoints. The model is trained on
+# closed-loop data, so its causal validity decays away from observed operation —
+# a full-range search lets the optimizer exploit model insensitivity (e.g.
+# "coal=0 tph looks fine"). ±15% of the engineering range per advisory is also
+# roughly what an operator can responsibly move in one 30-min window.
+_TRUST_FRAC = 0.15
 
 
 def _band_confidence(point: dict, blo: float, bhi: float) -> float:
@@ -105,10 +111,22 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
         return {"available": False, "advisory": True,
                 "error": "GBT twin unavailable (models/twin_gbt.pkl not found)."}
 
-    bounds = _bounds()
+    full_bounds = _bounds()
     state, blo, bhi, votes = _band(conditions)
     defaults = analysis.feature_defaults()
     base_vals = {t: float(conditions.get(t, defaults.get(t, 0.0))) for t in OPT_LEVERS}
+
+    # trust region: current setpoint ± _TRUST_FRAC of the engineering range,
+    # clipped to the engineering limits
+    bounds: dict[str, tuple[float, float]] = {}
+    for t in OPT_LEVERS:
+        lo, hi = full_bounds[t]
+        c = min(max(base_vals[t], lo), hi)
+        # half-width: ±15% of the engineering range OR ±100% of the current
+        # value, whichever is SMALLER (engineering ranges are much wider than
+        # the operating envelope for some tags), floored at ±1 unit
+        r = min((hi - lo) * _TRUST_FRAC, max(abs(c), 1.0))
+        bounds[t] = (max(lo, c - r), min(hi, c + r))
 
     def objective(trial: "optuna.Trial") -> float:
         levers = {t: trial.suggest_float(t, *bounds[t]) for t in OPT_LEVERS}

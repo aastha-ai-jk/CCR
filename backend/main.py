@@ -280,6 +280,20 @@ class OptReq(BaseModel):
 
 @app.post("/api/optimize")
 def optimize(req: OptReq):
+    # Enrich with the live snapshot so the trust region centres on the plant's
+    # ACTUAL current setpoints (caller-supplied values always win).
+    try:
+        snap = _snapshot()["values"]
+        from twin.features import SERVE_CONTEXT_TAGS
+        from twin.optimize import OPT_LEVERS
+        fill = ["423CI400_TT_4", *analysis.STATE_PLC, *SERVE_CONTEXT_TAGS, *OPT_LEVERS]
+        for t in fill:
+            if req.conditions.get(t) is None and snap.get(t) is not None:
+                req.conditions[t] = snap[t]
+        if req.conditions.get("current_temp") is None and snap.get("423CI400_TT_4") is not None:
+            req.conditions["current_temp"] = snap["423CI400_TT_4"]
+    except Exception:
+        pass
     """Advisory setpoint optimisation over the four calciner fuel levers."""
     from twin import optimize as twin_opt
     return _json_safe(twin_opt.optimize(req.conditions))

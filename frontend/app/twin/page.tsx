@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { Area, ComposedChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import { Area, ComposedChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceArea } from "recharts";
 import { api, TwinMetrics, TwinBacktest, ShadowResult } from "@/lib/api";
 import Mimic from "@/components/Mimic";
 import { Panel, Stat, Badge, Loading } from "@/components/ui";
@@ -30,12 +30,25 @@ export default function DigitalTwin() {
   const chartData = useMemo(
     () => (bt?.series || []).map((p) => ({ ts: p.ts, actual: p.actual, pred: p.pred, band: [p.p10, p.p90] })),
     [bt]);
-  const shadowChart = useMemo(
-    () => (shadow?.series || []).map((p) => ({
-      ts: (p.ts || "").slice(11, 16), actual: p.actual_now, pred: p.pred_mean,
-      matured: p.actual_future,
-    })),
-    [shadow]);
+  // Time-ALIGNED overlay: each prediction is plotted at its TARGET time
+  // (issue time + 5 min), so pred and actual are compared like-for-like and
+  // vertical closeness of the two curves IS the model's accuracy.
+  const shadowChart = useMemo(() => {
+    const buckets: Record<string, any> = {};
+    for (const p of shadow?.series || []) {
+      if (p.ts && p.actual_now != null) {
+        (buckets[p.ts] ||= { t: p.ts }).actual = p.actual_now;
+      }
+      if (p.horizon_ts && p.pred_mean != null) {
+        const b = (buckets[p.horizon_ts] ||= { t: p.horizon_ts });
+        b.pred = p.pred_mean;
+        if (p.pred_p10 != null && p.pred_p90 != null) b.band = [p.pred_p10, p.pred_p90];
+      }
+    }
+    return Object.values(buckets)
+      .sort((a: any, b: any) => (a.t < b.t ? -1 : 1))
+      .map((b: any) => ({ ...b, ts: String(b.t).slice(11, 16) }));
+  }, [shadow]);
 
   if (!latest || !ov) return <Loading label="Injecting live plant data into the twin…" />;
   const allOk = ov.interlocks.every((i: any) => i.pass !== false);
@@ -115,8 +128,10 @@ export default function DigitalTwin() {
               </div>
               <div className="col-span-12 lg:col-span-7">
                 <div className="flex items-center gap-4 text-[11px] text-[var(--muted)] mb-2">
-                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5" style={{ background: "#22c55e" }} />Live actual</span>
-                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5" style={{ background: "#38bdf8" }} />Twin t+{shadow.horizon_min ?? 5}min prediction</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5" style={{ background: "#22c55e" }} />Actual</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5" style={{ background: "#38bdf8" }} />Twin forecast (time-aligned)</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-2" style={{ background: "rgba(56,189,248,0.15)" }} />P10–P90</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-2" style={{ background: "rgba(34,197,94,0.12)" }} />target band</span>
                 </div>
                 <div style={{ height: 220 }}>
                   <ResponsiveContainer>
@@ -125,13 +140,20 @@ export default function DigitalTwin() {
                       <XAxis dataKey="ts" tick={{ fill: "#8ea3c4", fontSize: 10 }} minTickGap={40} />
                       <YAxis domain={["auto", "auto"]} tick={{ fill: "#8ea3c4", fontSize: 10 }} />
                       <Tooltip contentStyle={{ background: "#16233d", border: "1px solid #223252", borderRadius: 8, color: "#e6edf7" }} />
-                      <Line type="monotone" dataKey="actual" stroke="#22c55e" dot={false} strokeWidth={1.6} name="Live actual" isAnimationActive={false} />
-                      <Line type="monotone" dataKey="pred" stroke="#38bdf8" dot={false} strokeWidth={1.6} strokeDasharray="4 2" name="Twin predicted" isAnimationActive={false} />
+                      {c.band_lo != null && c.band_hi != null && (
+                        <ReferenceArea y1={c.band_lo} y2={c.band_hi} fill="#22c55e" fillOpacity={0.1} />
+                      )}
+                      <Area type="monotone" dataKey="band" stroke="none" fill="#38bdf8" fillOpacity={0.15}
+                        connectNulls name="P10–P90" isAnimationActive={false} />
+                      <Line type="monotone" dataKey="actual" stroke="#22c55e" dot={false} strokeWidth={1.8}
+                        connectNulls name="Actual" isAnimationActive={false} />
+                      <Line type="monotone" dataKey="pred" stroke="#38bdf8" dot={false} strokeWidth={1.5}
+                        strokeDasharray="4 2" connectNulls name="Twin forecast" isAnimationActive={false} />
                     </ComposedChart>
                   </ResponsiveContainer>
                 </div>
                 <div className="text-[11px] text-[var(--muted)] mt-2">
-                  The twin predicts calciner temperature {shadow.horizon_min ?? 5} min ahead on every live tick; predictions mature against the realised value to give the live tracking accuracy above.
+                  Each forecast is drawn at the moment it is <b>about</b> — {shadow.horizon_min ?? 5} min after it was made — so the two curves compare like-for-like: the closer the dashed line hugs the green one, the more accurate the twin. The shaded fan is its own stated uncertainty (the actual should sit inside it ~80% of the time).
                 </div>
               </div>
             </div>

@@ -205,7 +205,9 @@ def tick(eng) -> str:
         return f"twin unavailable (matured {matured})"
     pm = core["prediction"][CV]
 
-    opt = twin_opt.optimize(conditions, n_trials=120)
+    # pass the CURRENT lever setpoints so the optimizer's trust region centres
+    # on real operation (not historical medians)
+    opt = twin_opt.optimize({**conditions, **levers}, n_trials=120)
     rec = opt.get("recommended", {}) or {}
     cur_coal = _num(snap.get(COAL)) or 0.0
     cur_afr = sum(_num(snap.get(t)) or 0.0 for t in AFR)
