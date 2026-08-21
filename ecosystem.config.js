@@ -43,6 +43,18 @@ module.exports = {
       env: { PYTHONUNBUFFERED: "1" },
     },
     {
+      // Weekly guarded retrain (Sun 02:00): ingest live data -> retrain ->
+      // promote only if not worse -> reload serving. models/retrain_log.jsonl.
+      name: "ccr-retrain",
+      cwd: "/home/antpc/CCR-Project",
+      script: "/home/antpc/CCR-Project/.venv/bin/python",
+      args: "-m twin.retrain",
+      interpreter: "none",
+      autorestart: false,
+      cron_restart: "0 2 * * 0",
+      env: { PYTHONUNBUFFERED: "1" },
+    },
+    {
       // 6-hourly monitoring job: accuracy trail, conformal recalibration,
       // AFR summary, followed-vs-ignored M&V. Appends models/monitor_log.jsonl.
       name: "ccr-monitor",

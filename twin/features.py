@@ -39,8 +39,12 @@ _ROLL_WIN = 5                           # 5-min rolling window
 _RATE_MIN = 3                           # rate-of-change span per lever
 # --- v2 enrichment (promoted from the Model Bench winner, 2026-08-04) -------
 _EXTRA_MOM = (10, 15, 30)               # longer CV-momentum windows (min)
-_DEV_TAGS = ["423CN150_TT_1", "423CN250_TT_1", "423KR405_TT_3",
-             "423KR405_TT_4", "423DU415_TT"]   # hot-side temps as DEVIATION from CV
+# Hot-side temps as DEVIATION from CV. ONLY tags that exist on the LIVE OPC
+# server may be used: 423CN150_TT_1 / 423KR405_TT_3 / 423KR405_TT_4 exist in
+# the historical export but are dead on the server (BadNodeIdUnknown), so any
+# feature built on them makes every live row invalid for training and freezes
+# to a median at serving. (Re-add if the plant ever restores those sensors.)
+_DEV_TAGS = ["423CN250_TT_1", "423DU415_TT"]
 _RAW_EXTRA = ["443KH050_TT1", "423CN_TEMP"]     # secondary air + PH outlet temp
 SMOOTH_W = 3                            # training target: 3-min centred mean at t+Δ
 # live tags the serving layer should pass through in `conditions` so the
@@ -127,9 +131,14 @@ def _load() -> pd.DataFrame:
     """Query in-load rows, coerce numeric, sort by ts, engineer features."""
     cols = ", ".join(f'"{c}"' for c in _raw_columns())
     df = db.q(f"SELECT ts, {cols} FROM process_1min WHERE feed_gate=1 ORDER BY ts")
-    df["ts"] = pd.to_datetime(df["ts"])
+    df["ts"] = pd.to_datetime(df["ts"], format="mixed")
     for c in _raw_columns():
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    # Levers hold their last setpoint until moved — forward-fill gaps in the
+    # manipulated variables (e.g. K3V10_F1 was uncaptured by the live feed for
+    # a month due to a tag-name typo; rates correctly read 0 across the fill).
+    for mv in MV:
+        df[mv] = df[mv].ffill()
     return _engineer(df)
 
 
