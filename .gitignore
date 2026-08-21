@@ -18,3 +18,10 @@ models/*.pt
 #   .env currently holds only a placeholder DB password.
 #   The 106 MB sqlite is tracked via Git LFS (see .gitattributes).
 .gstack/
+# live runtime state (regenerated continuously by shadow/monitor/retrain)
+models/conformal.json
+models/live_bias.json
+models/monitor_log.jsonl
+models/retrain_log.jsonl
+models/nn_metrics.json
+models/prev/
