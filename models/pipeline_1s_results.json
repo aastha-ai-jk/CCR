@@ -1,0 +1,72 @@
+{
+ "generated_at": "2026-08-26T15:09:31",
+ "source": "ccr_clean_1s.csv",
+ "span": [
+  "2025-08-12 19:29",
+  "2026-08-10 23:59"
+ ],
+ "rows_1s": 24881062,
+ "task": "423CI400_TT_4 @ t+300s",
+ "identical_eval_minutes": 59556,
+ "arms": {
+  "gbt_1s": {
+   "mae": 6.195,
+   "rmse": 8.674,
+   "r2": 0.6275,
+   "n": 59556,
+   "features": 41,
+   "train_rows": 4893365,
+   "train_time_s": 20.6
+  },
+  "current_module_1min": {
+   "mae": 5.765,
+   "rmse": 8.142,
+   "r2": 0.6677,
+   "n": 59556,
+   "features": 43,
+   "train_rows": 282960,
+   "train_time_s": 4.3,
+   "mae_vs_1s_truth": 5.814
+  }
+ },
+ "persistence": {
+  "mae": 7.223,
+  "rmse": 10.138,
+  "r2": 0.4912,
+  "n": 59556
+ },
+ "three_way_on_5min_marks": {
+  "gbt_1s": {
+   "mae": 6.198,
+   "rmse": 8.684,
+   "r2": 0.6227,
+   "n": 11842
+  },
+  "current_module_1min": {
+   "mae": 5.811,
+   "rmse": 8.194,
+   "r2": 0.664,
+   "n": 11842
+  },
+  "gbt_5min": {
+   "mae": 5.623,
+   "rmse": 8.105,
+   "r2": 0.6713,
+   "n": 11842,
+   "features": 41,
+   "train_rows": 49168,
+   "train_time_s": 2.1
+  },
+  "persistence": {
+   "mae": 7.206,
+   "rmse": 10.153,
+   "r2": 0.4842,
+   "n": 11842
+  }
+ },
+ "verdict": {
+  "winner": "current_module_1min",
+  "delta_pct": -6.55,
+  "note": "both scored vs raw 1s truth on identical minutes; positive delta_pct = 1s arm better"
+ }
+}
