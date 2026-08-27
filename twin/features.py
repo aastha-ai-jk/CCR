@@ -46,6 +46,13 @@ _EXTRA_MOM = (10, 15, 30)               # longer CV-momentum windows (min)
 # to a median at serving. (Re-add if the plant ever restores those sensors.)
 _DEV_TAGS = ["423CN250_TT_1", "423DU415_TT"]
 _RAW_EXTRA = ["443KH050_TT1", "423CN_TEMP"]     # secondary air + PH outlet temp
+# --- v4 enrichment (validated by the 1s/1min/5min resolution study + the
+# exp_v4 A/B, 2026-08-27): 5-min-averaged (denoised) copies of every
+# continuous input + a 15-min CV anchor. Averaging removes sensor noise the
+# 5-min-horizon physics never responds to. Calciner coal is excluded — its
+# roll5_mean already exists in the v1 coal block above.
+_ROLL5_TAGS: list[str] = [*[m for m in MV if m != CALCINER_COAL],
+                          *DV_STATE, *_RAW_EXTRA]           # 7 + 3 + 2 = 12
 SMOOTH_W = 3                            # training target: 3-min centred mean at t+Δ
 # live tags the serving layer should pass through in `conditions` so the
 # deviation features use real values instead of medians
@@ -77,6 +84,9 @@ def feature_columns() -> list[str]:
     cols += [f"{t}__devCV" for t in _DEV_TAGS]
     cols += list(_RAW_EXTRA)
     cols += ["hod_sin", "hod_cos"]
+    # v4 enrichment (appended so earlier bundles' column order is unchanged)
+    cols += [f"{t}__roll5_mean" for t in _ROLL5_TAGS]
+    cols += [f"{CV}__roll15_dev"]
     return cols
 
 
@@ -124,6 +134,11 @@ def _engineer(df: pd.DataFrame) -> pd.DataFrame:
     hour = df["ts"].dt.hour + df["ts"].dt.minute / 60.0
     df["hod_sin"] = np.sin(2 * np.pi * hour / 24)
     df["hod_cos"] = np.cos(2 * np.pi * hour / 24)
+
+    # v4 enrichment: denoised 5-min means of continuous inputs + 15-min anchor
+    for t in _ROLL5_TAGS:
+        df[f"{t}__roll5_mean"] = df[t].rolling(_ROLL_WIN, min_periods=2).mean()
+    df[f"{CV}__roll15_dev"] = df[CV].rolling(15, min_periods=5).mean() - df[CV]
     return df
 
 
@@ -289,5 +304,12 @@ def build_feature_row(levers: dict, conditions: dict) -> pd.DataFrame:
     row[f"{CALCINER_COAL}__roll{_ROLL_WIN}_mean"] = coal
     for mv in MV:                                     # steady-state: no ramp
         row[f"{mv}__rate{_RATE_MIN}"] = 0.0
+
+    # v4 serving: steady recent history -> the 5-min mean IS the current value
+    # (row[t] already holds the live lever/condition or the median default);
+    # 15-min anchor linearised from the trend like roll5_dev above.
+    for t in _ROLL5_TAGS:
+        row[f"{t}__roll5_mean"] = row[t]
+    row[f"{CV}__roll15_dev"] = -trend * 1.5
 
     return pd.DataFrame([[row[c] for c in feature_columns()]], columns=feature_columns())

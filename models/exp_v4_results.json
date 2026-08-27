@@ -1,0 +1,45 @@
+{
+ "generated_at": "2026-08-27T12:59:12",
+ "rows": 408627,
+ "test_rows": 61295,
+ "arms": {
+  "v3_production": {
+   "features": 43,
+   "t+5": {
+    "mae": 6.929,
+    "best_iter": 678,
+    "train_s": 7.6
+   },
+   "t+30": {
+    "mae": 7.087,
+    "best_iter": 130,
+    "train_s": 3.5
+   }
+  },
+  "v4_roll5": {
+   "features": 56,
+   "t+5": {
+    "mae": 6.881,
+    "best_iter": 695,
+    "train_s": 36.3
+   },
+   "t+30": {
+    "mae": 7.097,
+    "best_iter": 149,
+    "train_s": 4.8
+   }
+  }
+ },
+ "persistence": {
+  "t+5": {
+   "mae": 7.953
+  },
+  "t+30": {
+   "mae": 8.808
+  }
+ },
+ "verdict": {
+  "winner_t5": "v4",
+  "delta_pct_t5": 0.69
+ }
+}
