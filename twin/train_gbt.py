@@ -112,7 +112,11 @@ def train(sample: int | None) -> dict:
         raw_te = delta_raw[mask_t.values][(split[mask_t.values] == "test").values]
         (x_tr, dy_tr, _), (x_val, dy_val, _), (x_te, _, cv_te) = (
             temp["train"], temp["val"], temp["test"])
-        mean = _fit(x_tr, dy_tr, x_val, dy_val, "regression_l1")
+        # v5 recipe (exp_squeeze, 2026-08-27): huber beats l1 for the temp mean
+        # UNDER THE 2000-ROUND CAP (6.43 vs 6.73 on identical data). The cap is
+        # load-bearing regularisation — uncapped huber drifts worse (6.74 at
+        # 6k rounds), so never raise _NUM_ROUNDS without re-running exp_squeeze.
+        mean = _fit(x_tr, dy_tr, x_val, dy_val, "huber")
         p10 = _fit(x_tr, dy_tr, x_val, dy_val, "quantile", alpha=0.1)
         p90 = _fit(x_tr, dy_tr, x_val, dy_val, "quantile", alpha=0.9)
         bundle["temp_multi"][h] = {"mean": mean, "p10": p10, "p90": p90}
