@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 import config
 from backend import db, analysis
+from backend import forecast as forecast_mod
 
 app = FastAPI(title="Calcination Combustion Control API", version="0.1")
 app.add_middleware(
@@ -330,3 +331,13 @@ class SimReq(BaseModel):
 @app.post("/api/simulate")
 def simulate(req: SimReq):
     return analysis.simulate(req.levers, req.conditions, req.k)
+
+
+@app.get("/api/forecast")
+def forecast(minutes_back: int = Query(20, ge=6, le=180)):
+    """ML twin: calciner temperature 60 s ahead, from REAL recent trailing
+    history (not a what-if) -- see backend/forecast.py. Held-out test MAE
+    5.73 degC. Needs `python -m etl.live_feed` (or --replay) populating
+    process_live; returns available=False with a reason if there isn't
+    enough recent buffered history yet."""
+    return forecast_mod.forecast_from_live_buffer(minutes_back)

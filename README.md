@@ -64,50 +64,69 @@ Correlation Studio, Twin Simulator. Frontend talks to the API via
 Create the DB in PgAdmin4 (`digital_twin`), put the password in `.env`, set `USE_SQLITE=0`,
 re-run `python -m etl.load`. No code changes — everything is driven by `DATABASE_URL`.
 
-## `uat` branch: ML twin trained on 1-second PLC data
+## `uat` branch: GBT forecast twin, trained on 1-second PLC data
 
-This branch adds a real trained model to `backend/analysis.simulate()`, alongside
-the original kNN + cardinal-relationship surrogate.
+This branch adds a new ML forecast capability — `GET /api/forecast` — powered
+by the LightGBM model validated at **MAE 5.73 °C** (held-out test, `n≈58k`)
+in the `../nn_twin/` sandbox: lag (1/5/10/60 s) + rolling-window (5-min
+mean/std/skew + EMA) features across all 31 PLC tags, predicting absolute
+calciner outlet temperature 60 s ahead.
 
 ```powershell
 # 1. refresh process_1min from a 1-second-resolution PLC export (finer-grained
 #    and more current than the monthly PLC_DIR .xlsx files; set CSV_1S_PATH in .env)
 python -m etl.load_csv_1s
 
-# 2. train the ML twin: LightGBM model of calciner-temp CHANGE over DELTA
-#    minutes, on EXACTLY the features simulate() has at inference time
-#    (current temp, trend, 3 PLC state vars, 8 levers) — see etl/train_gbt_twin.py
-python -m etl.train_gbt_twin
-# -> backend/models/gbt_twin_dtemp.txt, backend/models/gbt_twin_meta.json
-
-# 3. run the app as usual — simulate() picks up the trained model automatically
+# 2. run the app — the trained model (backend/models/gbt_forecast_60s.txt) is
+#    already in the repo, nothing to train
 python -m uvicorn backend.main:app --port 8000
+python -m etl.live_feed --interval 2      # or --replay off the plant network
+curl http://localhost:8000/api/forecast
+
+# 3. (optional) independently validate the deployed model + feature code
+#    against real historical 1-second data, using this repo's own code path:
+python -m etl.backtest_forecast --hours 6 --end "2026-08-10 12:00:00"
 ```
 
-**Honest result from the first UAT training run:** the twin's held-out test MAE
-(7.04 °C) came in essentially tied with a trivial "predict no change" baseline
-(7.036 °C, −0.1%). An unconstrained variant reached +1.0%. Feature-importance
-showed `temp_now` + `temp_trend` carry 92% of the signal; the 8 real control
-levers combined contribute under 8%. This isn't a tuning artifact — it's a
-real limit of training on point-in-time features only: `simulate()`'s what-if
-API only ever has the *current instant* for a hypothetical lever setting (no
-recent trajectory), so the model can't use the lag/rolling-window context that
-made the earlier experiments in `../nn_twin/` (a standalone sandbox, not part
-of this app) accurate. The kNN surrogate sidesteps this by borrowing real
-historical trajectories from matched neighbours instead.
+**Why this is a separate capability from `backend/analysis.simulate()`,
+not a replacement for it:** `simulate()` answers a hypothetical "what if I set
+these levers to X" query, so it only ever has the *current instant* to work
+from — there's no real trajectory for a lever setting that hasn't happened.
+This model needs the opposite: real recent per-second history (lags, rolling
+stats) is exactly what makes it accurate, so it can only run against **real**
+trailing data — the live feed, or a backtest — not a what-if. `simulate()`
+still uses the original kNN + cardinal-relationship surrogate, unchanged.
+See `backend/forecast.py`'s module docstring for the full reasoning (an
+earlier attempt to force a point-in-time-only GBT into `simulate()` scored
+essentially tied with a "predict no change" baseline — retired in favour of
+this design).
 
-**`simulate()` is gated on demonstrated skill, not on the model merely
-existing** (`backend/analysis.GBT_MIN_IMPROVEMENT_PCT`, default 2%): if the
-trained twin doesn't beat the persistence baseline by that margin, `simulate()`
-automatically falls back to the kNN surrogate — same response shape either way,
-with `"method"` telling you which one served the prediction and
-`"surrogate_backup"` always carrying the kNN estimate for comparison. The
-integration code path itself is verified working (correct feature order,
-monotonic in the levers, no exceptions) — it's simply inactive until a trained
-model clears the bar.
+**Honest result — training MAE vs. live-serving accuracy:** the 5.73 °C figure
+was measured with *centered* (non-causal) Savitzky-Golay smoothing on the
+target — training data deep in a multi-week series can smooth "now" using
+both past **and future** neighbours. Live inference only ever has the past, so
+`python -m etl.backtest_forecast` (this repo's own code, run twice on
+independent real historical windows) measured:
 
-**Path to a twin that actually clears the bar:** extend `simulate()`'s request
-payload to accept a short recent-trajectory window (not just point-in-time
-values) so the model can use lag/rolling features the way the sandbox
-experiments did — or blend the GBT prediction with the kNN neighbourhood
-estimate rather than treating them as a strict either/or.
+| Window | n | MAE | RMSE | Bias |
+|---|---|---|---|---|
+| 2026-08-10 06:00–12:00 | 72 | 9.19 °C | 12.20 | −8.61 |
+| 2026-08-05 12:00–18:00 | 36 | 2.81 °C | 4.25 | −2.04 |
+| **combined** | 108 | **~7.06 °C** | — | — |
+
+The bias is real but **not a stable constant** — applying window 1's −8.61 °C
+correction to window 2 made it *worse* (2.81 → 7.05 °C), the same
+non-stationary-drift failure mode already found with the LSTM soft sensor in
+`../nn_twin/`. So **no bias correction is baked into `backend/forecast.py`** —
+treat 5.73 °C as a best-case, centered-smoothing number, and ~7–9 °C as the
+honest live-serving range. Full detail in `backend/models/gbt_forecast_meta.json`.
+
+**Known gap:** `process_live`'s OPC mapping doesn't carry 2 of the 31 tags
+(`423CN150_TT_1`, `K3V10_F1`); `forecast.py` imputes them from their
+`process_1min` long-run median and flags this in every response's
+`imputed_tags` field.
+
+**Path to closing the training/serving gap:** retrain with one-sided
+(causal) smoothing instead of centered, so training evaluation matches what
+live inference can actually compute — or add an online bias tracker (rolling
+recent-error correction) rather than a fixed constant.
