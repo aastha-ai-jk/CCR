@@ -1,15 +1,24 @@
-"""Analysis engine: correlation/lag tools + the trial surrogate 'twin'.
+"""Analysis engine: correlation/lag tools + the twin's temperature model.
 
-The surrogate is deliberately transparent and always-physical: it answers a
-what-if by finding the most similar *real historical* operating states and
-reporting what the calciner actually did. It also runs the deterministic
-operating-window state selection and interlock checks from the logic doc.
-The production twin (LightGBM + NN, Phase 2/3) will replace the kNN core
-behind the same API.
+The primary predictor is a LightGBM "ML twin" (etl.train_gbt_twin), trained on
+the 1-second-resolution PLC export via etl.load_csv_1s -- the production twin
+this module's docstring used to describe as a Phase 2/3 target. It predicts
+calciner outlet temperature CHANGE over DELTA minutes from exactly the inputs
+simulate() already has: current temperature, its recent trend, the 3 PLC
+state-setting variables, and the 8 manipulated variables (levers).
+
+If the trained model artifact isn't present (e.g. a fresh checkout before
+`python -m etl.train_gbt_twin` has been run), simulate() falls back to the
+original kNN + documented-cardinal-relationship surrogate below, so the app
+still runs end to end without the ML step. Either way the same API shape is
+returned; a "surrogate_backup" field always carries the kNN estimate too, so
+switching predictors is never a silent change.
 """
 from __future__ import annotations
 
+import json
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -84,6 +93,64 @@ def _classify_state(key: str, value: float | None) -> int | None:
     return 3
 
 
+_GBT_MODEL_PATH = Path(__file__).resolve().parent / "models" / "gbt_twin_dtemp.txt"
+_GBT_META_PATH = Path(__file__).resolve().parent / "models" / "gbt_twin_meta.json"
+
+
+GBT_MIN_IMPROVEMENT_PCT = 2.0   # must beat the persistence baseline by this much
+                                # (held-out test MAE, from etl.train_gbt_twin's
+                                # own report) before simulate() trusts it as the
+                                # primary predictor -- see _gbt_twin() docstring.
+
+
+@lru_cache(maxsize=1)
+def _gbt_twin():
+    """Lazy-load the trained ML twin. Returns None (and simulate() falls back
+    to the kNN surrogate) if:
+      - `python -m etl.train_gbt_twin` hasn't been run yet,
+      - LightGBM isn't installed in this environment, or
+      - the trained model doesn't beat the persistence baseline by at least
+        GBT_MIN_IMPROVEMENT_PCT on its own held-out test period.
+
+    That last check matters: simulate()'s what-if API only ever has the
+    CURRENT instant to work from (no recent trajectory for a hypothetical
+    lever setting), so the twin is trained on point-in-time features only --
+    no lags, no rolling context. On the first UAT training run that scored
+    -0.1% vs. persistence (see backend/models/gbt_twin_meta.json) -- not
+    actually predictive, just correctly monotonic in the levers. Deploying a
+    model that doesn't beat guessing "no change" as the app's primary
+    predictor would be misleading, so it's gated on demonstrated skill rather
+    than on the artifact merely existing."""
+    if not (_GBT_MODEL_PATH.exists() and _GBT_META_PATH.exists()):
+        return None
+    meta = json.loads(_GBT_META_PATH.read_text())
+    if meta.get("improve_vs_baseline_pct", -999) < GBT_MIN_IMPROVEMENT_PCT:
+        return None
+    try:
+        import lightgbm as lgb
+    except ImportError:
+        return None
+    return {"booster": lgb.Booster(model_file=str(_GBT_MODEL_PATH)), "meta": meta}
+
+
+def _gbt_predict_dtemp(T0: float, trend: float, state: list[float],
+                       lv: dict) -> float | None:
+    """dtemp = temp(t+DELTA) - temp(t), in the EXACT feature order the model
+    was trained on (etl.train_gbt_twin.FEATURES = temp_now, temp_trend,
+    STATE_PLC, MV) -- returns None if the model isn't available."""
+    twin = _gbt_twin()
+    if twin is None:
+        return None
+    meta = twin["meta"]
+    feats = meta["features"]
+    values = {"temp_now": T0, "temp_trend": trend}
+    values.update(dict(zip(STATE_PLC, state)))
+    values.update({t: lv[t] for t in MV})
+    x = np.array([[values[f] for f in feats]], dtype=float)
+    raw = float(twin["booster"].predict(x)[0])
+    return raw + meta["calibration_offset"]
+
+
 @lru_cache(maxsize=1)
 def _matrix():
     """Matched forward-Δ training set (in-load, gap-safe, sampled).
@@ -156,15 +223,33 @@ def simulate(levers: dict, conditions: dict | None = None, k: int = 400) -> dict
     lv = {t: float(levers.get(t, m["lever_med"][t])) for t in MV}
     Lref = dict(zip(MV, np.average(m["L"][idx], axis=0, weights=w)))
 
-    # ---- PC temperature: neighbourhood baseline + cardinal-relationship pulls ----
+    # ---- PC temperature ----
+    # kNN surrogate estimate: neighbourhood baseline + documented cardinal-
+    # relationship pulls for how far the CURRENT levers sit from what the
+    # matched neighbours were actually doing. Always computed -- it drives the
+    # "contributions"/"relationships" explainability breakdown below, and is
+    # returned as "surrogate_backup" regardless of which predictor is primary.
     dtemp_ref = float(np.average(yk, weights=w))
     contributions = {}
     for t in MV:
         sign, tier = MV_TEMP[t]
         c = sign * TIER_DEG[tier] / m["ranges"][t] * (lv[t] - Lref[t])
         contributions[t] = round(float(c), 1)
-    temp_mean = T0 + dtemp_ref + sum(contributions.values())
+    surrogate_temp_mean = T0 + dtemp_ref + sum(contributions.values())
     resid_std = float(np.sqrt(np.average((yk - dtemp_ref) ** 2, weights=w)))
+
+    # ML twin (etl.train_gbt_twin): LightGBM prediction of dtemp from the exact
+    # same (temp_now, temp_trend, STATE_PLC, MV) inputs -- the primary
+    # predictor when trained; falls back to the kNN surrogate otherwise.
+    gbt_dtemp = _gbt_predict_dtemp(T0, trend, state, lv)
+    if gbt_dtemp is not None:
+        temp_mean = T0 + gbt_dtemp
+        gbt_meta = _gbt_twin()["meta"]
+        resid_std = float(gbt_meta["test_metrics"]["rmse"])   # held-out test RMSE as uncertainty proxy
+        method = "gbt-twin"
+    else:
+        temp_mean = surrogate_temp_mean
+        method = "cardinal-relationship"
 
     # ---- safety signals: neighbourhood baseline + documented MV effects ----
     Sbase = np.average(Sk, axis=0, weights=w)
@@ -223,7 +308,9 @@ def simulate(levers: dict, conditions: dict | None = None, k: int = 400) -> dict
         "feature_input": {t: round(lv[t], 2) for t in MV},
         "contributions": contributions,
         "relationships": relationships,
-        "t0": round(T0, 1), "horizon_min": DELTA, "method": "cardinal-relationship",
+        "t0": round(T0, 1), "horizon_min": DELTA, "method": method,
+        "surrogate_backup": {"mean": R(surrogate_temp_mean),
+                             "method": "cardinal-relationship"},
     }
 
 

@@ -1,0 +1,8 @@
+# --- Twin training (uat branch: etl.train_gbt_twin) ---
+# Only needed to (re)train the ML twin or run the CSV-1s ETL refresh; the app
+# itself (backend + frontend) runs fine without these — backend/analysis.py
+# imports lightgbm lazily and falls back to the kNN surrogate if it's absent.
+lightgbm>=4.5
+
+# Referenced by docs/ROADMAP.md Phase 3 (not yet used on this branch):
+# shap, optuna, torch

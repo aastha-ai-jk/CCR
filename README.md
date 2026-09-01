@@ -63,3 +63,51 @@ Correlation Studio, Twin Simulator. Frontend talks to the API via
 ## Moving to PostgreSQL
 Create the DB in PgAdmin4 (`digital_twin`), put the password in `.env`, set `USE_SQLITE=0`,
 re-run `python -m etl.load`. No code changes — everything is driven by `DATABASE_URL`.
+
+## `uat` branch: ML twin trained on 1-second PLC data
+
+This branch adds a real trained model to `backend/analysis.simulate()`, alongside
+the original kNN + cardinal-relationship surrogate.
+
+```powershell
+# 1. refresh process_1min from a 1-second-resolution PLC export (finer-grained
+#    and more current than the monthly PLC_DIR .xlsx files; set CSV_1S_PATH in .env)
+python -m etl.load_csv_1s
+
+# 2. train the ML twin: LightGBM model of calciner-temp CHANGE over DELTA
+#    minutes, on EXACTLY the features simulate() has at inference time
+#    (current temp, trend, 3 PLC state vars, 8 levers) — see etl/train_gbt_twin.py
+python -m etl.train_gbt_twin
+# -> backend/models/gbt_twin_dtemp.txt, backend/models/gbt_twin_meta.json
+
+# 3. run the app as usual — simulate() picks up the trained model automatically
+python -m uvicorn backend.main:app --port 8000
+```
+
+**Honest result from the first UAT training run:** the twin's held-out test MAE
+(7.04 °C) came in essentially tied with a trivial "predict no change" baseline
+(7.036 °C, −0.1%). An unconstrained variant reached +1.0%. Feature-importance
+showed `temp_now` + `temp_trend` carry 92% of the signal; the 8 real control
+levers combined contribute under 8%. This isn't a tuning artifact — it's a
+real limit of training on point-in-time features only: `simulate()`'s what-if
+API only ever has the *current instant* for a hypothetical lever setting (no
+recent trajectory), so the model can't use the lag/rolling-window context that
+made the earlier experiments in `../nn_twin/` (a standalone sandbox, not part
+of this app) accurate. The kNN surrogate sidesteps this by borrowing real
+historical trajectories from matched neighbours instead.
+
+**`simulate()` is gated on demonstrated skill, not on the model merely
+existing** (`backend/analysis.GBT_MIN_IMPROVEMENT_PCT`, default 2%): if the
+trained twin doesn't beat the persistence baseline by that margin, `simulate()`
+automatically falls back to the kNN surrogate — same response shape either way,
+with `"method"` telling you which one served the prediction and
+`"surrogate_backup"` always carrying the kNN estimate for comparison. The
+integration code path itself is verified working (correct feature order,
+monotonic in the levers, no exceptions) — it's simply inactive until a trained
+model clears the bar.
+
+**Path to a twin that actually clears the bar:** extend `simulate()`'s request
+payload to accept a short recent-trajectory window (not just point-in-time
+values) so the model can use lag/rolling features the way the sandbox
+experiments did — or blend the GBT prediction with the kNN neighbourhood
+estimate rather than treating them as a strict either/or.

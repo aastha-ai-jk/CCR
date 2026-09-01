@@ -37,6 +37,11 @@ QC_DIR = Path(os.getenv("QC_DIR", r"D:/QC_NBH"))
 OPC_DIR = Path(os.getenv("OPC_DIR", r"D:/OPC"))
 TAGS_XLSX = Path(os.getenv("TAGS_XLSX", r"D:/QC_NBH/PLC & QC Data and Tags (1).xlsx"))
 
+# 1-second-resolution PLC export (same 31 tags as the monthly PLC_DIR .xlsx
+# files, just finer-grained and more current). Used by etl.load_csv_1s to
+# refresh process_1min with a higher-fidelity source -> feeds the ML twin.
+CSV_1S_PATH = Path(os.getenv("CSV_1S_PATH", r"D:/ccr_clean_1s.csv"))
+
 # --- Domain constants (from Combustion Control logic doc) -----------------
 KILN_FEED_TAG = "353RL130_TPH"
 KILN_FEED_MIN_TPH = 461.0          # control actions only apply above this
