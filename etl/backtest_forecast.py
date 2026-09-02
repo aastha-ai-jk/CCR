@@ -70,14 +70,14 @@ def main() -> None:
     # preprocess() denoises the whole frame, including the target column,
     # before extracting y = target.shift(-60s)) -- so the fair "actual" to
     # score against is the denoised value, not the raw noisy CSV reading.
-    # Denoise the target column once, over the whole loaded window.
-    from scipy.signal import savgol_filter
+    # Denoise the target column once, over the whole loaded window, using the
+    # SAME causal (trailing-only) rolling mean training now uses -- unlike the
+    # old centered Savitzky-Golay filter, this never looks at samples after
+    # the point being denoised, so it's a fair, leakage-free ground truth.
     full_idx = pd.date_range(df["ts"].min(), df["ts"].max(), freq="1s")
     cv_grid = (df.set_index("ts")[forecast.CV].reindex(full_idx)
               .ffill().interpolate(limit_direction="both"))
-    cv_denoised = pd.Series(
-        savgol_filter(cv_grid.to_numpy(), forecast.SAVGOL_WINDOW, forecast.SAVGOL_POLY),
-        index=full_idx)
+    cv_denoised = cv_grid.rolling(forecast.SMOOTH_WINDOW, min_periods=1).mean()
 
     preds, actuals, ts_used = [], [], []
     t = q_start

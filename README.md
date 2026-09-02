@@ -67,10 +67,12 @@ re-run `python -m etl.load`. No code changes — everything is driven by `DATABA
 ## `uat` branch: GBT forecast twin, trained on 1-second PLC data
 
 This branch adds a new ML forecast capability — `GET /api/forecast` — powered
-by the LightGBM model validated at **MAE 5.73 °C** (held-out test, `n≈58k`)
-in the `../nn_twin/` sandbox: lag (1/5/10/60 s) + rolling-window (5-min
-mean/std/skew + EMA) features across all 31 PLC tags, predicting absolute
-calciner outlet temperature 60 s ahead.
+by a LightGBM model trained in the `../nn_twin/` sandbox: lag (1/5/10/60 s) +
+rolling-window (5-min mean/std/skew + EMA) features across all 31 PLC tags,
+predicting absolute calciner outlet temperature 60 s ahead. **CAUSAL smoothing**
+(trailing-only rolling mean, `CFG.smooth_window`), not the centered filter an
+earlier version used — see "Honest result" below for why that distinction
+matters and what it changed.
 
 ```powershell
 # 1. refresh process_1min from a 1-second-resolution PLC export (finer-grained
@@ -101,32 +103,49 @@ earlier attempt to force a point-in-time-only GBT into `simulate()` scored
 essentially tied with a "predict no change" baseline — retired in favour of
 this design).
 
-**Honest result — training MAE vs. live-serving accuracy:** the 5.73 °C figure
-was measured with *centered* (non-causal) Savitzky-Golay smoothing on the
-target — training data deep in a multi-week series can smooth "now" using
-both past **and future** neighbours. Live inference only ever has the past, so
-`python -m etl.backtest_forecast` (this repo's own code, run twice on
-independent real historical windows) measured:
+**Honest result — the causal retrain, and what it fixed:** an earlier version
+of this model was trained with *centered* (non-causal) Savitzky-Golay
+smoothing on every tag, including the target — training data deep in a
+multi-week series can smooth "now" using both past **and future** neighbours.
+Live inference only ever has the past, so that model's reported 5.73 °C MAE
+never held up live (an independent backtest found ~7–9 °C — see git history
+of this section for the full before/after). Both `nn_twin/plc_pipeline.py`
+(training) and `backend/forecast.py` (serving) now use the **same causal,
+trailing-only rolling mean** instead, so training's evaluation is no longer
+measuring something serving structurally can't reproduce.
+
+**Result: retrained held-out test MAE = 5.69 °C** (RMSE 8.04, R² 0.70, `n≈58k`,
+purged 5-fold walk-forward CV — see `nn_twin/out/Model_Evaluation_Report.md`).
+Independently verified with `python -m etl.backtest_forecast` (this repo's own
+code, run on two real historical windows, scored against a causally-denoised
+actual):
 
 | Window | n | MAE | RMSE | Bias |
 |---|---|---|---|---|
-| 2026-08-10 06:00–12:00 | 72 | 9.19 °C | 12.20 | −8.61 |
-| 2026-08-05 12:00–18:00 | 36 | 2.81 °C | 4.25 | −2.04 |
-| **combined** | 108 | **~7.06 °C** | — | — |
+| 2026-08-10 06:00–12:00 (volatile) | 72 | 8.29 °C | 11.42 | −7.61 |
+| 2026-08-05 12:00–18:00 (calm) | 72 | 3.66 °C | 4.81 | −3.02 |
+| **combined average** | 144 | **~5.98 °C** | — | — |
 
-The bias is real but **not a stable constant** — applying window 1's −8.61 °C
-correction to window 2 made it *worse* (2.81 → 7.05 °C), the same
-non-stationary-drift failure mode already found with the LSTM soft sensor in
-`../nn_twin/`. So **no bias correction is baked into `backend/forecast.py`** —
-treat 5.73 °C as a best-case, centered-smoothing number, and ~7–9 °C as the
-honest live-serving range. Full detail in `backend/models/gbt_forecast_meta.json`.
+The causal fix closed most of the training/serving gap — the two numbers are
+now measuring the same thing, and the combined empirical accuracy (~6 °C) is
+close to the training-reported 5.69 °C, versus the old ~7–9 °C live range.
+**But accuracy is genuinely regime-dependent**: ~3.7 °C on a calm afternoon,
+~8.3 °C during a more volatile morning. Both windows show a negative bias
+(predictions run low) in the same *direction* but different *magnitude* — the
+same non-stationary-drift pattern found elsewhere in this repo (the LSTM soft
+sensor in `../nn_twin/`, the retired point-in-time GBT twin in
+`backend/analysis.py`). A fixed bias correction was tried previously and made
+an out-of-sample window worse, so **no bias correction is baked into
+`backend/forecast.py`**. Treat **~5–6 °C on typical periods, up to ~8 °C
+during faster-moving regimes** as the honest range — not a single guaranteed
+number. Full detail in `backend/models/gbt_forecast_meta.json`.
 
 **Known gap:** `process_live`'s OPC mapping doesn't carry 2 of the 31 tags
 (`423CN150_TT_1`, `K3V10_F1`); `forecast.py` imputes them from their
 `process_1min` long-run median and flags this in every response's
 `imputed_tags` field.
 
-**Path to closing the training/serving gap:** retrain with one-sided
-(causal) smoothing instead of centered, so training evaluation matches what
-live inference can actually compute — or add an online bias tracker (rolling
-recent-error correction) rather than a fixed constant.
+**Live in the app:** the Twin Simulator page (`/simulator`) shows this
+forecast in its own panel, polling `/api/forecast` every 5 s, independent of
+the what-if lever sliders (which still use the original kNN surrogate) — see
+`frontend/app/simulator/page.tsx`.

@@ -1,6 +1,6 @@
 {
   "model": "gbt_forecast_60s.txt",
-  "description": "LightGBM forecast of calciner outlet temperature (423CI400_TT_4), absolute value 60 seconds ahead",
+  "description": "LightGBM forecast of calciner outlet temperature (423CI400_TT_4), absolute value 60 seconds ahead. Retrained with CAUSAL (trailing-only) smoothing -- see causal_retrain_note.",
   "trained_by": "nn_twin/plc_pipeline.py (sandbox outside this app) -- see backend/forecast.py for the feature engineering reproduced for live inference",
   "target": "423CI400_TT_4 at t+60s (absolute degC, not a delta)",
   "horizon_s": 60,
@@ -17,24 +17,29 @@
     "feed_gate": "353RL130_TPH >= 450.0 TPH"
   },
   "test_metrics": {
-    "mae": 5.730,
-    "rmse": 8.148,
-    "mape_pct": 0.65,
-    "r2": 0.690
+    "mae": 5.689,
+    "rmse": 8.042,
+    "mape_pct": 0.64,
+    "r2": 0.698
+  },
+  "causal_retrain_note": {
+    "what_changed": "nn_twin/plc_pipeline.py's preprocess() previously denoised every tag (including the target) with a CENTERED Savitzky-Golay filter -- using both past AND future samples to smooth 'now'. Live serving structurally cannot do that (no future samples exist yet), so the old training MAE (5.73) never held up live: an independent causal backtest measured ~7-9 degC in that deployment (see git history of this file). Replaced with a trailing (causal-only) rolling mean, CFG.smooth_window=11s, in BOTH training (nn_twin/plc_pipeline.py) and live serving (backend/forecast.py's SMOOTH_WINDOW) -- so this test_metrics.mae is now a fair estimate of live accuracy, not an optimistic upper bound.",
+    "old_test_mae_noncausal": 5.730,
+    "new_test_mae_causal": 5.689,
+    "why_barely_changed": "the leak was in the FEATURE computation (lags/rolling stats built on non-causally-smoothed inputs), not primarily in the sensor-noise reduction itself -- removing it made the number a fraction better here, but the important change is that it is now honest: training and serving compute the identical thing, verified independently below."
   },
   "known_gaps_in_this_deployment": {
     "live_buffer_missing_tags": ["423CN150_TT_1", "K3V10_F1"],
     "note": "process_live's OPC mapping doesn't carry these 2 of 31 tags. backend/forecast.py imputes them from their process_1min long-run median and flags this in every response's imputed_tags field -- accuracy on live forecasts is degraded relative to test_metrics above until the live feed is remapped to include them."
   },
   "live_deployment_backtest": {
-    "how": "python -m etl.backtest_forecast -- runs THIS repo's own backend.forecast.forecast_from_recent() (the exact function the live API calls) against real historical 1-second data from CSV_1S_PATH, scored against a Savitzky-Golay-denoised actual (matching how the training target was defined)",
-    "finding": "training's 5.73 degC MAE was measured with CENTERED (non-causal) smoothing -- each historical point's denoised value used both past AND future neighbours. Live inference can only smooth CAUSALLY (no future samples for 'now'), which is a structural gap between the training evaluation and live serving, not a bug in this deployment.",
+    "how": "python -m etl.backtest_forecast -- runs THIS repo's own backend.forecast.forecast_from_recent() (the exact function the live API calls) against real historical 1-second data from CSV_1S_PATH, scored against a causally (trailing-only) denoised actual -- matching the causal target definition, so this is a leakage-free, apples-to-apples check of the retrained model.",
     "windows_tested": [
-      {"window": "2026-08-10 06:00 -> 12:00", "n": 72, "mae": 9.185, "rmse": 12.200, "bias": -8.610},
-      {"window": "2026-08-05 12:00 -> 18:00", "n": 36, "mae": 2.814, "rmse": 4.254, "bias": -2.038}
+      {"window": "2026-08-10 06:00 -> 12:00", "n": 72, "mae": 8.294, "rmse": 11.417, "bias": -7.607},
+      {"window": "2026-08-05 12:00 -> 18:00", "n": 72, "mae": 3.664, "rmse": 4.808, "bias": -3.019}
     ],
-    "combined_empirical_mae": 7.06,
-    "bias_correction_attempted": "tried applying the first window's -8.61 degC bias as a fixed additive correction to the second window: MAE got WORSE (2.81 -> 7.05), because the bias is regime-dependent, not a stable constant -- the same non-stationary-drift failure mode already documented for the LSTM soft sensor in nn_twin/. NOT baked into backend/forecast.py for this reason.",
-    "conclusion": "honest expected live accuracy is closer to ~7 degC MAE than the training-reported 5.73, and will vary by period. Treat 5.73 as a best-case (centered-smoothing) number and ~7-9 as the live-serving range until the model is retrained with causal (one-sided) smoothing to match deployment reality."
+    "combined_empirical_mae": 5.98,
+    "finding": "the causal fix closed most of the gap between training and live-serving evaluation (both now compute the same thing), but per-window accuracy still varies a lot with plant regime: 3.66 degC on a calmer afternoon vs 8.29 degC on a more volatile morning. Both windows show a NEGATIVE bias (predictions run low), consistent in direction though not magnitude -- the same non-stationary-drift pattern documented elsewhere in this repo (nn_twin/ LSTM soft sensor, backend/analysis.py's retired point-in-time GBT twin). A fixed additive bias correction was tried previously on the non-causal model and made an out-of-sample window WORSE, so none is applied here either.",
+    "conclusion": "honest expected live accuracy is close to the requested ~5 degC on typical/calm periods, degrading toward ~8 degC during faster-moving regimes. Treat 5.69 degC (training) and ~6 degC (2-window empirical average) as the realistic range, not a single guaranteed number -- the Twin Simulator UI's forecast panel states this caveat directly rather than presenting a single number as certain."
   }
 }

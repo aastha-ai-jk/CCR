@@ -29,6 +29,7 @@ export default function Simulator() {
     Object.fromEntries(CONDITIONS.map((c) => [c.key, c.def])));
   const [res, setRes] = useState<any>(null);
   const [baseline, setBaseline] = useState<any>(null);
+  const [forecast, setForecast] = useState<any>(null);
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
   const [frozen, setFrozen] = useState(false);
 
@@ -82,6 +83,20 @@ export default function Simulator() {
     const cond = { ...conds, current_temp: baseline?.values?.["423CI400_TT_4"] };
     timer.current = setTimeout(() => api.simulate(levers, cond).then(setRes).catch(console.error), 200);
   }, [levers, conds, baseline]);
+
+  // ---- GBT forecast (1-second-data model, REAL recent trajectory) ----
+  // Independent of the lever sliders above: this model needs real per-second
+  // history (lags/rolling stats), which only exists for what's actually
+  // happening, not a hypothetical lever setting -- see backend/forecast.py's
+  // module docstring. So it always reflects the live plant, even while a
+  // what-if override is active on the sliders.
+  useEffect(() => {
+    let stop = false;
+    const tick = () => api.forecast().then((f) => { if (!stop) setForecast(f); }).catch(() => {});
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => { stop = true; clearInterval(id); };
+  }, []);
 
   if (!defs) return <Loading label="Loading digital twin…" />;
   const temp = res?.prediction?.["423CI400_TT_4"];
@@ -217,6 +232,38 @@ export default function Simulator() {
                   <Badge tone="accent">{res.operating_state}</Badge>
                   <Badge tone="muted">band {res.target_band.low}–{res.target_band.high}</Badge>
                   <Badge tone={inBand ? "ok" : "warn"}>{inBand ? "IN BAND" : `${res.temp_gap > 0 ? "+" : ""}${res.temp_gap}°C`}</Badge>
+                </div>
+              </>
+            )}
+          </Panel>
+
+          {/* GBT forecast, 1-second-data model, 60s ahead -- independent of the
+              what-if sliders above (real recent trajectory, not a hypothetical) */}
+          <Panel title="GBT forecast — 60s ahead (1-second-data model)">
+            {!forecast ? <Loading /> : !forecast.available ? (
+              <div className="text-xs text-[var(--muted)] text-center py-3">
+                {forecast.reason || "unavailable"}
+              </div>
+            ) : (
+              <>
+                <div className="mono text-4xl font-bold text-center text-[var(--accent)]">
+                  {forecast.predicted_temp_60s?.toFixed(0)}<span className="text-lg text-[var(--muted)]">°C</span>
+                </div>
+                <div className="text-center text-xs text-[var(--muted)] mt-1">
+                  now {forecast.current_temp?.toFixed(0)}°C
+                  {forecast.predicted_change != null && (
+                    <span className={forecast.predicted_change >= 0 ? "text-[var(--ok)]" : "text-[var(--warn)]"}>
+                      {" "}({forecast.predicted_change > 0 ? "+" : ""}{forecast.predicted_change.toFixed(1)}°C)
+                    </span>
+                  )}
+                </div>
+                <div className="text-center text-[10px] text-[var(--muted)] mt-2 leading-snug">
+                  Real live trajectory, not a what-if — unaffected by slider overrides above.
+                  Causally-retrained MAE {forecast.model_test_mae?.toFixed(1)}°C (train/serve match, no future-data leakage);
+                  independent live backtests found ~4–8°C depending on plant regime (see README).
+                  {forecast.imputed_tags?.length > 0 && (
+                    <> · imputed: {forecast.imputed_tags.join(", ")}</>
+                  )}
                 </div>
               </>
             )}

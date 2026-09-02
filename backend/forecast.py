@@ -38,8 +38,13 @@ META_PATH = Path(__file__).resolve().parent / "models" / "gbt_forecast_meta.json
 LAGS_S = (1, 5, 10, 60)
 ROLL_WINDOW_S = 300              # 5-minute rolling window (matches training)
 ROLL_MIN_PERIODS = 30            # == max(5, ROLL_WINDOW_S // 10), matches training
-SAVGOL_WINDOW = 11               # matches training's denoise pass
-SAVGOL_POLY = 2
+# CAUSAL denoise window (seconds) -- must equal CFG.smooth_window in
+# nn_twin/plc_pipeline.py. Was a Savitzky-Golay filter (centered/symmetric),
+# which denoises "now" using FUTURE samples -- impossible live. A trailing
+# rolling mean only looks backward, so serving computes exactly what training
+# scored (see plc_pipeline.py's CFG.smooth_window comment for the full story:
+# the old mismatch made the reported 5.73 degC MAE unreachable live).
+SMOOTH_WINDOW = 11
 MIN_BUFFER_S = 360               # >= ROLL_WINDOW_S + max(LAGS_S), with margin
 CV = "423CI400_TT_4"
 
@@ -71,13 +76,12 @@ def _tag_medians() -> dict[str, float]:
 
 
 def _prep_1s_grid(df: pd.DataFrame, tags: list[str]) -> pd.DataFrame | None:
-    """Reindex to a complete 1-second grid + ffill/interpolate + Savitzky-Golay
-    denoise -- exactly the preprocessing the model was trained on (see
-    nn_twin/plc_pipeline.py's preprocess()), so a live buffer at ANY native
-    cadence (this deployment's process_live is ~2 s) gets turned into the same
-    representation the model saw during training."""
-    from scipy.signal import savgol_filter
-
+    """Reindex to a complete 1-second grid + ffill/interpolate + CAUSAL denoise
+    (trailing rolling mean) -- exactly the preprocessing the model was trained
+    on (see nn_twin/plc_pipeline.py's preprocess()), so a live buffer at ANY
+    native cadence (this deployment's process_live is ~2 s) gets turned into
+    the same representation the model saw during training. Trailing-only means
+    every value here is computable in real time -- no future samples used."""
     df = df.sort_values("ts").drop_duplicates(subset="ts")
     if len(df) < 5:
         return None
@@ -89,10 +93,9 @@ def _prep_1s_grid(df: pd.DataFrame, tags: list[str]) -> pd.DataFrame | None:
     g = g.ffill().interpolate(method="linear", limit_direction="both")
     if g.isna().any().any():
         return None
-    w = SAVGOL_WINDOW | 1
-    if len(g) >= w:
+    if SMOOTH_WINDOW > 1:
         for c in tags:
-            g[c] = savgol_filter(g[c].to_numpy(), w, SAVGOL_POLY)
+            g[c] = g[c].rolling(SMOOTH_WINDOW, min_periods=1).mean()
     return g
 
 

@@ -36,6 +36,23 @@ export interface DQ {
 export interface Milestone {
   phase: string; title: string; detail: string; status: string; ordinal: number;
 }
+// GBT model trained on 1-second PLC data (nn_twin/plc_pipeline.py) -- see
+// backend/forecast.py and README.md "uat branch" section for the honest
+// accuracy caveat (model_test_mae is a training-time, non-causal-smoothing
+// number; real live-serving accuracy is closer to ~7-9 degC).
+export interface ForecastResponse {
+  available: boolean;
+  reason?: string;
+  predicted_temp_60s?: number;
+  current_temp?: number | null;
+  predicted_change?: number | null;
+  horizon_s?: number;
+  method?: string;
+  model_test_mae?: number;
+  model_test_r2?: number;
+  as_of?: string;
+  imputed_tags?: string[];
+}
 
 export const api = {
   health: () => get("/api/health"),
@@ -64,6 +81,8 @@ export const api = {
   simDefaults: () => get("/api/simulate/defaults"),
   simulate: (levers: Record<string, number>, conditions: Record<string, number>, k = 200) =>
     post("/api/simulate", { levers, conditions, k }),
+  forecast: (minutesBack = 20) =>
+    get<ForecastResponse>(`/api/forecast?minutes_back=${minutesBack}`),
 };
 
 export const ROLE_COLOR: Record<string, string> = {
