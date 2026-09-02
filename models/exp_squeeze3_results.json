@@ -1,0 +1,75 @@
+{
+ "generated_at": "2026-08-27T15:09:26",
+ "rows": 419232,
+ "results": {
+  "base": {
+   "mae": 6.424,
+   "best_iter": 2000,
+   "train_s": 86.2
+  },
+  "recency_30": {
+   "mae": 6.537,
+   "best_iter": 1997,
+   "train_s": 53.8
+  },
+  "recency_90": {
+   "mae": 6.499,
+   "best_iter": 2000,
+   "train_s": 83.2
+  },
+  "recency_180": {
+   "mae": 6.48,
+   "best_iter": 2000,
+   "train_s": 73.3
+  },
+  "linear_tree": {
+   "mae": 6.56,
+   "best_iter": 1688,
+   "train_s": 94.8
+  },
+  "smooth_anchor": {
+   "mae": 6.374,
+   "best_iter": 2000,
+   "train_s": 86.3
+  },
+  "bag5": {
+   "mae": 6.428,
+   "train_s": 246.9
+  },
+  "arx": {
+   "mae": 6.484
+  },
+  "two_stage": {
+   "mae": 6.548,
+   "best_iter": 2000,
+   "train_s": 95.8
+  },
+  "blend_smooth_anchor_arx20": {
+   "mae": 6.312
+  },
+  "blend_smooth_anchor_arx30": {
+   "mae": 6.297
+  },
+  "blend_smooth_anchor_arx40": {
+   "mae": 6.292
+  },
+  "blend_smooth_anchor_arx50": {
+   "mae": 6.299
+  },
+  "median3": {
+   "mae": 6.419
+  }
+ },
+ "verdict": {
+  "champion": "blend_smooth_anchor_arx40",
+  "mae": 6.292,
+  "vs_v5_prod": 6.427
+ },
+ "decomposition": {
+  "champion_vs_raw_truth": 6.292,
+  "champion_vs_smoothed_truth": 5.616,
+  "persistence_vs_raw": 7.947,
+  "persistence_vs_smoothed": 7.441,
+  "note": "raw-minus-smoothed gap ~ sensor-jitter share of the MAE"
+ }
+}

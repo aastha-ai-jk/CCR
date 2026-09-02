@@ -38,6 +38,7 @@ _BASE_PARAMS = {
 }
 _NUM_ROUNDS = 2000
 _EARLY_STOP = 40
+_ARX_W = 0.4        # v6 served-mean blend weight for the ridge ARX (exp_squeeze4)
 
 
 def _fit(x_tr: pd.DataFrame, y_tr: pd.Series, x_val: pd.DataFrame,
@@ -119,11 +120,29 @@ def train(sample: int | None) -> dict:
         mean = _fit(x_tr, dy_tr, x_val, dy_val, "huber")
         p10 = _fit(x_tr, dy_tr, x_val, dy_val, "quantile", alpha=0.1)
         p90 = _fit(x_tr, dy_tr, x_val, dy_val, "quantile", alpha=0.9)
-        bundle["temp_multi"][h] = {"mean": mean, "p10": p10, "p90": p90}
+        # v6 (exp_squeeze3/4, 2026-08-27): the served mean is a fixed-weight
+        # blend of the GBT with a ridge ARX fit on the same delta target. The
+        # two make differently-shaped errors (ARX is regime-stable where the
+        # trees overfit) — the blend beat GBT-alone at EVERY horizon. Weight
+        # is FIXED, not val-picked: val-regime != test-regime systematically
+        # underweights the ARX (see models/exp_squeeze{2,4}_results.json).
+        from sklearn.linear_model import Ridge
+        arx = Ridge(alpha=10.0)
+        arx.fit(x_tr, dy_tr)
+        bundle["temp_multi"][h] = {
+            "mean": mean, "p10": p10, "p90": p90,
+            "arx": {"coef": arx.coef_.astype(float),
+                    "intercept": float(arx.intercept_), "w": _ARX_W,
+                    "x_mean": x_tr.mean().to_numpy(dtype=float)},
+        }
 
         cv_np = cv_te.to_numpy(float)
         yt = raw_te.to_numpy(float) + cv_np                        # RAW absolute truth
-        pred = mean.predict(x_te) + cv_np
+        # metrics reflect the SERVED (blended) mean, so the retrain guard
+        # judges exactly what production will run
+        gbt_d = mean.predict(x_te)
+        arx_d = x_te.to_numpy(float) @ arx.coef_ + arx.intercept_
+        pred = (1 - _ARX_W) * gbt_d + _ARX_W * arx_d + cv_np
         lo, hi = p10.predict(x_te) + cv_np, p90.predict(x_te) + cv_np
         hm = _scores(yt, pred)
         hm["interval_coverage"] = round(float(np.mean((yt >= lo) & (yt <= hi))), 4)

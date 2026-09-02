@@ -146,6 +146,20 @@ def _conformal_q() -> float | None:
         return None
 
 
+def _mean_delta(heads: dict, X) -> float:
+    """Served mean delta: GBT blended with the bundled ridge ARX (v6).
+
+    Pre-v6 bundles have no 'arx' entry and fall through to GBT-alone, so old
+    artifacts keep serving unchanged."""
+    g = float(heads["mean"].predict(X)[0])
+    arx = heads.get("arx")
+    if not arx:
+        return g
+    a = float(np.asarray(X, dtype=float)[0] @ arx["coef"] + arx["intercept"])
+    w = float(arx.get("w", 0.4))
+    return (1 - w) * g + w * a
+
+
 def _temp_from(bundle: dict, X, conditions: dict) -> tuple[float, float, float]:
     """Predict (mean, p10, p90) calciner temp, reconstructing the delta target.
 
@@ -155,7 +169,7 @@ def _temp_from(bundle: dict, X, conditions: dict) -> tuple[float, float, float]:
     interval — calibrated on the running plant via shadow mode.
     """
     t = bundle["temp"]
-    raw_mean = float(t["mean"].predict(X)[0])
+    raw_mean = _mean_delta(t, X)
     raw_p10 = float(t["p10"].predict(X)[0])
     raw_p90 = float(t["p90"].predict(X)[0])
     if bundle.get("temp_delta"):
@@ -190,10 +204,17 @@ def predict_core(levers: dict, conditions: dict) -> dict | None:
             v = float(booster.predict(X)[0])
             prediction[tag] = {"mean": _r(v), "p10": _r(v), "p90": _r(v)}
 
-        # Per-MV SHAP contributions on the temp-mean booster (°C pull per lever).
+        # Per-MV SHAP contributions on the temp-mean booster (°C pull per
+        # lever). v6: the served mean blends GBT with a linear ARX, so honest
+        # attribution = (1-w)*SHAP + w*coef*(x - train_mean) per feature.
         sv = np.asarray(_CACHE["explainer"].shap_values(X, check_additivity=False))
         if sv.ndim == 2:
             sv = sv[0]
+        arx = bundle["temp"].get("arx")
+        if arx is not None:
+            w = float(arx.get("w", 0.4))
+            lin = arx["coef"] * (np.asarray(X, dtype=float)[0] - arx["x_mean"])
+            sv = (1 - w) * sv + w * lin
         mv_cols = _CACHE["mv_cols"]
         contributions = {mv: _r(float(sv[idxs].sum()) if idxs else 0.0)
                          for mv, idxs in mv_cols.items()}
@@ -230,7 +251,7 @@ def predict_trajectory(levers: dict, conditions: dict) -> list[dict] | None:
         out = []
         for h in sorted(bundle["temp_multi"]):
             heads = bundle["temp_multi"][h]
-            m = float(heads["mean"].predict(X)[0])
+            m = _mean_delta(heads, X)
             lo = float(heads["p10"].predict(X)[0])
             hi = float(heads["p90"].predict(X)[0])
             if bundle.get("temp_delta"):
