@@ -365,18 +365,24 @@ def _row_from_history(hist: pd.DataFrame, levers: dict,
         return None
 
 
-def build_feature_row(levers: dict, conditions: dict) -> pd.DataFrame:
+def build_feature_row(levers: dict, conditions: dict,
+                      use_live_history: bool = True) -> pd.DataFrame:
     """One feature row in exact ``feature_columns`` order.
 
     v7: preferred path builds from REAL live history (exact momentum/EWM/lag
     features). Fallback reconstructs temperature history from ``current_temp``
     and ``temp_trend`` (== CV(t) - CV(t-DELTA)) with steady-lever assumptions.
+
+    ``use_live_history=False`` forces the fallback — REQUIRED for historical
+    replays (e.g. the backtest walk): those describe a past moment, and mixing
+    in the current plant's live history corrupts every prediction.
     """
-    hist = _live_history()
-    if hist is not None:
-        exact = _row_from_history(hist, levers, conditions)
-        if exact is not None:
-            return exact
+    if use_live_history:
+        hist = _live_history()
+        if hist is not None:
+            exact = _row_from_history(hist, levers, conditions)
+            if exact is not None:
+                return exact
 
     d = _defaults()
     row = {c: d[c] for c in feature_columns()}

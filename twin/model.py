@@ -58,11 +58,12 @@ def is_available() -> bool:
     return _load() is not None
 
 
-def _feature_row(levers: dict, conditions: dict):
+def _feature_row(levers: dict, conditions: dict, live: bool = True):
     """Build the single ordered feature row via the Agent-A feature builder."""
     from twin import features  # imported lazily; may not exist during parallel dev
 
-    return features.build_feature_row(levers or {}, conditions or {})
+    return features.build_feature_row(levers or {}, conditions or {},
+                                      use_live_history=live)
 
 
 def _r(v: float, nd: int = 1) -> float:
@@ -264,13 +265,41 @@ def predict_trajectory(levers: dict, conditions: dict) -> list[dict] | None:
         return None
 
 
-def predict_temp(levers: dict, conditions: dict) -> dict | None:
-    """Fast temp-only prediction (no SHAP / safety) for the backtest walk."""
+def predict_frame(X, cv0) -> dict | None:
+    """Batch temp prediction over a pre-engineered feature frame (backtest).
+
+    Uses the RAW model (blended mean, no live-bias offset) — a historical
+    replay measures intrinsic skill, not today's drift correction. ``cv0`` is
+    the anchor temperature per row; returns dict of numpy arrays.
+    """
+    bundle = _load()
+    if bundle is None:
+        return None
+    t = bundle["temp"]
+    mean = t["mean"].predict(X)
+    arx = t.get("arx")
+    if arx:
+        w = float(arx.get("w", 0.4))
+        mean = (1 - w) * mean + w * (np.asarray(X, dtype=float) @ arx["coef"]
+                                     + arx["intercept"])
+    p10 = t["p10"].predict(X)
+    p90 = t["p90"].predict(X)
+    if bundle.get("temp_delta"):
+        mean, p10, p90 = cv0 + mean, cv0 + p10, cv0 + p90
+    return {"mean": mean, "p10": np.minimum(p10, p90), "p90": np.maximum(p10, p90)}
+
+
+def predict_temp(levers: dict, conditions: dict, live: bool = True) -> dict | None:
+    """Fast temp-only prediction (no SHAP / safety) for the backtest walk.
+
+    Pass ``live=False`` when replaying HISTORICAL moments — the v7 live-history
+    feature path describes the plant right now and must not leak into replays.
+    """
     bundle = _load()
     if bundle is None:
         return None
     try:
-        X = _feature_row(levers, conditions)
+        X = _feature_row(levers, conditions, live=live)
         m, lo, hi = _temp_from(bundle, X, conditions)
         return {"mean": m, "p10": lo, "p90": hi}
     except Exception:

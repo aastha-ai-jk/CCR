@@ -349,8 +349,12 @@ def twin_metrics():
 @app.get("/api/twin/backtest")
 def twin_backtest(start: str | None = None, end: str | None = None,
                   max_points: int = 800):
-    """Walk a held-out feed_gate=1 window; predict calciner temp at each sampled
-    row via the GBT twin and compare to the actual temp DELTA minutes later."""
+    """Replay a held-out feed_gate=1 window: engineer features from the
+    HISTORICAL frame exactly as training does, batch-predict the calciner temp
+    at t+DELTA, and compare to the realised value. (A per-row rebuild through
+    the serving path is wrong here — v7 serving pulls LIVE history, which must
+    never leak into a historical replay.)"""
+    from twin import features as tf
     from twin import model as twin_model
     CV = analysis.CV
     if not twin_model.is_available():
@@ -358,8 +362,7 @@ def twin_backtest(start: str | None = None, end: str | None = None,
                 "r2": None, "n": 0, "tag": CV}
 
     delta = analysis.DELTA
-    need = [CV] + analysis.MV + analysis.STATE_PLC
-    cols = ", ".join(f'"{c}"' for c in dict.fromkeys(need))
+    cols = ", ".join(f'"{c}"' for c in tf._raw_columns())
     where, params = ["feed_gate=1"], {}
     if start:
         where.append("ts >= :start"); params["start"] = start
@@ -371,39 +374,35 @@ def twin_backtest(start: str | None = None, end: str | None = None,
         return {"available": True, "series": [], "mae": None, "rmse": None,
                 "r2": None, "n": 0, "tag": CV}
 
-    df["ts"] = pd.to_datetime(df["ts"])
-    for c in need:
+    df["ts"] = pd.to_datetime(df["ts"], format="mixed")
+    for c in tf._raw_columns():
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.sort_values("ts").reset_index(drop=True)
+    for mv in analysis.MV:
+        df[mv] = df[mv].ffill()
+    df = tf._engineer(df.sort_values("ts").reset_index(drop=True))
+    feats = tf.feature_columns()
     df["actual_fwd"] = df[CV].shift(-delta)
-    df["dt_fwd"] = (df["ts"].shift(-delta) - df["ts"]).dt.total_seconds()
-    df["temp_trend"] = df[CV] - df[CV].shift(delta)
-    df = df[df["dt_fwd"].between(4 * 60, 7 * 60)]
-    df = df.dropna(subset=[CV, "actual_fwd"])
+    dt_fwd = (df["ts"].shift(-delta) - df["ts"]).dt.total_seconds()
+    df = df[dt_fwd.between(4 * 60, 7 * 60) & df["actual_fwd"].notna()
+            & df[feats].notna().all(axis=1) & df[CV].notna()]
     if not len(df):
         return {"available": True, "series": [], "mae": None, "rmse": None,
                 "r2": None, "n": 0, "tag": CV}
 
+    # decimate AFTER engineering so lag/rolling features stay intact
     step = max(1, len(df) // max(1, max_points))
     df = df.iloc[::step].head(max_points)
 
+    out = twin_model.predict_frame(df[feats], df[CV].to_numpy(float))
     series, actuals, preds = [], [], []
-    for rd in df.to_dict("records"):
-        levers = {mv: rd[mv] for mv in analysis.MV if pd.notna(rd.get(mv))}
-        conditions = {"current_temp": rd[CV], "temp_trend": rd["temp_trend"]}
-        for s in analysis.STATE_PLC:
-            if pd.notna(rd.get(s)):
-                conditions[s] = rd[s]
-        pt = twin_model.predict_temp(levers, conditions)
-        if pt is None:
-            continue
+    for i, rd in enumerate(df.to_dict("records")):
         actual = float(rd["actual_fwd"])
-        pred = float(pt["mean"])
         series.append({"ts": rd["ts"].strftime("%Y-%m-%d %H:%M"),
-                       "actual": round(actual, 1), "pred": round(pred, 1),
-                       "p10": round(float(pt["p10"]), 1),
-                       "p90": round(float(pt["p90"]), 1)})
-        actuals.append(actual); preds.append(pred)
+                       "actual": round(actual, 1),
+                       "pred": round(float(out["mean"][i]), 1),
+                       "p10": round(float(out["p10"][i]), 1),
+                       "p90": round(float(out["p90"][i]), 1)})
+        actuals.append(actual); preds.append(float(out["mean"][i]))
 
     if actuals:
         a = pd.Series(actuals, dtype=float); p = pd.Series(preds, dtype=float)

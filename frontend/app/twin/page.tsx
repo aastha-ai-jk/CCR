@@ -28,26 +28,33 @@ export default function DigitalTwin() {
   }, []);
 
   const chartData = useMemo(
-    () => (bt?.series || []).map((p) => ({ ts: p.ts, actual: p.actual, pred: p.pred, band: [p.p10, p.p90] })),
+    () => (bt?.series || []).map((p) => ({
+      ts: p.ts, actual: p.actual, pred: p.pred,
+      miss: p.actual != null && p.pred != null
+        ? [Math.min(p.actual, p.pred), Math.max(p.actual, p.pred)]
+        : null,
+    })),
     [bt]);
-  // Time-ALIGNED overlay: each prediction is plotted at its TARGET time
-  // (issue time + 5 min), so pred and actual are compared like-for-like and
-  // vertical closeness of the two curves IS the model's accuracy.
+  // OVERLAP = ACCURACY: every matured prediction is paired with the realised
+  // temperature at the SAME timestamp (its target time), so the two curves
+  // are directly comparable point-for-point — the shaded strip between them
+  // is the error. The last ~5 min (not yet matured) show forecast only.
   const shadowChart = useMemo(() => {
-    const buckets: Record<string, any> = {};
-    for (const p of shadow?.series || []) {
-      if (p.ts && p.actual_now != null) {
-        (buckets[p.ts] ||= { t: p.ts }).actual = p.actual_now;
-      }
-      if (p.horizon_ts && p.pred_mean != null) {
-        const b = (buckets[p.horizon_ts] ||= { t: p.horizon_ts });
-        b.pred = p.pred_mean;
-        if (p.pred_p10 != null && p.pred_p90 != null) b.band = [p.pred_p10, p.pred_p90];
-      }
-    }
-    return Object.values(buckets)
-      .sort((a: any, b: any) => (a.t < b.t ? -1 : 1))
-      .map((b: any) => ({ ...b, ts: String(b.t).slice(11, 16) }));
+    return (shadow?.series || [])
+      .filter((p) => p.horizon_ts && p.pred_mean != null)
+      .map((p) => {
+        const actual = p.matured && p.actual_future != null ? p.actual_future : null;
+        return {
+          t: p.horizon_ts,
+          pred: p.pred_mean,
+          actual,
+          miss: actual != null && p.pred_mean != null
+            ? [Math.min(p.pred_mean, actual), Math.max(p.pred_mean, actual)]
+            : null,
+        };
+      })
+      .sort((a, b) => (a.t < b.t ? -1 : 1))
+      .map((b) => ({ ...b, ts: String(b.t).slice(11, 16) }));
   }, [shadow]);
 
   if (!latest || !ov) return <Loading label="Injecting live plant data into the twin…" />;
@@ -128,9 +135,9 @@ export default function DigitalTwin() {
               </div>
               <div className="col-span-12 lg:col-span-7">
                 <div className="flex items-center gap-4 text-[11px] text-[var(--muted)] mb-2">
-                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5" style={{ background: "#22c55e" }} />Actual</span>
-                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5" style={{ background: "#38bdf8" }} />Twin forecast (time-aligned)</span>
-                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-2" style={{ background: "rgba(56,189,248,0.15)" }} />P10–P90</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5" style={{ background: "#22c55e" }} />Actual (realised)</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5" style={{ background: "#38bdf8" }} />Twin forecast (made 5 min earlier)</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-2" style={{ background: "rgba(248,113,113,0.3)" }} />miss (gap = error)</span>
                   <span className="flex items-center gap-1"><span className="inline-block w-3 h-2" style={{ background: "rgba(34,197,94,0.12)" }} />target band</span>
                 </div>
                 <div style={{ height: 220 }}>
@@ -143,8 +150,8 @@ export default function DigitalTwin() {
                       {c.band_lo != null && c.band_hi != null && (
                         <ReferenceArea y1={c.band_lo} y2={c.band_hi} fill="#22c55e" fillOpacity={0.1} />
                       )}
-                      <Area type="monotone" dataKey="band" stroke="none" fill="#38bdf8" fillOpacity={0.15}
-                        connectNulls name="P10–P90" isAnimationActive={false} />
+                      <Area type="monotone" dataKey="miss" stroke="none" fill="#f87171" fillOpacity={0.3}
+                        connectNulls name="Miss" isAnimationActive={false} />
                       <Line type="monotone" dataKey="actual" stroke="#22c55e" dot={false} strokeWidth={1.8}
                         connectNulls name="Actual" isAnimationActive={false} />
                       <Line type="monotone" dataKey="pred" stroke="#38bdf8" dot={false} strokeWidth={1.5}
@@ -153,7 +160,7 @@ export default function DigitalTwin() {
                   </ResponsiveContainer>
                 </div>
                 <div className="text-[11px] text-[var(--muted)] mt-2">
-                  Each forecast is drawn at the moment it is <b>about</b> — {shadow.horizon_min ?? 5} min after it was made — so the two curves compare like-for-like: the closer the dashed line hugs the green one, the more accurate the twin. The shaded fan is its own stated uncertainty (the actual should sit inside it ~80% of the time).
+                  Both curves are drawn at the <b>same</b> moment: the forecast (made {shadow.horizon_min ?? 5} min earlier) against what the plant actually did at that minute. Where the curves overlap the twin was right; the red strip is exactly the miss. The blue tail past the green line is the next {shadow.horizon_min ?? 5} min — forecasts whose answers haven&apos;t happened yet.
                 </div>
               </div>
             </div>
@@ -234,7 +241,7 @@ export default function DigitalTwin() {
               <div className="flex items-center gap-4 text-[11px] text-[var(--muted)] mb-2">
                 <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5" style={{ background: "#22c55e" }} />Actual</span>
                 <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5" style={{ background: "#38bdf8" }} />Twin predicted</span>
-                <span className="flex items-center gap-1"><span className="inline-block w-3 h-2" style={{ background: "rgba(56,189,248,0.15)" }} />P10–P90</span>
+                <span className="flex items-center gap-1"><span className="inline-block w-3 h-2" style={{ background: "rgba(248,113,113,0.3)" }} />miss (gap = error)</span>
               </div>
               <div style={{ height: 280 }}>
                 <ResponsiveContainer>
@@ -243,14 +250,14 @@ export default function DigitalTwin() {
                     <XAxis dataKey="ts" tick={{ fill: "#8ea3c4", fontSize: 10 }} minTickGap={50} />
                     <YAxis domain={["auto", "auto"]} tick={{ fill: "#8ea3c4", fontSize: 10 }} />
                     <Tooltip contentStyle={{ background: "#16233d", border: "1px solid #223252", borderRadius: 8, color: "#e6edf7" }} />
-                    <Area type="monotone" dataKey="band" stroke="none" fill="#38bdf8" fillOpacity={0.14} name="P10–P90" isAnimationActive={false} />
+                    <Area type="monotone" dataKey="miss" stroke="none" fill="#f87171" fillOpacity={0.3} connectNulls name="Miss" isAnimationActive={false} />
                     <Line type="monotone" dataKey="actual" stroke="#22c55e" dot={false} strokeWidth={1.6} name="Actual" isAnimationActive={false} />
                     <Line type="monotone" dataKey="pred" stroke="#38bdf8" dot={false} strokeWidth={1.6} strokeDasharray="4 2" name="Twin predicted" isAnimationActive={false} />
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
               <div className="text-[11px] text-[var(--muted)] mt-2">
-                {bt.tag} · held-out window · twin prediction at t+5 min vs the realised actual.
+                {bt.tag} · a replay over the held-out historical window the model never trained on: at each minute the twin predicts t+5 from that moment&apos;s data, then the curve is compared with what really happened. Overlap = accuracy; the red strip is the miss.
               </div>
             </>
           )}
