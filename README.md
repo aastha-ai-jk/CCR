@@ -67,19 +67,19 @@ re-run `python -m etl.load`. No code changes — everything is driven by `DATABA
 ## `uat` branch: GBT forecast twin, trained on 1-second PLC data
 
 This branch adds a new ML forecast capability — `GET /api/forecast` — powered
-by a LightGBM model trained in the `../nn_twin/` sandbox: lag (1/5/10/60 s) +
-rolling-window (5-min mean/std/skew + EMA) features across all 31 PLC tags,
-predicting absolute calciner outlet temperature 60 s ahead. **CAUSAL smoothing**
-(trailing-only rolling mean, `CFG.smooth_window`), not the centered filter an
-earlier version used — see "Honest result" below for why that distinction
-matters and what it changed.
+by a LightGBM model trained in the `../nn_twin/` sandbox
+(`nn_twin/plc_pipeline_delta.py`), predicting calciner outlet temperature 60 s
+ahead. **Current design: DELTA target + momentum features** — see "Final
+result" below; earlier absolute-value versions are kept as history further
+down since the debugging trail (leakage → causal fix → regime bias → delta
+fix) is itself useful context for anyone extending this.
 
 ```powershell
 # 1. refresh process_1min from a 1-second-resolution PLC export (finer-grained
 #    and more current than the monthly PLC_DIR .xlsx files; set CSV_1S_PATH in .env)
 python -m etl.load_csv_1s
 
-# 2. run the app — the trained model (backend/models/gbt_forecast_60s.txt) is
+# 2. run the app — the trained model (backend/models/gbt_delta_60s.txt) is
 #    already in the repo, nothing to train
 python -m uvicorn backend.main:app --port 8000
 python -m etl.live_feed --interval 2      # or --replay off the plant network
@@ -103,42 +103,43 @@ earlier attempt to force a point-in-time-only GBT into `simulate()` scored
 essentially tied with a "predict no change" baseline — retired in favour of
 this design).
 
-**Honest result — the causal retrain, and what it fixed:** an earlier version
-of this model was trained with *centered* (non-causal) Savitzky-Golay
-smoothing on every tag, including the target — training data deep in a
-multi-week series can smooth "now" using both past **and future** neighbours.
-Live inference only ever has the past, so that model's reported 5.73 °C MAE
-never held up live (an independent backtest found ~7–9 °C — see git history
-of this section for the full before/after). Both `nn_twin/plc_pipeline.py`
-(training) and `backend/forecast.py` (serving) now use the **same causal,
-trailing-only rolling mean** instead, so training's evaluation is no longer
-measuring something serving structurally can't reproduce.
+**Algorithm choice: GBT (LightGBM), not a neural net.** Every experiment run
+in this project — this sandbox, and independently in a colleague's
+`feature/digital-twin-ml` branch — found CNN-LSTM/GRU to score notably worse
+than GBT (in one bake-off, worse than a "predict no change" baseline
+entirely), consistent with published results on tabular data (Grinsztajn et
+al., NeurIPS 2022). A neural net was tried here too and dropped for the same
+reason.
 
-**Result: retrained held-out test MAE = 5.69 °C** (RMSE 8.04, R² 0.70, `n≈58k`,
-purged 5-fold walk-forward CV — see `nn_twin/out/Model_Evaluation_Report.md`).
-Independently verified with `python -m etl.backtest_forecast` (this repo's own
-code, run on two real historical windows, scored against a causally-denoised
-actual):
+**Final result — delta target closes the regime-drift gap:** an earlier
+absolute-value GBT (still in git history as `gbt_forecast_60s.txt` /
+`gbt_forecast_meta.json`) reached 5.69 °C on held-out test after fixing a
+separate causal-smoothing leak, but showed a *same-direction,
+different-magnitude* bias across two independent real backtests (8.29 °C on
+a volatile morning vs 3.66 °C on a calm afternoon) — the signature of a model
+that implicitly encodes "what operating regime was I trained in" via
+absolute temperature level. `feature/digital-twin-ml` hit this exact failure
+mode with absolute-target models (scored *worse than persistence*) and fixed
+it by predicting the temperature **change**, using **momentum** features
+(deviation-from-now) for the target's own history instead of absolute levels.
+Applying the same fix here (`nn_twin/plc_pipeline_delta.py` /
+`backend/models/gbt_delta_meta.json`):
 
-| Window | n | MAE | RMSE | Bias |
-|---|---|---|---|---|
-| 2026-08-10 06:00–12:00 (volatile) | 72 | 8.29 °C | 11.42 | −7.61 |
-| 2026-08-05 12:00–18:00 (calm) | 72 | 3.66 °C | 4.81 | −3.02 |
-| **combined average** | 144 | **~5.98 °C** | — | — |
+| | Held-out test (training) | Live backtest, 2026-08-10 06:00–12:00 (volatile) | Live backtest, 2026-08-05 12:00–18:00 (calm) |
+|---|---|---|---|
+| **Delta-target GBT** | **2.53 °C** (RMSE 3.39, R² 0.95) | **2.61 °C** (bias −0.88) | **1.99 °C** (bias +0.03) |
+| Prior absolute-value GBT | 5.69 °C | 8.29 °C (bias −7.61) | 3.66 °C (bias −3.02) |
+| Persistence baseline | 3.52 °C | — | — |
 
-The causal fix closed most of the training/serving gap — the two numbers are
-now measuring the same thing, and the combined empirical accuracy (~6 °C) is
-close to the training-reported 5.69 °C, versus the old ~7–9 °C live range.
-**But accuracy is genuinely regime-dependent**: ~3.7 °C on a calm afternoon,
-~8.3 °C during a more volatile morning. Both windows show a negative bias
-(predictions run low) in the same *direction* but different *magnitude* — the
-same non-stationary-drift pattern found elsewhere in this repo (the LSTM soft
-sensor in `../nn_twin/`, the retired point-in-time GBT twin in
-`backend/analysis.py`). A fixed bias correction was tried previously and made
-an out-of-sample window worse, so **no bias correction is baked into
-`backend/forecast.py`**. Treat **~5–6 °C on typical periods, up to ~8 °C
-during faster-moving regimes** as the honest range — not a single guaranteed
-number. Full detail in `backend/models/gbt_forecast_meta.json`.
+Both the training number and both independent live backtests now agree
+closely (~2–2.6 °C), **comfortably inside the ±5 °C target**, and — the more
+important change — the regime-dependent bias is gone (both windows near
+zero, versus −7.6/−3.0 before). This is verified with `python -m
+etl.backtest_forecast` against real historical data through this repo's own
+serving code path (`backend.forecast.forecast_from_recent`), not just a
+training-time number. Full detail, including *why* momentum features fix
+this (deviation-from-now is regime-invariant; absolute lags/rolling-means
+aren't), in `backend/models/gbt_delta_meta.json`.
 
 **Known gap:** `process_live`'s OPC mapping doesn't carry 2 of the 31 tags
 (`423CN150_TT_1`, `K3V10_F1`); `forecast.py` imputes them from their
@@ -149,3 +150,29 @@ number. Full detail in `backend/models/gbt_forecast_meta.json`.
 forecast in its own panel, polling `/api/forecast` every 5 s, independent of
 the what-if lever sliders (which still use the original kNN surrogate) — see
 `frontend/app/simulator/page.tsx`.
+
+<details>
+<summary><strong>History: how this model evolved (leakage → causal fix → regime bias → delta fix)</strong></summary>
+
+1. **v1 (absolute value, non-causal smoothing):** training reported 5.73 °C
+   MAE, but used a *centered* Savitzky-Golay filter that smoothed "now" using
+   both past **and future** samples — impossible for live serving to
+   reproduce. An independent backtest found the real live accuracy was
+   ~7–9 °C.
+2. **v2 (absolute value, causal smoothing):** replaced the centered filter
+   with a trailing-only rolling mean in both training and serving, so
+   training's evaluation matched what serving could actually compute.
+   Retrained test MAE: 5.69 °C. But live backtests revealed a
+   same-direction, different-magnitude bias (8.29 °C vs 3.66 °C across two
+   windows) — a *regime-drift* problem, not a leakage problem.
+3. **v3 (delta target, momentum features) — current:** predicts temperature
+   *change*, using deviation-from-now instead of absolute level for the
+   target's own history. Test MAE 2.53 °C, live backtests 2.61/1.99 °C, bias
+   near zero on both. See "Final result" above.
+
+A fixed bias correction was tried on v2 (applying one window's bias as a
+constant offset to the other) and made things *worse*, confirming the bias
+was regime-dependent, not a stable constant — this is *why* v3's structural
+fix (removing the regime leak from the features) was the right move rather
+than trying to patch v2 with a correction term.
+</details>

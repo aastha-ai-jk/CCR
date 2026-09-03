@@ -102,8 +102,10 @@ def main() -> None:
     mae, rmse, bias = np.mean(np.abs(err)), np.sqrt(np.mean(err ** 2)), np.mean(err)
     print(f"\n================ BACKTEST ({len(preds)} query points) ================")
     print(f"window: {q_start} -> {args.end}")
+    meta = forecast._model()[1]
+    train_mae = meta.get("test_metrics_absolute_degC", meta.get("test_metrics", {})).get("mae")
     print(f"MAE={mae:.3f} degC  RMSE={rmse:.3f} degC  BIAS(pred-actual)={bias:+.3f} degC  "
-          f"(training-reported: MAE={forecast._model()[1]['test_metrics']['mae']:.3f})")
+          f"(training-reported: MAE={train_mae:.3f})")
     if args.bias_correct is not None:
         c_err = (preds + args.bias_correct) - actuals
         print(f"AFTER +{args.bias_correct:.2f} correction: "

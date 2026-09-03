@@ -1,11 +1,22 @@
 """ML twin: calciner-temperature forecast, 60 s ahead.
 
-This is the real trained model (validated held-out test MAE = 5.73 degC,
-RMSE = 8.15, R2 = 0.69 -- see backend/models/gbt_forecast_meta.json) -- a
-LightGBM regressor trained on 1-second-resolution PLC data (nn_twin/plc_pipeline.py,
-a sandbox outside this app) using lag(1/5/10/60 s) and rolling-window
-(5-min mean/std/skew + EMA) features of all 31 PLC tags, plus cyclical time
-encodings. Predicts the ABSOLUTE calciner outlet temperature 60 seconds ahead.
+DELTA-TARGET model (nn_twin/plc_pipeline_delta.py, a sandbox outside this
+app): predicts temperature CHANGE over 60s, not the absolute value, using
+regime-invariant MOMENTUM features (deviation-from-now) for the target tag's
+own history -- lag/rolling-mean/EMA become "how far is history from right
+now", not an absolute level. Every OTHER tag (levers, disturbances, safety)
+stays absolute, since their level is causally meaningful. Serving reconstructs
+the absolute prediction as current_temp + predicted_delta.
+
+Why: the PRIOR absolute-value model (still in git history as
+gbt_forecast_60s.txt / gbt_forecast_meta.json) hit 5.69 degC on held-out test
+but showed a same-direction, different-magnitude bias across two independent
+real backtests (8.29 degC on a volatile morning vs 3.66 degC on a calm
+afternoon) -- the classic signature of a model that implicitly encoded "what
+operating regime was I trained in" via absolute temperature levels. The
+delta-target design removes that regime leak (same fix already proven in a
+colleague's feature/digital-twin-ml branch, which found absolute-target
+models scored WORSE than persistence). Retrained test MAE: 2.53 degC.
 
 Why this is a SEPARATE capability from backend.analysis.simulate():
 simulate() answers a hypothetical "what if I set these levers to X" query, so
@@ -32,21 +43,23 @@ import pandas as pd
 
 from backend import db
 
-MODEL_PATH = Path(__file__).resolve().parent / "models" / "gbt_forecast_60s.txt"
-META_PATH = Path(__file__).resolve().parent / "models" / "gbt_forecast_meta.json"
+MODEL_PATH = Path(__file__).resolve().parent / "models" / "gbt_delta_60s.txt"
+META_PATH = Path(__file__).resolve().parent / "models" / "gbt_delta_meta.json"
 
 LAGS_S = (1, 5, 10, 60)
 ROLL_WINDOW_S = 300              # 5-minute rolling window (matches training)
 ROLL_MIN_PERIODS = 30            # == max(5, ROLL_WINDOW_S // 10), matches training
 # CAUSAL denoise window (seconds) -- must equal CFG.smooth_window in
-# nn_twin/plc_pipeline.py. Was a Savitzky-Golay filter (centered/symmetric),
-# which denoises "now" using FUTURE samples -- impossible live. A trailing
-# rolling mean only looks backward, so serving computes exactly what training
-# scored (see plc_pipeline.py's CFG.smooth_window comment for the full story:
-# the old mismatch made the reported 5.73 degC MAE unreachable live).
+# nn_twin/plc_pipeline.py. A trailing rolling mean only looks backward, so
+# serving computes exactly what training scored.
 SMOOTH_WINDOW = 11
 MIN_BUFFER_S = 360               # >= ROLL_WINDOW_S + max(LAGS_S), with margin
 CV = "423CI400_TT_4"
+# The target tag's own lag/rolling-mean/EMA features are MOMENTUM (deviation
+# from "now"), not absolute levels -- must match plc_pipeline_delta.py's
+# MOM_STATS/momentum_tag exactly, or serving silently diverges from training.
+MOMENTUM_TAG = CV
+MOMENTUM_ROLL_STATS = ("rmean",)   # rstd/rskew stay absolute even for CV (level-free already)
 
 
 @lru_cache(maxsize=1)
@@ -100,21 +113,28 @@ def _prep_1s_grid(df: pd.DataFrame, tags: list[str]) -> pd.DataFrame | None:
 
 
 def _feature_row(g: pd.DataFrame, feat_names: list[str]) -> np.ndarray:
-    """Compute every model feature at the LAST row of `g` (the 'now' instant)."""
+    """Compute every model feature at the LAST row of `g` (the 'now' instant).
+    For MOMENTUM_TAG (the target's own history), lag/rolling-mean/EMA are
+    DEVIATIONS from the current value -- must mirror plc_pipeline_delta.py's
+    add_features_delta() exactly, or serving silently diverges from training."""
     last = g.index[-1]
     vals: dict[str, float] = {}
     for tag in g.columns:
         s = g[tag]
+        cur = float(s.iloc[-1])
+        is_mom = (tag == MOMENTUM_TAG)
         for k in LAGS_S:
-            vals[f"{tag}__lag{k}"] = float(s.iloc[-1 - k]) if len(s) > k else float(s.iloc[0])
+            raw = float(s.iloc[-1 - k]) if len(s) > k else float(s.iloc[0])
+            vals[f"{tag}__lag{k}"] = (raw - cur) if is_mom else raw
         window = s.iloc[-ROLL_WINDOW_S:]
-        vals[f"{tag}__rmean{ROLL_WINDOW_S}"] = float(window.mean())
-        vals[f"{tag}__rstd{ROLL_WINDOW_S}"] = float(window.std())
-        vals[f"{tag}__rskew{ROLL_WINDOW_S}"] = float(window.skew())
+        rmean = float(window.mean())
+        vals[f"{tag}__rmean{ROLL_WINDOW_S}"] = (rmean - cur) if (is_mom and "rmean" in MOMENTUM_ROLL_STATS) else rmean
+        vals[f"{tag}__rstd{ROLL_WINDOW_S}"] = float(window.std())     # always absolute (level-free already)
+        vals[f"{tag}__rskew{ROLL_WINDOW_S}"] = float(window.skew())   # always absolute (level-free already)
         # EWM is recursive from series start; using the available buffer is the
         # practical live approximation (see forecast_from_recent docstring).
-        vals[f"{tag}__ema{ROLL_WINDOW_S}"] = float(
-            s.ewm(span=ROLL_WINDOW_S, min_periods=ROLL_MIN_PERIODS).mean().iloc[-1])
+        ema = float(s.ewm(span=ROLL_WINDOW_S, min_periods=ROLL_MIN_PERIODS).mean().iloc[-1])
+        vals[f"{tag}__ema{ROLL_WINDOW_S}"] = (ema - cur) if is_mom else ema
     hour, dow, month = last.hour, last.dayofweek, last.month - 1
     vals["hour_sin"], vals["hour_cos"] = np.sin(2 * np.pi * hour / 24), np.cos(2 * np.pi * hour / 24)
     vals["dow_sin"], vals["dow_cos"] = np.sin(2 * np.pi * dow / 7), np.cos(2 * np.pi * dow / 7)
@@ -145,18 +165,20 @@ def forecast_from_recent(df: pd.DataFrame) -> dict:
                           f"(got {len(df)} raw rows)"}
 
     x = _feature_row(g, feat_names)
-    pred_temp = float(bst.predict(x)[0])
     now_temp = float(g[CV].iloc[-1]) if CV in g.columns else None
+    pred_delta = float(bst.predict(x)[0])
+    pred_temp = None if now_temp is None else now_temp + pred_delta
 
+    m = meta["test_metrics_absolute_degC"]
     return {
         "available": True,
-        "predicted_temp_60s": round(pred_temp, 1),
+        "predicted_temp_60s": None if pred_temp is None else round(pred_temp, 1),
         "current_temp": None if now_temp is None else round(now_temp, 1),
-        "predicted_change": None if now_temp is None else round(pred_temp - now_temp, 1),
+        "predicted_change": round(pred_delta, 1),
         "horizon_s": 60,
-        "method": "gbt-lag-rolling",
-        "model_test_mae": meta["test_metrics"]["mae"],
-        "model_test_r2": meta["test_metrics"]["r2"],
+        "method": "gbt-delta-momentum",
+        "model_test_mae": m["mae"],
+        "model_test_r2": m["r2"],
         "as_of": str(g.index[-1]),
         "imputed_tags": missing,
     }

@@ -239,7 +239,7 @@ export default function Simulator() {
 
           {/* GBT forecast, 1-second-data model, 60s ahead -- independent of the
               what-if sliders above (real recent trajectory, not a hypothetical) */}
-          <Panel title="GBT forecast — 60s ahead (1-second-data model)">
+          <Panel title="GBT forecast — 60s ahead (delta-target, 1-second data)">
             {!forecast ? <Loading /> : !forecast.available ? (
               <div className="text-xs text-[var(--muted)] text-center py-3">
                 {forecast.reason || "unavailable"}
@@ -259,8 +259,9 @@ export default function Simulator() {
                 </div>
                 <div className="text-center text-[10px] text-[var(--muted)] mt-2 leading-snug">
                   Real live trajectory, not a what-if — unaffected by slider overrides above.
-                  Causally-retrained MAE {forecast.model_test_mae?.toFixed(1)}°C (train/serve match, no future-data leakage);
-                  independent live backtests found ~4–8°C depending on plant regime (see README).
+                  Predicts temperature CHANGE (not absolute level) from momentum features, so it
+                  doesn't drift with the plant's operating regime. Test MAE {forecast.model_test_mae?.toFixed(1)}°C;
+                  independent live backtests found ~2–2.6°C on two real historical windows (see README).
                   {forecast.imputed_tags?.length > 0 && (
                     <> · imputed: {forecast.imputed_tags.join(", ")}</>
                   )}
