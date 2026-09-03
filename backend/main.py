@@ -117,13 +117,18 @@ def series(tags: str = Query(...), start: str | None = None, end: str | None = N
     if not tlist:
         return {"tags": [], "points": []}
 
-    # A "window" (day|week|month) anchors to the newest data available in the
-    # historian (which ends mid-July) rather than today's empty date, and picks
-    # a sensible bucket so each range shows ~200-300 points. Explicit start/end
+    # A "window" (day|week|month) anchors to the NEWEST data across the
+    # historian AND the live feed (the historian only grows on the weekly
+    # ingest — anchoring to it alone left the "live" overview days stale) and
+    # picks a bucket so each range shows ~200-300 points. Explicit start/end
     # override it; the bucket is derived per window.
     if window and not (start or end):
-        mx = db.q("SELECT MAX(ts) AS m FROM process_1min")["m"][0]
-        end_dt = pd.to_datetime(mx)
+        anchors = [db.q("SELECT MAX(ts) AS m FROM process_1min")["m"][0]]
+        try:
+            anchors.append(db.q("SELECT MAX(ts) AS m FROM process_live")["m"][0])
+        except Exception:
+            pass
+        end_dt = max(pd.to_datetime(a, format="mixed") for a in anchors if a)
         spec = {"day": (1, "5min"), "week": (7, "30min"), "month": (30, "3h")}
         days, wbucket = spec.get(window, (7, "30min"))
         start = (end_dt - pd.Timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -140,8 +145,34 @@ def series(tags: str = Query(...), start: str | None = None, end: str | None = N
         where.append("ts <= :end"); params["end"] = end
     w = ("WHERE " + " AND ".join(where)) if where else ""
     df = db.q(f"SELECT ts, {cols} FROM process_1min {w} ORDER BY ts", params)
-    df["ts"] = pd.to_datetime(df["ts"])
+    df["ts"] = pd.to_datetime(df["ts"], format="mixed")
     df = df.set_index("ts").apply(pd.to_numeric, errors="coerce")
+
+    # Extend with 1-min aggregates from the live feed for minutes the weekly
+    # ingest hasn't folded into the historian yet. NB the two tables use
+    # different ts text formats ('...T...' vs '... ...'), so SQL gets only a
+    # coarse date-prefix filter and the precise bounds are applied in pandas.
+    if start or end:
+        try:
+            feed = config.KILN_FEED_TAG
+            lcols = ", ".join(f'"{t}"' for t in dict.fromkeys([*tlist, feed]))
+            ldf = db.q(f"SELECT ts, {lcols} FROM process_live WHERE ts >= :d",
+                       {"d": (start or "1970-01-01")[:10]})
+            if len(ldf):
+                ldf["ts"] = pd.to_datetime(ldf["ts"], format="mixed")
+                ldf = (ldf.set_index("ts").apply(pd.to_numeric, errors="coerce")
+                       .resample("1min").mean())
+                if in_load and feed in ldf.columns:
+                    ldf = ldf[ldf[feed] > config.KILN_FEED_MIN_TPH]
+                ldf = ldf[[t for t in tlist if t in ldf.columns]]
+                df = pd.concat([df, ldf[~ldf.index.isin(df.index)]]).sort_index()
+        except Exception:
+            pass                                  # live table absent -> historian only
+        if start:
+            df = df[df.index >= pd.to_datetime(start)]
+        if end:
+            df = df[df.index <= pd.to_datetime(end)]
+
     if bucket and bucket != "raw":
         df = df.resample(bucket).mean()
     df = df.round(2).reset_index()

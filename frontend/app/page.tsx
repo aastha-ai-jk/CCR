@@ -96,7 +96,8 @@ export default function Overview() {
             <ResponsiveContainer>
               <LineChart data={trend} margin={{ top: 5, right: 10, left: -10, bottom: 0 }}>
                 <CartesianGrid stroke="#223252" strokeDasharray="3 3" />
-                <XAxis dataKey="ts" tick={{ fill: "#8ea3c4", fontSize: 10 }} minTickGap={40} />
+                <XAxis dataKey="ts" tick={{ fill: "#8ea3c4", fontSize: 10 }} minTickGap={40}
+                       tickFormatter={(v: string) => v.slice(5)} />
                 <YAxis domain={[820, 960]} tick={{ fill: "#8ea3c4", fontSize: 10 }} />
                 <Tooltip contentStyle={{ background: "#16233d", border: "1px solid #223252", borderRadius: 8, color: "#e6edf7" }} />
                 <ReferenceArea y1={band.low} y2={band.high} fill="#22c55e" fillOpacity={0.12} />
