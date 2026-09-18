@@ -41,3 +41,34 @@ def safe_tags(tags: list[str]) -> list[str]:
 
 def q(sql: str, params: dict | None = None) -> pd.DataFrame:
     return pd.read_sql(text(sql), _engine, params=params or {})
+
+
+def log_advisory_decision(row: dict) -> None:
+    """Audit trail: operator's accept/decline of a recommended move, with the
+    reasoning that was shown at the time (never re-derived later, so the log
+    reflects what the operator actually saw)."""
+    with _engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS advisory_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                operating_state TEXT,
+                mode TEXT,
+                target_band_low REAL,
+                target_band_high REAL,
+                live_actual_temp REAL,
+                predicted_temp REAL,
+                moves_json TEXT,
+                reasoning TEXT,
+                note TEXT
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO advisory_decisions
+                (ts, decision, operating_state, mode, target_band_low, target_band_high,
+                 live_actual_temp, predicted_temp, moves_json, reasoning, note)
+            VALUES
+                (:ts, :decision, :operating_state, :mode, :target_band_low, :target_band_high,
+                 :live_actual_temp, :predicted_temp, :moves_json, :reasoning, :note)
+        """), row)

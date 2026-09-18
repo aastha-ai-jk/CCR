@@ -62,6 +62,13 @@ export const api = {
   overview: () => get("/api/overview"),
   latest: () => get("/api/latest"),
   advisory: () => get("/api/advisory"),
+  advisoryDecision: (payload: {
+    decision: "accepted" | "declined";
+    operating_state?: string; mode?: string;
+    target_band_low?: number; target_band_high?: number;
+    live_actual_temp?: number; predicted_temp?: number;
+    moves?: unknown[]; reasoning?: string; note?: string;
+  }) => post("/api/advisory/decision", payload),
   trend: (tag = "423CI400_TT_4", minutes = 60) =>
     get(`/api/trend?tag=${tag}&minutes=${minutes}`),
   series: (tags: string[], p: { start?: string; end?: string; bucket?: string; in_load?: boolean } = {}) => {

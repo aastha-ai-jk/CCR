@@ -1,10 +1,11 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, Map, Database, GitCompare, SlidersHorizontal, Factory } from "lucide-react";
+import { Activity, Map, Database, GitCompare, SlidersHorizontal, Factory, Lightbulb } from "lucide-react";
 
 const NAV = [
   { href: "/", label: "Live Overview", icon: Activity },
+  { href: "/advisory", label: "Advisory", icon: Lightbulb },
   { href: "/twin", label: "Digital Twin", icon: Factory },
   { href: "/roadmap", label: "Roadmap", icon: Map },
   { href: "/explorer", label: "Data Explorer", icon: Database },

@@ -5,10 +5,11 @@ Run:  python -m uvicorn backend.main:app --reload --port 8000
 from __future__ import annotations
 
 import datetime as _dt
+import json
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -300,6 +301,42 @@ def advisory():
     adv["breakdown"] = analysis.savings_breakdown(
         adv, snap, days_per_year=adv["assumptions"]["operating_days_per_year"])
     return adv
+
+
+class AdvisoryDecision(BaseModel):
+    decision: str                      # "accepted" | "declined"
+    operating_state: str | None = None
+    mode: str | None = None
+    target_band_low: float | None = None
+    target_band_high: float | None = None
+    live_actual_temp: float | None = None
+    predicted_temp: float | None = None
+    moves: list = []
+    reasoning: str | None = None
+    note: str | None = None            # optional free-text, e.g. decline reason
+
+
+@app.post("/api/advisory/decision")
+def advisory_decision(req: AdvisoryDecision):
+    """Log the operator's accept/decline of a shown recommendation, together
+    with the reasoning as displayed. Advisory-only: this never writes to any
+    control system, it only records what the operator chose to do."""
+    if req.decision not in ("accepted", "declined"):
+        raise HTTPException(400, "decision must be 'accepted' or 'declined'")
+    db.log_advisory_decision({
+        "ts": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "decision": req.decision,
+        "operating_state": req.operating_state,
+        "mode": req.mode,
+        "target_band_low": req.target_band_low,
+        "target_band_high": req.target_band_high,
+        "live_actual_temp": req.live_actual_temp,
+        "predicted_temp": req.predicted_temp,
+        "moves_json": json.dumps(req.moves),
+        "reasoning": req.reasoning,
+        "note": req.note,
+    })
+    return {"ok": True}
 
 
 @app.get("/api/savings")
