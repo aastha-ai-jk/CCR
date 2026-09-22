@@ -300,6 +300,24 @@ def advisory():
     # per-parameter energy + money breakdown
     adv["breakdown"] = analysis.savings_breakdown(
         adv, snap, days_per_year=adv["assumptions"]["operating_days_per_year"])
+
+    # "Locked" decline: if the operator's last decision for this exact
+    # situation (same operating state + same side of the band) was a
+    # decline, resurface their own reasoning instead of silently repeating
+    # the same suggestion as if it were new.
+    band = adv.get("target_band")
+    temp = adv.get("live_actual_temp")
+    if band and temp is not None:
+        direction = "above" if temp > band["high"] else "below" if temp < band["low"] else "within"
+        last = db.latest_decision_for_situation(adv["operating_state"], direction)
+        if last is not None and last.get("decision") == "declined":
+            adv["locked_decline"] = {
+                "ts": last.get("ts"),
+                "direction": direction,
+                "note": _san(last.get("note")),
+                "live_actual_temp": _san(last.get("live_actual_temp")),
+                "predicted_temp": _san(last.get("predicted_temp")),
+            }
     return adv
 
 

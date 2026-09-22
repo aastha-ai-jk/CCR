@@ -72,3 +72,34 @@ def log_advisory_decision(row: dict) -> None:
                 (:ts, :decision, :operating_state, :mode, :target_band_low, :target_band_high,
                  :live_actual_temp, :predicted_temp, :moves_json, :reasoning, :note)
         """), row)
+
+
+def latest_decision_for_situation(operating_state: str, direction: str) -> dict | None:
+    """The most recent operator decision (accept OR decline) for this
+    operating state + temperature direction (above/below/within its band) --
+    the "situation" the operator is currently facing. Direction is derived
+    from each historical row's own band/temp rather than stored directly, so
+    it stays correct even if band definitions are ever retuned.
+
+    Used to "lock in" a decline: if the last decision for this exact
+    situation was a decline, the operator's own reasoning is resurfaced next
+    time the plant lands back in it -- until a future accept for the same
+    situation clears the lock."""
+    try:
+        df = q("""
+            SELECT ts, decision, target_band_low, target_band_high, live_actual_temp,
+                   predicted_temp, moves_json, reasoning, note
+            FROM advisory_decisions
+            WHERE operating_state = :state
+            ORDER BY id DESC
+        """, {"state": operating_state})
+    except Exception:
+        return None  # table not created yet -- no decisions logged so far
+    for _, row in df.iterrows():
+        lo, hi, t = row["target_band_low"], row["target_band_high"], row["live_actual_temp"]
+        if pd.isna(lo) or pd.isna(hi) or pd.isna(t):
+            continue
+        d = "above" if t > hi else "below" if t < lo else "within"
+        if d == direction:
+            return row.to_dict()
+    return None

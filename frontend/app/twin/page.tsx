@@ -4,7 +4,7 @@ import { api } from "@/lib/api";
 import Mimic from "@/components/Mimic";
 import SavingsPanel from "@/components/SavingsPanel";
 import { Panel, Badge, Loading } from "@/components/ui";
-import { Check, X } from "lucide-react";
+import { Check, X, Lock } from "lucide-react";
 
 const fmt = (v: any, d = 1) =>
   v === null || v === undefined || isNaN(Number(v)) ? "—" : Number(v).toFixed(d);
@@ -227,6 +227,25 @@ export default function DigitalTwin() {
             )}
           </Panel>
       </div>
+
+      {/* ---------------- locked decline: operator has said no to this exact situation before ---------------- */}
+      {adv?.locked_decline && (
+        <Panel className="border border-[var(--warn)]">
+          <div className="flex items-center gap-2 text-sm font-semibold text-[var(--warn)]">
+            <Lock size={15} /> Locked — an operator declined this same situation before
+          </div>
+          <div className="text-[11px] text-[var(--muted)] mt-1 leading-relaxed">
+            On {adv.locked_decline.ts}, with the plant in {adv.operating_state} and temperature
+            {" "}{adv.locked_decline.direction === "within" ? "inside" : adv.locked_decline.direction}{" "}
+            the band (then {fmt(adv.locked_decline.live_actual_temp, 0)} °C), a similar
+            recommendation was declined{adv.locked_decline.note
+              ? <> — reason given: <span className="text-[var(--ink)]">&ldquo;{adv.locked_decline.note}&rdquo;</span></>
+              : " (no reason was given)"}.
+            This is why the plant is still being run this way now; it stays locked until an
+            operator accepts a similar recommendation again.
+          </div>
+        </Panel>
+      )}
 
       {/* ---------------- fuel-saving advisory: recommendation, reasoning, accept/decline ---------------- */}
       <div className="grid grid-cols-12 gap-4 items-start">
