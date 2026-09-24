@@ -29,6 +29,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 
 import config
+from backend.analysis import CV
 
 MODELS = Path(__file__).resolve().parent.parent / "models"
 LOG_PATH = MODELS / "monitor_log.jsonl"
@@ -60,6 +61,39 @@ def _accuracy(m: pd.DataFrame) -> dict:
             "within5C": _r((err <= 5).mean(), 3), "within10C": _r((err <= 10).mean(), 3),
             "interval_coverage": _r(cov, 3),
             "in_band_pct": _r(m["in_band_now"].mean(), 3)}
+
+
+def _accuracy_smooth(m: pd.DataFrame, eng) -> dict:
+    """Same predictions scored against the 3-min-centred 1-min-mean temperature.
+
+    The twin is trained on that smoothed target; the instantaneous 2-s sample
+    used by _accuracy carries ~2 degC of within-minute sensor jitter, so this
+    is the fair number. Also reports persistence + skill on the same truth.
+    """
+    if not len(m):
+        return {"n": 0}
+    try:
+        lo = (pd.to_datetime(m["ts"], format="mixed").min() - pd.Timedelta(minutes=5)).isoformat(timespec="seconds")
+        hi = (pd.to_datetime(m["horizon_ts"], format="mixed").max() + pd.Timedelta(minutes=5)).isoformat(timespec="seconds")
+        pl = pd.read_sql(text(f'SELECT ts, "{CV}" AS v FROM process_live WHERE ts >= :lo AND ts <= :hi'),
+                         eng, params={"lo": lo, "hi": hi})
+        pl["ts"] = pd.to_datetime(pl["ts"], format="mixed")
+        m1 = pl.set_index("ts")["v"].sort_index().resample("1min").mean()
+        truth = m1.rolling(3, center=True, min_periods=2).mean()
+        hts = pd.to_datetime(m["horizon_ts"], format="mixed").dt.floor("min")
+        t = truth.reindex(hts).to_numpy()
+        ok = ~np.isnan(t)
+        if ok.sum() < 10:
+            return {"n": int(ok.sum())}
+        err = np.abs(m["pred_mean"].to_numpy()[ok] - t[ok])
+        pers = np.abs(m["actual_now"].to_numpy()[ok] - t[ok])
+        return {"n": int(ok.sum()), "mae": _r(err.mean()), "median_ae": _r(np.median(err)),
+                "within5C": _r((err <= 5).mean(), 3), "within10C": _r((err <= 10).mean(), 3),
+                "persistence_mae": _r(pers.mean()),
+                "skill_pct": _r((1 - err.mean() / pers.mean()) * 100, 1) if pers.mean() else None,
+                "truth": "3-min centred mean of 1-min means"}
+    except Exception as e:
+        return {"n": 0, "error": str(e)[:120]}
 
 
 def _conformal(m3: pd.DataFrame) -> dict | None:
@@ -120,11 +154,13 @@ def main() -> None:
     now = dt.datetime.now()
     cut24 = (now - dt.timedelta(hours=24)).isoformat(timespec="seconds")
     cut3d = (now - dt.timedelta(days=_CONF_DAYS)).isoformat(timespec="seconds")
+    cut7d = (now - dt.timedelta(days=7)).isoformat(timespec="seconds")
 
     log = pd.read_sql("SELECT * FROM shadow_log", eng)
     m_all = log[log["matured"] == 1]
     m_24 = m_all[m_all["ts"] >= cut24]
     m_3d = m_all[m_all["ts"] >= cut3d]
+    m_7d = m_all[m_all["ts"] >= cut7d]
 
     # signed bias: raw model vs plant (drift signal) and served (post-correction,
     # should hover near zero once the offset-free correction is active)
@@ -141,6 +177,8 @@ def main() -> None:
         "bias_24h": _bias(m_24),
         "acc_24h": _accuracy(m_24),
         "acc_all": _accuracy(m_all),
+        "acc_24h_smooth": _accuracy_smooth(m_24, eng),
+        "acc_7d_smooth": _accuracy_smooth(m_7d, eng),
         "conformal": _conformal(m_3d),
         "afr_24h": _afr_summary(eng, cut24),
         "mnv_followed": _mnv_followed(log[log["ts"] >= cut3d]),
@@ -153,6 +191,9 @@ def main() -> None:
     a = entry["acc_24h"]
     print(f"[monitor] 24h: n={a.get('n')} MAE={a.get('mae')} "
           f"within10C={a.get('within10C')} coverage={a.get('interval_coverage')}")
+    s = entry["acc_24h_smooth"]
+    print(f"[monitor] 24h vs smoothed truth: MAE={s.get('mae')} persistence={s.get('persistence_mae')} "
+          f"skill={s.get('skill_pct')}%")
     print(f"[monitor] conformal: {entry['conformal']}")
     print(f"[monitor] afr: {entry['afr_24h']}")
     print(f"[monitor] mnv: {entry['mnv_followed']}")

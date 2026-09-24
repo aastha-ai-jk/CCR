@@ -35,8 +35,13 @@ _BASE_PARAMS = {
     "bagging_freq": 1,
     "max_depth": -1,
     "verbose": -1,
+    "num_threads": _THREADS,
 }
 _NUM_ROUNDS = 2000
+# 2026-09-23: cap threads. Without it LightGBM grabbed all 32 cores while the
+# shadow (~8) + optimizer (~5) loops were busy -> OpenMP oversubscription made
+# the weekly retrain take ~9 h (02:00 -> 10:50). Capped fits run in 1-3 min each.
+_THREADS = 20
 _EARLY_STOP = 40
 _ARX_W = 0.4        # v6 served-mean blend weight for the ridge ARX (exp_squeeze4)
 
@@ -83,7 +88,7 @@ def _folds(x: pd.DataFrame, y: pd.Series, split: pd.Series,
     return out
 
 
-def train(sample: int | None) -> dict:
+def train(sample: int | None, test_out: dict | None = None) -> dict:
     data = F.build_training_data(sample)
     x, y, split, cv0 = data["X"], data["y"], data["split"], data["cv0"]
     print(f"[twin] rows={len(x)} features={x.shape[1]} "
@@ -157,6 +162,9 @@ def train(sample: int | None) -> dict:
                 "temp": {"mae": hm["baseline_mae"], "rmse": _scores(yt, cv_np)["rmse"]}}
             metrics["n_train"] = int(len(x_tr))
             metrics["n_test"] = int(len(x_te))
+            if test_out is not None:            # same-window retrain guard
+                test_out.update({"x": x_te, "y_raw": yt, "cv": cv_np,
+                                 "feature_columns": list(x_te.columns)})
 
     # --- safety signals ----------------------------------------------------
     bundle["safety"] = {}
