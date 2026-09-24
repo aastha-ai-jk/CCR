@@ -139,47 +139,66 @@ def simulate(levers: dict, conditions: dict | None = None, k: int = 400) -> dict
     (current temp + PLC state), then move PC temperature and the safety signals
     per the cardinal relationships in PC_Temp_Variable_Mapping.docx — every
     manipulated variable pulls temperature by its documented direction/strength."""
-    m = _matrix()
     conditions = conditions or {}
-
-    T0 = float(conditions.get("current_temp") or m["temp_med"])
-    trend = float(conditions.get("temp_trend", 0.0))
-    state = [float(conditions.get(s, m["state_med"][s])) for s in STATE_PLC]
-    cq = (np.array([T0, trend] + state) - m["cmu"]) / m["csd"]
-
-    d = np.sqrt(((m["Cn"] - cq) ** 2).sum(1))
-    k = min(k, len(d) - 1)
-    idx = np.argpartition(d, k)[:k]
-    w = 1.0 / (d[idx] + 1e-6)
-    yk, Sk = m["y"][idx], m["S"][idx]
-
-    lv = {t: float(levers.get(t, m["lever_med"][t])) for t in MV}
-    Lref = dict(zip(MV, np.average(m["L"][idx], axis=0, weights=w)))
-
-    # ---- PC temperature: neighbourhood baseline + cardinal-relationship pulls ----
-    dtemp_ref = float(np.average(yk, weights=w))
-    contributions = {}
-    for t in MV:
-        sign, tier = MV_TEMP[t]
-        c = sign * TIER_DEG[tier] / m["ranges"][t] * (lv[t] - Lref[t])
-        contributions[t] = round(float(c), 1)
-    temp_mean = T0 + dtemp_ref + sum(contributions.values())
-    resid_std = float(np.sqrt(np.average((yk - dtemp_ref) ** 2, weights=w)))
-
-    # ---- safety signals: neighbourhood baseline + documented MV effects ----
-    Sbase = np.average(Sk, axis=0, weights=w)
 
     def R(v):
         return round(float(v), 1)   # native float — FastAPI JSON rejects np.float64
 
-    pred = {CV: {"mean": R(temp_mean), "p10": R(temp_mean - 1.28 * resid_std),
-                 "p90": R(temp_mean + 1.28 * resid_std)}}
-    for j, tag in enumerate(SAFETY):
-        val = float(Sbase[j])
-        for drv, coef in SAFETY_EFFECT.get(tag, {}).items():
-            val += coef / m["ranges"][drv] * (lv[drv] - Lref[drv])
-        p10, p90 = np.percentile(Sk[:, j], [10, 90])
-        pred[tag] = {"mean": R(max(0.0, val)), "p10": R(max(0.0, p10)), "p90": R(p90)}
+    # ---- Trained GBT twin first; kNN surrogate stays the fallback ------------
+    # A twin failure must never break the endpoint — swallow and fall back.
+    core = None
+    try:
+        from twin import model as twin_model
+        core = twin_model.predict_core(levers, conditions)
+    except Exception:
+        core = None
+
+    m = _matrix()
+    T0 = float(conditions.get("current_temp") or m["temp_med"])
+    lv = {t: float(levers.get(t, m["lever_med"][t])) for t in MV}
+
+    if core is not None:
+        # Use the twin's prediction + SHAP contributions; skip the kNN core but
+        # keep the shared state/band/interlock/return logic below.
+        pred = core["prediction"]
+        contributions = {t: R(core["contributions"].get(t, 0.0)) for t in MV}
+        method = core.get("method", "gbt-twin")
+        neighbors = 0
+    else:
+        trend = float(conditions.get("temp_trend", 0.0))
+        state_v = [float(conditions.get(s, m["state_med"][s])) for s in STATE_PLC]
+        cq = (np.array([T0, trend] + state_v) - m["cmu"]) / m["csd"]
+
+        d = np.sqrt(((m["Cn"] - cq) ** 2).sum(1))
+        k = min(k, len(d) - 1)
+        idx = np.argpartition(d, k)[:k]
+        w = 1.0 / (d[idx] + 1e-6)
+        yk, Sk = m["y"][idx], m["S"][idx]
+        Lref = dict(zip(MV, np.average(m["L"][idx], axis=0, weights=w)))
+
+        # ---- PC temperature: neighbourhood baseline + cardinal-relationship pulls ----
+        dtemp_ref = float(np.average(yk, weights=w))
+        contributions = {}
+        for t in MV:
+            sign, tier = MV_TEMP[t]
+            c = sign * TIER_DEG[tier] / m["ranges"][t] * (lv[t] - Lref[t])
+            contributions[t] = round(float(c), 1)
+        temp_mean = T0 + dtemp_ref + sum(contributions.values())
+        resid_std = float(np.sqrt(np.average((yk - dtemp_ref) ** 2, weights=w)))
+
+        # ---- safety signals: neighbourhood baseline + documented MV effects ----
+        Sbase = np.average(Sk, axis=0, weights=w)
+
+        pred = {CV: {"mean": R(temp_mean), "p10": R(temp_mean - 1.28 * resid_std),
+                     "p90": R(temp_mean + 1.28 * resid_std)}}
+        for j, tag in enumerate(SAFETY):
+            val = float(Sbase[j])
+            for drv, coef in SAFETY_EFFECT.get(tag, {}).items():
+                val += coef / m["ranges"][drv] * (lv[drv] - Lref[drv])
+            p10, p90 = np.percentile(Sk[:, j], [10, 90])
+            pred[tag] = {"mean": R(max(0.0, val)), "p10": R(max(0.0, p10)), "p90": R(p90)}
+        method = "cardinal-relationship"
+        neighbors = int(k)
 
     # operating-window state selection (7 state-setting variables vote the band)
     votes = {}
@@ -199,8 +218,7 @@ def simulate(levers: dict, conditions: dict | None = None, k: int = 400) -> dict
     names = db.tag_names()
     interlocks = []
     for tag, (op, lim) in config.INTERLOCKS.items():
-        idx_t = TARGETS.index(tag) if tag in TARGETS else None
-        pv = pred[tag]["mean"] if idx_t is not None else None
+        pv = pred[tag]["mean"] if tag in pred else None
         ok = None if pv is None else (pv < lim if op == "<" else pv > lim)
         interlocks.append({"tag": tag, "name": names.get(tag, tag),
                            "rule": f"{op} {lim}", "predicted": pv, "pass": ok})
@@ -219,11 +237,13 @@ def simulate(levers: dict, conditions: dict | None = None, k: int = 400) -> dict
         "temp_gap": round(temp - (band[0] + band[1]) / 2, 1),
         "interlocks": interlocks,
         "all_interlocks_ok": all(i["pass"] for i in interlocks if i["pass"] is not None),
-        "neighbors": int(k),
+        "neighbors": neighbors,
         "feature_input": {t: round(lv[t], 2) for t in MV},
         "contributions": contributions,
         "relationships": relationships,
-        "t0": round(T0, 1), "horizon_min": DELTA, "method": "cardinal-relationship",
+        "t0": round(T0, 1), "horizon_min": DELTA, "method": method,
+        # v3: predicted temperature path (t+5/10/15/30) when the twin serves
+        "trajectory": (core or {}).get("trajectory"),
     }
 
 

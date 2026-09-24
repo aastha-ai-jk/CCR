@@ -1,9 +1,13 @@
-# --- Forecast twin (uat branch) ---
+# Heavy/ML libs (kept separate from the app's requirements.txt).
 # The app itself only needs lightgbm (backend/forecast.py imports it lazily;
 # GET /api/forecast returns available=False without it). polars is only for
 # the offline ETL refresh + backtest validation tools.
 lightgbm>=4.5
 polars>=1.20        # etl.load_csv_1s, etl.backtest_forecast (fast filtered CSV scans)
 
-# Referenced by docs/ROADMAP.md Phase 3 (not yet used on this branch):
-# shap, optuna, torch
+# twin/ package (feature/digital-twin-ml): training, benchmarking, live optimizer loop
+optuna>=3.6
+shap>=0.45
+joblib>=1.3
+# torch is installed separately with a CUDA index matching the GPU (see deploy notes):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128

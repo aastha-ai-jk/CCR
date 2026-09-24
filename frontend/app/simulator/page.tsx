@@ -1,8 +1,9 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { api } from "@/lib/api";
+import { api, OptimizeResult } from "@/lib/api";
 import Mimic from "@/components/Mimic";
 import { Panel, Stat, Badge, Loading } from "@/components/ui";
+import { ComposedChart, Line, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceArea } from "recharts";
 
 const CONDITIONS = [
   { key: "free_lime", label: "Free lime (clinker)", min: 0.5, max: 2.5, step: 0.1, def: 1.2, live: false },
@@ -32,6 +33,9 @@ export default function Simulator() {
   const [forecast, setForecast] = useState<any>(null);
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
   const [frozen, setFrozen] = useState(false);
+  const [opt, setOpt] = useState<OptimizeResult | null>(null);
+  const [optLoading, setOptLoading] = useState(false);
+  const [optErr, setOptErr] = useState<string | null>(null);
 
   const overridesRef = useRef(overrides); overridesRef.current = overrides;
   const frozenRef = useRef(frozen); frozenRef.current = frozen;
@@ -117,6 +121,39 @@ export default function Simulator() {
     setConds((s) => ({ ...s, [k]: v }));
   };
 
+  const runOptimize = async () => {
+    setOptLoading(true);
+    setOptErr(null);
+    try {
+      const cond = { ...conds, current_temp: baseline?.values?.["423CI400_TT_4"] };
+      const r = await api.optimize(cond);
+      setOpt(r);
+    } catch (e) {
+      setOptErr(e instanceof Error ? e.message : "Optimize failed");
+    } finally {
+      setOptLoading(false);
+    }
+  };
+
+  // Push recommended setpoints onto the sliders as overrides → the sim effect re-runs.
+  const applyRecommended = () => {
+    if (!opt) return;
+    const rec = opt.recommended;
+    setOverrides((o) => {
+      const n = { ...o };
+      for (const k of Object.keys(rec)) n[k] = true;
+      return n;
+    });
+    setLevers((s) => {
+      const n = { ...s };
+      for (const [k, v] of Object.entries(rec)) {
+        const f = defs.features[k];
+        n[k] = f ? clamp(v, f.min, f.max) : v;
+      }
+      return n;
+    });
+  };
+
   const mimicValues: Record<string, number> = { ...(baseline?.values || {}), ...levers };
   if (res) for (const [k, v] of Object.entries(res.prediction)) mimicValues[k] = (v as any).mean;
 
@@ -145,6 +182,10 @@ export default function Simulator() {
               : "border-[var(--line)] text-[var(--muted)] hover:text-[var(--ink)]"}`}>
             {frozen ? "❚❚ Frozen" : "► Freeze"}
           </button>
+          <button onClick={runOptimize} disabled={optLoading}
+            className="text-xs px-3 py-1 rounded-full border border-[var(--accent)] text-[var(--accent)] hover:bg-[var(--panel-2)] disabled:opacity-50">
+            {optLoading ? "Optimizing…" : "⚡ Optimize setpoints"}
+          </button>
         </div>
       </header>
 
@@ -154,9 +195,14 @@ export default function Simulator() {
 
       <div className="grid grid-cols-12 gap-4">
         {/* levers */}
-        <Panel title="Control levers — 8 manipulated variables" className="col-span-12 lg:col-span-5">
+        <Panel title="Control levers — 8 manipulated variables" className="col-span-12 lg:col-span-5"
+          right={res?.method === "gbt-twin"
+            ? <Badge tone="accent">SHAP (°C) · gbt-twin</Badge>
+            : <Badge tone="muted">cardinal Δ (°C)</Badge>}>
           <div className="text-[11px] text-[var(--muted)] mb-2">
-            Each lever moves PC temperature by its documented cardinal relationship (direction &amp; strength).
+            {res?.method === "gbt-twin"
+              ? "Each °C figure is the lever's SHAP contribution to the predicted PC temperature (GBT twin)."
+              : "Each lever moves PC temperature by its documented cardinal relationship (direction & strength)."}
           </div>
           <div className="space-y-3">
             {Object.entries(defs.features).map(([k, f]: any) => {
@@ -270,6 +316,32 @@ export default function Simulator() {
             )}
           </Panel>
 
+          {/* v3: predicted temperature trajectory (t+5/10/15/30) */}
+          {res?.trajectory && res.trajectory.length > 1 && (
+            <Panel title="Predicted trajectory — where these setpoints take the calciner">
+              <div style={{ height: 180 }}>
+                <ResponsiveContainer>
+                  <ComposedChart
+                    data={[{ min: 0, mean: res.t0, band: [res.t0, res.t0] },
+                           ...res.trajectory.map((p: any) => ({ min: p.min, mean: p.mean, band: [p.p10, p.p90] }))]}
+                    margin={{ top: 5, right: 10, left: -14, bottom: 0 }}>
+                    <CartesianGrid stroke="#223252" strokeDasharray="3 3" />
+                    <XAxis dataKey="min" type="number" domain={[0, 30]} ticks={[0, 5, 10, 15, 30]}
+                      tick={{ fill: "#8ea3c4", fontSize: 10 }} unit="m" />
+                    <YAxis domain={["auto", "auto"]} tick={{ fill: "#8ea3c4", fontSize: 10 }} />
+                    <Tooltip contentStyle={{ background: "#16233d", border: "1px solid #223252", borderRadius: 8, color: "#e6edf7" }} />
+                    <ReferenceArea y1={res.target_band.low} y2={res.target_band.high} fill="#22c55e" fillOpacity={0.1} />
+                    <Area type="monotone" dataKey="band" stroke="none" fill="#38bdf8" fillOpacity={0.15} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="mean" stroke="#38bdf8" strokeWidth={1.8} dot={{ r: 2.5 }} isAnimationActive={false} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="text-[11px] text-[var(--muted)] mt-1">
+                Mean path with P10–P90 uncertainty; green = the state target band. Horizons: now → +5 → +10 → +15 → +30 min at held setpoints.
+              </div>
+            </Panel>
+          )}
+
           {/* predicted-vs-live accuracy meter */}
           <Panel title="Twin vs live plant">
             <div className="grid grid-cols-2 gap-2 text-center">
@@ -309,6 +381,100 @@ export default function Simulator() {
           </Panel>
         </div>
       </div>
+
+      {(opt || optLoading || optErr) && (
+        <Panel title="Setpoint optimizer — advisory (coal ↓ · AFR ↑, safety-constrained)"
+          right={opt && <Badge tone="accent">{opt.n_trials} trials</Badge>}>
+          {optErr ? (
+            <div className="text-sm text-[var(--bad)]">Optimizer error: {optErr}</div>
+          ) : optLoading ? (
+            <Loading label="Searching setpoints (Optuna)…" />
+          ) : opt ? (
+            <div className="grid grid-cols-12 gap-4">
+              {/* recommended levers */}
+              <div className="col-span-12 lg:col-span-5 space-y-2">
+                <div className="text-[11px] text-[var(--muted)] uppercase tracking-wide">Recommended setpoints vs current</div>
+                {Object.entries(opt.recommended).map(([k, v]) => {
+                  const f = defs.features[k];
+                  const base = opt.baseline.levers?.[k];
+                  const d = base != null ? v - base : null;
+                  return (
+                    <div key={k} className="flex items-center justify-between panel-2 px-3 py-2 text-xs gap-2">
+                      <span className="text-[var(--ink)]">{f?.name || k}</span>
+                      <span className="flex items-center gap-2 shrink-0">
+                        {base != null && <span className="mono text-[var(--muted)]">{base.toFixed(1)} →</span>}
+                        <span className="mono text-[var(--accent)]">{v.toFixed(1)} <span className="text-[var(--muted)]">{f?.uom}</span></span>
+                        {d != null && Math.abs(d) > 0.05 && (
+                          <span className={`mono text-[10px] ${d < 0 ? "text-[var(--ok)]" : "text-[var(--warn)]"}`}>
+                            {d > 0 ? "+" : ""}{d.toFixed(1)}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+                <button onClick={applyRecommended}
+                  className="w-full mt-1 text-xs px-3 py-2 rounded-lg border border-[var(--accent)] text-[var(--accent)] hover:bg-[var(--panel-2)]">
+                  Apply to sliders &amp; re-simulate
+                </button>
+              </div>
+
+              {/* predicted temp + objective */}
+              <div className="col-span-12 lg:col-span-4 space-y-3">
+                <div className="text-center panel-2 p-3">
+                  <div className="text-[10px] text-[var(--muted)] uppercase tracking-wide">Predicted calciner temp</div>
+                  <div className="mono text-3xl font-bold glow" style={{ color: opt.in_band ? "var(--ok)" : "var(--warn)" }}>
+                    {opt.predicted.temp.mean.toFixed(0)}<span className="text-sm text-[var(--muted)]">°C</span>
+                  </div>
+                  <div className="text-[11px] text-[var(--muted)]">P10–P90 {opt.predicted.temp.p10.toFixed(0)}–{opt.predicted.temp.p90.toFixed(0)} °C</div>
+                  <div className="flex items-center justify-center gap-2 mt-2">
+                    <Badge tone="muted">band {opt.target_band.low}–{opt.target_band.high}</Badge>
+                    <Badge tone={opt.in_band ? "ok" : "warn"}>{opt.in_band ? "IN BAND" : "OUT OF BAND"}</Badge>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-center">
+                  <div className="panel-2 p-2">
+                    <div className="text-[10px] text-[var(--muted)] uppercase tracking-wide">Coal ↓</div>
+                    <div className="mono text-lg text-[var(--ok)]">{opt.objective.coal.toFixed(1)}</div>
+                    <div className="text-[10px] mono text-[var(--muted)]">Δ {opt.delta.coal > 0 ? "+" : ""}{opt.delta.coal.toFixed(1)} t/h</div>
+                  </div>
+                  <div className="panel-2 p-2">
+                    <div className="text-[10px] text-[var(--muted)] uppercase tracking-wide">AFR ↑</div>
+                    <div className="mono text-lg text-[var(--accent)]">{opt.objective.afr_total.toFixed(1)}</div>
+                    <div className="text-[10px] mono text-[var(--muted)]">Δ {opt.delta.afr > 0 ? "+" : ""}{opt.delta.afr.toFixed(1)}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* interlock / safety status */}
+              <div className="col-span-12 lg:col-span-3 space-y-2">
+                <div className="text-[11px] text-[var(--muted)] uppercase tracking-wide">Safety interlocks (predicted)</div>
+                {opt.interlocks.map((i) => (
+                  <div key={i.tag} className="flex items-center justify-between text-[11px] panel-2 px-2 py-1.5 gap-2">
+                    <span className="text-[var(--ink)] leading-tight">{i.name}</span>
+                    <span className="flex items-center gap-1.5 shrink-0">
+                      <span className="mono">{i.predicted != null ? i.predicted.toFixed(1) : "—"}</span>
+                      <span className="text-[var(--muted)]">({i.rule})</span>
+                      <Badge tone={i.pass === false ? "bad" : i.pass ? "ok" : "muted"}>{i.pass === false ? "✕" : i.pass ? "✓" : "?"}</Badge>
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              {opt.explanation?.length > 0 && (
+                <div className="col-span-12">
+                  <ul className="text-[11px] text-[var(--muted)] space-y-1 list-disc list-inside">
+                    {opt.explanation.map((e, idx) => <li key={idx}>{e}</li>)}
+                  </ul>
+                </div>
+              )}
+              <div className="col-span-12 text-[10px] text-[var(--warn)]">
+                ⚠ Advisory only — recommended setpoints are never written to any control system.
+              </div>
+            </div>
+          ) : null}
+        </Panel>
+      )}
 
       {res && (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">

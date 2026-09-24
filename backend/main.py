@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 import config
@@ -115,10 +116,29 @@ def roadmap():
 
 @app.get("/api/series")
 def series(tags: str = Query(...), start: str | None = None, end: str | None = None,
-           bucket: str = "5min", in_load: bool = False):
+           bucket: str = "5min", in_load: bool = False, window: str | None = None):
     tlist = db.safe_tags(tags.split(","))
     if not tlist:
         return {"tags": [], "points": []}
+
+    # A "window" (day|week|month) anchors to the NEWEST data across the
+    # historian AND the live feed (the historian only grows on the weekly
+    # ingest — anchoring to it alone left the "live" overview days stale) and
+    # picks a bucket so each range shows ~200-300 points. Explicit start/end
+    # override it; the bucket is derived per window.
+    if window and not (start or end):
+        anchors = [db.q("SELECT MAX(ts) AS m FROM process_1min")["m"][0]]
+        try:
+            anchors.append(db.q("SELECT MAX(ts) AS m FROM process_live")["m"][0])
+        except Exception:
+            pass
+        end_dt = max(pd.to_datetime(a, format="mixed") for a in anchors if a)
+        spec = {"day": (1, "5min"), "week": (7, "30min"), "month": (30, "3h")}
+        days, wbucket = spec.get(window, (7, "30min"))
+        start = (end_dt - pd.Timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+        bucket = wbucket
+
     cols = ", ".join(f'"{t}"' for t in tlist)
     where, params = [], {}
     if in_load:
@@ -129,8 +149,34 @@ def series(tags: str = Query(...), start: str | None = None, end: str | None = N
         where.append("ts <= :end"); params["end"] = end
     w = ("WHERE " + " AND ".join(where)) if where else ""
     df = db.q(f"SELECT ts, {cols} FROM process_1min {w} ORDER BY ts", params)
-    df["ts"] = pd.to_datetime(df["ts"])
+    df["ts"] = pd.to_datetime(df["ts"], format="mixed")
     df = df.set_index("ts").apply(pd.to_numeric, errors="coerce")
+
+    # Extend with 1-min aggregates from the live feed for minutes the weekly
+    # ingest hasn't folded into the historian yet. NB the two tables use
+    # different ts text formats ('...T...' vs '... ...'), so SQL gets only a
+    # coarse date-prefix filter and the precise bounds are applied in pandas.
+    if start or end:
+        try:
+            feed = config.KILN_FEED_TAG
+            lcols = ", ".join(f'"{t}"' for t in dict.fromkeys([*tlist, feed]))
+            ldf = db.q(f"SELECT ts, {lcols} FROM process_live WHERE ts >= :d",
+                       {"d": (start or "1970-01-01")[:10]})
+            if len(ldf):
+                ldf["ts"] = pd.to_datetime(ldf["ts"], format="mixed")
+                ldf = (ldf.set_index("ts").apply(pd.to_numeric, errors="coerce")
+                       .resample("1min").mean())
+                if in_load and feed in ldf.columns:
+                    ldf = ldf[ldf[feed] > config.KILN_FEED_MIN_TPH]
+                ldf = ldf[[t for t in tlist if t in ldf.columns]]
+                df = pd.concat([df, ldf[~ldf.index.isin(df.index)]]).sort_index()
+        except Exception:
+            pass                                  # live table absent -> historian only
+        if start:
+            df = df[df.index >= pd.to_datetime(start)]
+        if end:
+            df = df[df.index <= pd.to_datetime(end)]
+
     if bucket and bucket != "raw":
         df = df.resample(bucket).mean()
     df = df.round(2).reset_index()
@@ -188,6 +234,14 @@ def overview():
     for t in analysis.STATE_PLC:
         if snap.get(t) is not None:
             conditions[t] = snap[t]
+    # v2 twin context: hot-side temps + secondary-air/PH-outlet, live not median
+    try:
+        from twin.features import SERVE_CONTEXT_TAGS
+        for t in SERVE_CONTEXT_TAGS:
+            if snap.get(t) is not None:
+                conditions[t] = snap[t]
+    except Exception:
+        pass
 
     # actual (not predicted) interlock status from the latest snapshot
     names = db.tag_names()
@@ -390,14 +444,6 @@ def advisory_decisions(limit: int = Query(50, ge=1, le=500)):
     return {"decisions": rows}
 
 
-@app.get("/api/savings")
-def savings():
-    """Per-parameter fuel / energy / cost effect of following the live advisory."""
-    a = advisory()
-    return {"ts": a.get("ts"), "source": a.get("source"), "mode": a.get("mode"),
-            "moves": a.get("moves", []), "breakdown": a.get("breakdown")}
-
-
 @app.get("/api/simulate/defaults")
 def sim_defaults():
     cat = db.tag_catalog().set_index("tag")
@@ -429,3 +475,289 @@ def forecast(minutes_back: int = Query(20, ge=6, le=180)):
     process_live; returns available=False with a reason if there isn't
     enough recent buffered history yet."""
     return forecast_mod.forecast_from_live_buffer(minutes_back)
+
+
+# ---------------------------------------------------------------------------
+# Digital-twin (GBT) endpoints — optimise / metrics / backtest.
+# (from feature/digital-twin-ml; see twin/CONTRACT.md)
+# ---------------------------------------------------------------------------
+def _json_safe(obj):
+    """Recursively replace NaN/Inf floats with None so FastAPI can serialise."""
+    import math
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    return obj
+
+
+class OptReq(BaseModel):
+    conditions: dict = {}
+
+
+@app.post("/api/optimize")
+def optimize(req: OptReq):
+    # Enrich with the live snapshot so the trust region centres on the plant's
+    # ACTUAL current setpoints (caller-supplied values always win).
+    try:
+        snap = _snapshot()["values"]
+        from twin.features import SERVE_CONTEXT_TAGS
+        from twin.optimize import OPT_LEVERS
+        fill = ["423CI400_TT_4", *analysis.STATE_PLC, *SERVE_CONTEXT_TAGS, *OPT_LEVERS]
+        for t in fill:
+            if req.conditions.get(t) is None and snap.get(t) is not None:
+                req.conditions[t] = snap[t]
+        if req.conditions.get("current_temp") is None and snap.get("423CI400_TT_4") is not None:
+            req.conditions["current_temp"] = snap["423CI400_TT_4"]
+    except Exception:
+        pass
+    """Advisory setpoint optimisation over the four calciner fuel levers."""
+    from twin import optimize as twin_opt
+    return _json_safe(twin_opt.optimize(req.conditions))
+
+
+@app.get("/api/twin/metrics")
+def twin_metrics():
+    """Serve models/metrics.json (GBT + NN + persistence) or availability flag."""
+    import json
+    p = config.ROOT / "models" / "metrics.json"
+    if not p.exists():
+        return {"available": False}
+    try:
+        data = json.loads(p.read_text())
+    except Exception:
+        return {"available": False}
+    if isinstance(data, dict):
+        data.setdefault("available", True)
+    return _json_safe(data)
+
+
+@app.get("/api/twin/backtest")
+def twin_backtest(start: str | None = None, end: str | None = None,
+                  max_points: int = 800):
+    """Replay a held-out feed_gate=1 window: engineer features from the
+    HISTORICAL frame exactly as training does, batch-predict the calciner temp
+    at t+DELTA, and compare to the realised value. (A per-row rebuild through
+    the serving path is wrong here — v7 serving pulls LIVE history, which must
+    never leak into a historical replay.)"""
+    from twin import features as tf
+    from twin import model as twin_model
+    CV = analysis.CV
+    if not twin_model.is_available():
+        return {"available": False, "series": [], "mae": None, "rmse": None,
+                "r2": None, "n": 0, "tag": CV}
+
+    delta = analysis.DELTA
+    cols = ", ".join(f'"{c}"' for c in tf._raw_columns())
+    where, params = ["feed_gate=1"], {}
+    if start:
+        where.append("ts >= :start"); params["start"] = start
+    if end:
+        where.append("ts <= :end"); params["end"] = end
+    w = "WHERE " + " AND ".join(where)
+    df = db.q(f"SELECT ts, {cols} FROM process_1min {w} ORDER BY ts", params)
+    if not len(df):
+        return {"available": True, "series": [], "mae": None, "rmse": None,
+                "r2": None, "n": 0, "tag": CV}
+
+    df["ts"] = pd.to_datetime(df["ts"], format="mixed")
+    for c in tf._raw_columns():
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    for mv in analysis.MV:
+        df[mv] = df[mv].ffill()
+    df = tf._engineer(df.sort_values("ts").reset_index(drop=True))
+    feats = tf.feature_columns()
+    df["actual_fwd"] = df[CV].shift(-delta)
+    dt_fwd = (df["ts"].shift(-delta) - df["ts"]).dt.total_seconds()
+    df = df[dt_fwd.between(4 * 60, 7 * 60) & df["actual_fwd"].notna()
+            & df[feats].notna().all(axis=1) & df[CV].notna()]
+    if not len(df):
+        return {"available": True, "series": [], "mae": None, "rmse": None,
+                "r2": None, "n": 0, "tag": CV}
+
+    # decimate AFTER engineering so lag/rolling features stay intact
+    step = max(1, len(df) // max(1, max_points))
+    df = df.iloc[::step].head(max_points)
+
+    out = twin_model.predict_frame(df[feats], df[CV].to_numpy(float))
+    series, actuals, preds = [], [], []
+    for i, rd in enumerate(df.to_dict("records")):
+        actual = float(rd["actual_fwd"])
+        series.append({"ts": rd["ts"].strftime("%Y-%m-%d %H:%M"),
+                       "actual": round(actual, 1),
+                       "pred": round(float(out["mean"][i]), 1),
+                       "p10": round(float(out["p10"][i]), 1),
+                       "p90": round(float(out["p90"][i]), 1)})
+        actuals.append(actual); preds.append(float(out["mean"][i]))
+
+    if actuals:
+        a = pd.Series(actuals, dtype=float); p = pd.Series(preds, dtype=float)
+        err = p - a
+        mae = float(err.abs().mean())
+        rmse = float((err ** 2).mean() ** 0.5)
+        ss_tot = float(((a - a.mean()) ** 2).sum())
+        r2 = float(1 - (err ** 2).sum() / ss_tot) if ss_tot > 0 else None
+    else:
+        mae = rmse = r2 = None
+
+    return _json_safe({"series": series, "mae": mae, "rmse": rmse, "r2": r2,
+                       "n": len(series), "tag": CV, "horizon_min": delta,
+                       "available": True})
+
+
+@app.get("/api/bench")
+def bench():
+    """Model Bench: side-by-side results of the 3-approach training bake-off
+    (twin.bench). Static artifact — regenerated by `python -m twin.bench`."""
+    import json as _json
+    from pathlib import Path as _Path
+    p = _Path(__file__).resolve().parent.parent / "models" / "bench_results.json"
+    if not p.exists():
+        return _json_safe({"available": False,
+                           "note": "run `python -m twin.bench` to generate results"})
+    return _json_safe({"available": True, **_json.loads(p.read_text())})
+
+
+@app.get("/api/monitor")
+def monitor(limit: int = 40):
+    """Multi-day monitoring: accuracy trail (monitor_log.jsonl), the live
+    conformal calibration, and the latest AFR fuel-quality readings."""
+    import json as _json
+    from pathlib import Path as _Path
+    mdir = _Path(__file__).resolve().parent.parent / "models"
+    out: dict = {"available": True}
+    log_p = mdir / "monitor_log.jsonl"
+    if log_p.exists():
+        lines = log_p.read_text().strip().splitlines()[-int(limit):]
+        out["log"] = [_json.loads(l) for l in lines]
+    else:
+        out["log"] = []
+    conf_p = mdir / "conformal.json"
+    out["conformal"] = _json.loads(conf_p.read_text()) if conf_p.exists() else None
+    try:
+        out["afr_recent"] = _clean_records(
+            db.q("SELECT * FROM afr_quality ORDER BY ts DESC LIMIT 120").iloc[::-1])
+    except Exception:
+        out["afr_recent"] = []
+    return _json_safe(out)
+
+
+@app.get("/api/shadow")
+def shadow(limit: int = 240):
+    """Shadow mode: the twin's live prediction/recommendation log beside the CCR,
+    with running tracking accuracy over matured (horizon-elapsed) predictions."""
+    try:
+        rows = db.q(f"SELECT * FROM shadow_log ORDER BY ts DESC LIMIT {int(limit)}")
+    except Exception:
+        return _json_safe({"available": False, "rows": [], "series": [], "n": 0,
+                           "note": "shadow runner is starting — no log yet."})
+    if not len(rows):
+        return _json_safe({"available": True, "series": [], "n": 0, "matured": 0,
+                           "running_mae": None})
+    matured = rows[rows["matured"] == 1]
+    mae = float(matured["abs_error"].mean()) if len(matured) else None
+    within = (float((matured["abs_error"] <= 5).mean()) if len(matured) else None)
+    latest = rows.iloc[0].to_dict()
+    return _json_safe({
+        "available": True,
+        "n": int(len(rows)),
+        "matured": int(len(matured)),
+        "running_mae": mae,
+        "pct_within_5C": within,
+        "horizon_min": analysis.DELTA,
+        "current": {k: latest.get(k) for k in (
+            "ts", "actual_now", "pred_mean", "pred_p10", "pred_p90", "state",
+            "band_lo", "band_hi", "in_band_now", "cur_coal", "rec_coal",
+            "delta_coal", "cur_afr", "rec_afr", "delta_afr", "rec_in_band",
+            "interlocks_ok")},
+        "series": _clean_records(rows.iloc[::-1]),
+    })
+
+
+def _latest_optimizer_row():
+    try:
+        r = db.q("SELECT * FROM optimizer_log ORDER BY ts DESC LIMIT 1")
+    except Exception:
+        return None
+    return _clean_records(r)[0] if len(r) else None
+
+
+@app.get("/api/fuel")
+def fuel():
+    """Live fuel KPIs from the newest advisory (written by the ccr-optimizer
+    loop). All economics carry is_estimate until real prices/GCV are supplied."""
+    row = _latest_optimizer_row()
+    if row is None:
+        return _json_safe({"available": False,
+                           "reason": "ccr-optimizer loop has not logged an advisory yet"})
+    return _json_safe({
+        "available": True, "advisory": True, "mode": row.get("mode"),
+        "ts": row.get("ts"), "is_estimate": bool(row.get("is_estimate")),
+        "current": {"coal_tph": row.get("cur_coal"), "afr_total": row.get("cur_afr"),
+                    "cost_per_ton": row.get("cur_cost"), "tsr_pct": row.get("cur_tsr"),
+                    "specific_heat_kcal_kg": row.get("cur_spheat")},
+        "recommended": {"coal_tph": row.get("rec_coal"), "afr_total": row.get("rec_afr"),
+                        "cost_per_ton": row.get("rec_cost"), "tsr_pct": row.get("rec_tsr"),
+                        "specific_heat_kcal_kg": row.get("rec_spheat")},
+        "savings": {"cost_per_ton": row.get("save_cost"), "tsr_pts": row.get("save_tsr")},
+        "temp_in_band": bool(row.get("in_band_now")),
+        "quality_ok": bool(row.get("quality_ok")),
+        "interlocks_ok": bool(row.get("interlocks_ok")),
+    })
+
+
+@app.get("/api/savings")
+def savings(limit: int = Query(500, ge=1, le=5000)):
+    """M&V trend: predicted vs realised coal/₹/TSR from optimizer_log, split by
+    whether the operator actually moved toward the advice (followed)."""
+    try:
+        r = db.q("SELECT * FROM optimizer_log ORDER BY ts DESC LIMIT :n", {"n": limit})
+    except Exception:
+        r = None
+    if r is None or not len(r):
+        return _json_safe({"available": False,
+                           "reason": "no optimizer advisories logged yet"})
+    matured = r[r["matured"] == 1]
+    followed = matured[matured["followed"] == 1]
+
+    def _avg(df, col):
+        return float(df[col].mean()) if len(df) and df[col].notna().any() else None
+
+    return _json_safe({
+        "available": True, "advisory": True,
+        "n": int(len(r)), "matured": int(len(matured)), "followed": int(len(followed)),
+        "is_estimate": bool(r.iloc[0].get("is_estimate")),
+        "predicted_avg": {"cost_per_ton": _avg(r, "save_cost"), "tsr_pts": _avg(r, "save_tsr")},
+        "realized_followed_avg": {"coal_tph": _avg(followed, "realized_coal"),
+                                  "cost_per_ton": _avg(followed, "realized_cost"),
+                                  "tsr_pts": _avg(followed, "realized_tsr")},
+        "series": _clean_records(r.iloc[::-1]),
+    })
+
+
+@app.get("/fuel", response_class=HTMLResponse)
+@app.get("/fuel-dashboard", response_class=HTMLResponse)
+def fuel_dashboard():
+    """Self-contained live preview of the fuel optimiser (KPIs, advisory,
+    sensitivities, M&V). Same-origin, no build step."""
+    from backend._fuel_dashboard import HTML
+    return HTML
+
+
+@app.get("/api/optimizer")
+def optimizer_latest():
+    """Latest logged advisory + its per-lever sensitivities (what drives temp vs
+    cost vs TSR) — read from optimizer_log, so this is instant (no re-optimise)."""
+    import json as _json
+    latest = _latest_optimizer_row()
+    correlation = None
+    if latest and latest.get("sensitivities"):
+        try:
+            correlation = {"mode": latest.get("mode"),
+                           "sensitivities": _json.loads(latest["sensitivities"])}
+        except (ValueError, TypeError):
+            pass
+    return _json_safe({"available": latest is not None, "advisory": True,
+                       "latest": latest, "correlation": correlation})

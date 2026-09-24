@@ -1,0 +1,102 @@
+{
+ "windows": {
+  "test_from": "2026-09-07 00:00:00",
+  "val_from": "2026-08-21 00:00:00"
+ },
+ "results": {
+  "persistence": {
+   "mae_raw": 13.042,
+   "mae_smooth": 12.215
+  },
+  "E0_prod_sep20_model": {
+   "mae_raw": 9.076,
+   "mae_smooth": 7.834,
+   "skill_raw_pct": 30.4,
+   "damping_slope": 0.438,
+   "note": "prod model (positional split; train ended ~Jun) on Sep7-20 rows"
+  },
+  "E1_recent_split_unweighted": {
+   "mae_raw": 9.125,
+   "mae_smooth": 7.884,
+   "skill_raw_pct": 30.0,
+   "damping_slope": 0.427,
+   "gbt_only": 9.282,
+   "arx_only": 9.214,
+   "best_iter": 2000,
+   "n_feats": 96,
+   "fit_min": 1.1,
+   "note": "train<Aug21, val Aug21-Sep6"
+  },
+  "E2_recency_hl90d": {
+   "mae_raw": 9.226,
+   "mae_smooth": 8.0,
+   "skill_raw_pct": 29.3,
+   "damping_slope": 0.412,
+   "gbt_only": 9.375,
+   "arx_only": 9.258,
+   "best_iter": 2000,
+   "n_feats": 96,
+   "fit_min": 2.4,
+   "note": null
+  },
+  "E3_recency_hl30d": {
+   "mae_raw": 9.601,
+   "mae_smooth": 8.424,
+   "skill_raw_pct": 26.4,
+   "damping_slope": 0.392,
+   "gbt_only": 9.78,
+   "arx_only": 9.549,
+   "best_iter": 1998,
+   "n_feats": 96,
+   "fit_min": 1.6,
+   "note": null
+  },
+  "E4_volatility_weight": {
+   "mae_raw": 9.137,
+   "mae_smooth": 7.901,
+   "skill_raw_pct": 29.9,
+   "damping_slope": 0.426,
+   "gbt_only": 9.288,
+   "arx_only": 9.268,
+   "best_iter": 2000,
+   "n_feats": 96,
+   "fit_min": 2.5,
+   "note": "w=1+roll30_std/median, cap 4"
+  },
+  "E5_hl90_plus_osc_feats": {
+   "mae_raw": 9.137,
+   "mae_smooth": 7.888,
+   "skill_raw_pct": 29.9,
+   "damping_slope": 0.428,
+   "gbt_only": 9.201,
+   "arx_only": 9.221,
+   "best_iter": 2000,
+   "n_feats": 105,
+   "fit_min": 2.6,
+   "note": null
+  },
+  "E6_refit_all_preSep7_hl90": {
+   "mae_raw": 9.249,
+   "mae_smooth": 8.033,
+   "skill_raw_pct": 29.1,
+   "damping_slope": 0.411,
+   "gbt_only": 9.392,
+   "arx_only": 9.279,
+   "best_iter": 2000,
+   "n_feats": 96,
+   "fit_min": 2.2,
+   "note": "production-style final refit, fixed 2000 rounds"
+  }
+ },
+ "rows": {
+  "train": 412714,
+  "val": 18513,
+  "test": 18167,
+  "test_span": [
+   "2026-09-07 08:18:00",
+   "2026-09-20 01:48:00"
+  ]
+ },
+ "done": true,
+ "total_min": 12.4
+}

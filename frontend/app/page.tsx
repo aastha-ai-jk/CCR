@@ -13,9 +13,17 @@ const TILES: { tag: string; label: string; unit: string }[] = [
   { tag: "433MD140_TQ", label: "Kiln Torque", unit: "Nm" },
 ];
 
+type Window = "day" | "week" | "month";
+const WINDOWS: { key: Window; label: string }[] = [
+  { key: "day", label: "Day" },
+  { key: "week", label: "Week" },
+  { key: "month", label: "Month" },
+];
+
 export default function Overview() {
   const [ov, setOv] = useState<any>(null);
-  const [trend, setTrend] = useState<any>(null);
+  const [trend, setTrend] = useState<any[]>([]);
+  const [win, setWin] = useState<Window>("week");
 
   useEffect(() => {
     const load = () => api.overview().then(setOv).catch(console.error);
@@ -24,13 +32,12 @@ export default function Overview() {
     return () => clearInterval(id);
   }, []);
 
-  // rolling trend — polled so the chart streams with the plant
+  // Reload the temperature trend whenever the Day/Week/Month window changes.
   useEffect(() => {
-    const load = () => api.trend("423CI400_TT_4", 60).then(setTrend).catch(console.error);
-    load();
-    const id = setInterval(load, 2500);
-    return () => clearInterval(id);
-  }, []);
+    setTrend([]);
+    api.series(["423CI400_TT_4"], { window: win })
+      .then((r: any) => setTrend(r.points)).catch(console.error);
+  }, [win]);
 
   if (!ov) return <Loading label="Connecting to Kiln-3 twin backend…" />;
   const src = ov.source;
@@ -63,12 +70,20 @@ export default function Overview() {
 
       <div className="grid grid-cols-12 gap-4">
         <Panel title="Calciner Outlet Temperature — the controlled variable" className="col-span-12 lg:col-span-8"
-               right={trend ? (
-                 <Badge tone={trend.source === "live" ? "ok" : "muted"}>
-                   {trend.source === "live"
-                     ? `● live · last ${trend.window_min} min`
-                     : `historical · last ${trend.window_min} min`}
-                 </Badge>) : undefined}>
+          right={
+            <div className="flex items-center gap-1 panel-2 p-0.5 rounded-md">
+              {WINDOWS.map((w) => (
+                <button key={w.key} onClick={() => setWin(w.key)}
+                  className={`px-2.5 py-1 text-xs rounded transition-colors ${
+                    win === w.key
+                      ? "bg-[var(--accent)] text-[#0b1220] font-semibold"
+                      : "text-[var(--muted)] hover:text-[var(--ink)]"
+                  }`}>
+                  {w.label}
+                </button>
+              ))}
+            </div>
+          }>
           <div className="flex items-end gap-6 mb-2">
             <div className="mono text-5xl font-bold glow" style={{ color: inBand ? "var(--ok)" : "var(--warn)" }}>
               {temp?.toFixed(0)}<span className="text-lg text-[var(--muted)] ml-1">°C</span>
@@ -79,17 +94,14 @@ export default function Overview() {
           </div>
           <div style={{ height: 210 }}>
             <ResponsiveContainer>
-              <LineChart data={trend?.points ?? []} margin={{ top: 5, right: 10, left: -10, bottom: 0 }}>
+              <LineChart data={trend} margin={{ top: 5, right: 10, left: -10, bottom: 0 }}>
                 <CartesianGrid stroke="#223252" strokeDasharray="3 3" />
-                <XAxis dataKey="t" tick={{ fill: "#8ea3c4", fontSize: 10 }} minTickGap={40} />
-                <YAxis tick={{ fill: "#8ea3c4", fontSize: 10 }}
-                       domain={[
-                         (dMin: number) => Math.floor(Math.min(dMin, band.low) - 8),
-                         (dMax: number) => Math.ceil(Math.max(dMax, band.high) + 8),
-                       ]} />
+                <XAxis dataKey="ts" tick={{ fill: "#8ea3c4", fontSize: 10 }} minTickGap={40}
+                       tickFormatter={(v: string) => v.slice(5)} />
+                <YAxis domain={[820, 960]} tick={{ fill: "#8ea3c4", fontSize: 10 }} />
                 <Tooltip contentStyle={{ background: "#16233d", border: "1px solid #223252", borderRadius: 8, color: "#e6edf7" }} />
                 <ReferenceArea y1={band.low} y2={band.high} fill="#22c55e" fillOpacity={0.12} />
-                <Line type="monotone" dataKey="v" stroke="#38bdf8" dot={false} strokeWidth={2} name="Calciner temp (°C)" isAnimationActive={false} />
+                <Line type="monotone" dataKey="423CI400_TT_4" stroke="#38bdf8" dot={false} strokeWidth={2} name="Calciner temp" isAnimationActive={false} />
               </LineChart>
             </ResponsiveContainer>
           </div>

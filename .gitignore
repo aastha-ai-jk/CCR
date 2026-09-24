@@ -11,6 +11,21 @@ data/*.parquet
 # generated experiment artefacts (re-created by: python -m experiments.gbt_trial)
 experiments/models/
 experiments/out/
+# raw historian exports (large; live outside git)
+data/*.csv
+# trained model binaries (regenerable via twin/train_* and twin/bench);
+# the small metrics/results JSONs ARE committed
+models/*.pkl
+models/*.pt
 # NOTE: .env and data/*.sqlite ARE committed at the user's request.
 #   .env currently holds only a placeholder DB password.
 #   The 106 MB sqlite is tracked via Git LFS (see .gitattributes).
+.gstack/
+# live runtime state (regenerated continuously by shadow/monitor/retrain)
+models/conformal.json
+models/live_bias.json
+models/monitor_log.jsonl
+models/retrain_log.jsonl
+models/nn_metrics.json
+models/prev/
+.DS_Store

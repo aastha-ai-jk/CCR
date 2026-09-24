@@ -42,6 +42,53 @@ EXTRA_CYCLONE = [
     "423CN250_TT_2",
 ]
 
+# 2026-09-23: more Kiln-3 pyro tags found on the OPC server (setpoints, drafts,
+# NOx, kiln drive, hood pressure, clinker rate, cooler, coal mill). Captured for
+# evaluation; NOT yet in process_1min / the model.
+EXTRA_PYRO = [
+    "467RL400_SPSPM",
+    "467RL300_SPSPM",
+    "423CI400_PT_2",
+    "423CI400_PT_3",
+    "423CI400_PT_4",
+    "423CN150_PT_1",
+    "423CN250_PT_1",
+    "423CN140_PT_1",
+    "423CN240_PT_1",
+    "423CN240_PT_2",
+    "423CN110_PT_1",
+    "423CN210_PT_1",
+    "423CN_PT",
+    "423DU415_PT",
+    "423DU415_PT1",
+    "423DU415_TT1",
+    "423AM823_NO",
+    "423FN010_JT",
+    "423FN010_SPSPM",
+    "423FN010_PT_1",
+    "423FN010_PT_2",
+    "423CN150_LS",
+    "423CN250_LS",
+    "423CN140_LS",
+    "423CN240_LS",
+    "433MD140_IT1",
+    "433MD140_JT1",
+    "433MD140_SPC",
+    "433MD140A_SPSPM",
+    "433KL100_BT_02",
+    "443KH050_PT",
+    "353RL130_KF_TPH",
+    "353_CLNK_TPH",
+    "443CC100_P1",
+    "443CC100_SP1SPM",
+    "443CC100_TT3",
+    "443AM597",
+    "443FN590_ST",
+    "463WF035_TPH",
+    "463WF045_TPH",
+    "463RM100_TT2",
+]
+
 
 # --------------------------------------------------------------------------
 def make_engine():
@@ -75,8 +122,14 @@ def write_snapshot(engine, ts: str, values: dict, source: str):
     try:
         hist.to_sql("process_live", engine, if_exists="append", index=False)
     except Exception:
-        # column set changed (e.g. cyclone temps added) -> recreate history table
-        hist.to_sql("process_live", engine, if_exists="replace", index=False)
+        # 2026-09-23: column set changed -> ADD the new columns; never "replace"
+        # (that dropped the whole live history when cyclone temps were added).
+        with engine.begin() as con:
+            have = {r[1] for r in con.exec_driver_sql("PRAGMA table_info(process_live)")}
+            for c in hist.columns:
+                if c not in have:
+                    con.exec_driver_sql(f'ALTER TABLE process_live ADD COLUMN "{c}" REAL')
+        hist.to_sql("process_live", engine, if_exists="append", index=False)
 
 
 # --------------------------- REAL OPC FEED --------------------------------
@@ -94,7 +147,7 @@ def run_opc(engine, interval: float):
             for r in tm.itertuples():
                 nodes.append(client.get_node(f"ns={NS};s={r.ai_tag}"))
                 cols.append(r.tag)
-            for code in EXTRA_CYCLONE:                       # per-cyclone temps
+            for code in EXTRA_CYCLONE + EXTRA_PYRO:          # extra server tags
                 nodes.append(client.get_node(f"ns={NS};s={PREFIX}{code}.Value"))
                 cols.append(code)
             dvs = client.uaclient.get_attributes([n.nodeid for n in nodes], ua.AttributeIds.Value)
