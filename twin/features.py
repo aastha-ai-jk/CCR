@@ -28,6 +28,18 @@ HORIZONS: tuple[int, ...] = (5, 10, 15, 30)
 
 # --- named process columns used as features -------------------------------
 CALCINER_COAL = "467RL400_TPH"          # strongest lever; gets its own lags/rolls
+
+# v8 (AFR thermal credit): calorific coefficients — heat per unit of native rate
+# in Gcal/h. FIXED physical constants (density·GCV), NOT the editable price table,
+# so the feature is stable across economics edits. Give alternative fuel a proper
+# heat signal so the twin can learn its temperature contribution (previously only
+# a single crude afr_share term existed, using 1 of the 3 AFR streams).
+_AFR_HEAT_COEF = {
+    "LAFR_FT":      0.95 * 5500 / 1e6,    # liquid AFR → PC   (l/h)
+    "K3V10_F1":     0.95 * 5500 / 1e6,    # liquid AFR → TAD  (l/h)
+    "261WF080_TPH": 1000.0 * 4000 / 1e6,  # solid AFR         (t/h)
+}
+_COAL_HEAT_COEF = 1000.0 * 6000 / 1e6     # calciner coal     (t/h)
 DV_STATE = ["433MD140_TQ", "423AM822_NO", "423FN010_IT"]  # level-free disturbances
 # analyser group -> (RUN gate tag, member CO/O2 tags, O2 tag for sanity mask)
 _SAFETY_GROUPS = {
@@ -104,6 +116,10 @@ def feature_columns() -> list[str]:
     cols += [f"{mv}__ewm10" for mv in MV if mv != CALCINER_COAL]
     cols += [f"{mv}__rate10" for mv in MV]
     cols += ["coal_x_o2", "coal_x_feed", "afr_share"]
+    # v8 enrichment (AFR thermal credit) — appended, older bundles' order unchanged
+    cols += ["afr_heat", "afr_frac"]
+    cols += [f"afr_heat__lag{n}" for n in _LAG_MIN]
+    cols += ["afr_heat__roll5_mean", "afr_heat__rate10"]
     return cols
 
 
@@ -176,6 +192,14 @@ def _engineer(df: pd.DataFrame) -> pd.DataFrame:
     df["coal_x_o2"] = coal * df["423AM823_O2"]
     df["coal_x_feed"] = coal / df["353RL130_TPH"].clip(lower=1)
     df["afr_share"] = df["LAFR_FT"] / (df["LAFR_FT"] + coal * 10 + 1e-6)
+    # v8: calorific-weighted AFR heat + dynamics (parity with the coal block)
+    afr_heat = sum(df[t] * c for t, c in _AFR_HEAT_COEF.items())
+    df["afr_heat"] = afr_heat
+    df["afr_frac"] = afr_heat / (afr_heat + coal * _COAL_HEAT_COEF + 1e-6)
+    for n in _LAG_MIN:
+        df[f"afr_heat__lag{n}"] = afr_heat.shift(n)
+    df["afr_heat__roll5_mean"] = afr_heat.rolling(5, min_periods=2).mean()
+    df["afr_heat__rate10"] = afr_heat.diff(10)
     return df
 
 
@@ -447,5 +471,13 @@ def build_feature_row(levers: dict, conditions: dict,
     row["coal_x_o2"] = coal * row["423AM823_O2"]
     row["coal_x_feed"] = coal / max(row["353RL130_TPH"], 1.0)
     row["afr_share"] = row["LAFR_FT"] / (row["LAFR_FT"] + coal * 10 + 1e-6)
+    # v8: AFR heat + dynamics (steady-history assumption, mirroring the coal block)
+    afr_heat = sum(row[t] * c for t, c in _AFR_HEAT_COEF.items())
+    row["afr_heat"] = afr_heat
+    row["afr_frac"] = afr_heat / (afr_heat + coal * _COAL_HEAT_COEF + 1e-6)
+    for n in _LAG_MIN:
+        row[f"afr_heat__lag{n}"] = afr_heat
+    row["afr_heat__roll5_mean"] = afr_heat
+    row["afr_heat__rate10"] = 0.0
 
     return pd.DataFrame([[row[c] for c in feature_columns()]], columns=feature_columns())
