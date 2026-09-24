@@ -1,0 +1,120 @@
+{
+ "windows": {
+  "test": "Sep14-20",
+  "val": "Sep11-13",
+  "regime_from": "Sep7"
+ },
+ "results": {
+  "persistence": {
+   "mae_raw": 12.011
+  },
+  "T0_prod_model": {
+   "mae_raw": 8.456,
+   "mae_smooth": 7.303,
+   "skill_raw_pct": 29.6,
+   "damping_slope": 0.441
+  },
+  "T1_old_recipe_train_lt_Aug21": {
+   "mae_raw": 8.493,
+   "mae_smooth": 7.333,
+   "skill_raw_pct": 29.3,
+   "damping_slope": 0.427,
+   "gbt_only": 8.606,
+   "arx_only": 8.65,
+   "n_train": 412714,
+   "best_iter": 2000,
+   "fit_min": 1.1,
+   "note": "no regime data (like prod), early-stop on Sep11-13"
+  },
+  "T2_train_lt_Sep11_unweighted": {
+   "mae_raw": 8.477,
+   "mae_smooth": 7.319,
+   "skill_raw_pct": 29.4,
+   "damping_slope": 0.429,
+   "gbt_only": 8.57,
+   "arx_only": 8.635,
+   "n_train": 436420,
+   "best_iter": 2000,
+   "fit_min": 1.1,
+   "note": "includes Sep7-10 regime rows"
+  },
+  "T3_train_lt_Sep11_hl30d": {
+   "mae_raw": 8.569,
+   "mae_smooth": 7.422,
+   "skill_raw_pct": 28.7,
+   "damping_slope": 0.403,
+   "gbt_only": 8.609,
+   "arx_only": 8.69,
+   "n_train": 436420,
+   "best_iter": 2000,
+   "fit_min": 1.1,
+   "note": null
+  },
+  "T4_train_lt_Sep11_hl14d": {
+   "mae_raw": 8.59,
+   "mae_smooth": 7.452,
+   "skill_raw_pct": 28.5,
+   "damping_slope": 0.408,
+   "gbt_only": 8.66,
+   "arx_only": 8.674,
+   "n_train": 436420,
+   "best_iter": 2000,
+   "fit_min": 1.8,
+   "note": null
+  },
+  "T5_train_lt_Sep11_regime_x10": {
+   "mae_raw": 8.415,
+   "mae_smooth": 7.252,
+   "skill_raw_pct": 29.9,
+   "damping_slope": 0.435,
+   "gbt_only": 8.491,
+   "arx_only": 8.576,
+   "n_train": 436420,
+   "best_iter": 2000,
+   "fit_min": 2.8,
+   "note": "Sep7+ rows weight 10"
+  },
+  "T5b_train_lt_Sep11_regime_x30": {
+   "mae_raw": 8.406,
+   "mae_smooth": 7.245,
+   "skill_raw_pct": 30.0,
+   "damping_slope": 0.44,
+   "gbt_only": 8.502,
+   "arx_only": 8.54,
+   "n_train": 436420,
+   "best_iter": 2000,
+   "fit_min": 2.0,
+   "note": null
+  },
+  "T6_T5_plus_osc_feats": {
+   "mae_raw": 8.403,
+   "mae_smooth": 7.235,
+   "skill_raw_pct": 30.0,
+   "damping_slope": 0.445,
+   "gbt_only": 8.429,
+   "arx_only": 8.595,
+   "n_train": 436420,
+   "best_iter": 2000,
+   "fit_min": 0.8,
+   "note": null
+  },
+  "T7_specialist_regime_plus_highvol_hist": {
+   "mae_raw": 8.412,
+   "mae_smooth": 7.262,
+   "skill_raw_pct": 30.0,
+   "damping_slope": 0.437,
+   "gbt_only": 8.517,
+   "arx_only": 8.614,
+   "n_train": 109830,
+   "best_iter": 2000,
+   "fit_min": 0.3,
+   "note": "regime rows + history rows with roll30_std>12.4"
+  }
+ },
+ "rows": {
+  "test": 8668,
+  "val": 4306,
+  "regime_rows_available_for_train": 5193
+ },
+ "done": true
+}
