@@ -43,6 +43,20 @@ module.exports = {
       env: { PYTHONUNBUFFERED: "1" },
     },
     {
+      // Continuous fuel-advisory loop: economic setpoint optimiser (min ₹/ton |
+      // max TSR | min coal) + clinker-quality gate, logged to optimizer_log with
+      // realised-savings M&V. ADVISORY/OBSERVE-ONLY. Set OPTIMIZER_MODE to switch
+      // objective emphasis. Serves /api/fuel, /api/savings, /api/optimizer.
+      name: "ccr-optimizer",
+      cwd: "/home/antpc/CCR-Project",
+      script: "/home/antpc/CCR-Project/.venv/bin/python",
+      args: "-m twin.optimizer_loop --interval 45",
+      interpreter: "none",
+      autorestart: true,
+      max_restarts: 30,
+      env: { PYTHONUNBUFFERED: "1", OPTIMIZER_MODE: "cost" },
+    },
+    {
       // Weekly guarded retrain (Sun 02:00): ingest live data -> retrain ->
       // promote only if not worse -> reload serving. models/retrain_log.jsonl.
       name: "ccr-retrain",

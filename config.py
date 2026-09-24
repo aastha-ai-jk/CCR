@@ -5,6 +5,7 @@ between SQLite (bootstrap) and PostgreSQL (production) is a one-line change in .
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -58,3 +59,57 @@ TEMP_STATE_BANDS = {
     "State 2": (900, 920),
     "State 3": (880, 900),
 }
+
+# --- Fuel economics -------------------------------------------------------
+# ESTIMATED DEFAULTS — published-typical Indian-cement values, NOT this plant's
+# real numbers. Override per-tag via data/fuel_economics.json (procurement can
+# edit without touching code); any field left unset keeps the estimate. Every
+# downstream KPI carries the is_estimate flag until real values are supplied.
+#
+# mass_per_unit converts a tag's native rate to kg/h:
+#   t/h streams -> 1000 kg per unit;  l/h streams -> density (kg per litre).
+CLINKER_FACTOR = float(os.getenv("CLINKER_FACTOR", "0.62"))   # raw feed t -> clinker t
+
+_FUEL_DEFAULTS = {
+    "467RL400_TPH": {"name": "Calciner coal", "role": "coal", "phase": "solid",
+                     "unit": "t/h", "mass_per_unit": 1000.0,
+                     "gcv_kcal_kg": 6000.0, "price_per_ton": 8000.0, "is_estimate": True},
+    "LAFR_FT":      {"name": "Liquid AFR (PC)", "role": "afr", "phase": "liquid",
+                     "unit": "l/h", "mass_per_unit": 0.95,
+                     "gcv_kcal_kg": 5500.0, "price_per_ton": 2000.0, "is_estimate": True},
+    "K3V10_F1":     {"name": "Liquid AFR (TAD)", "role": "afr", "phase": "liquid",
+                     "unit": "l/h", "mass_per_unit": 0.95,
+                     "gcv_kcal_kg": 5500.0, "price_per_ton": 2000.0, "is_estimate": True},
+    "261WF080_TPH": {"name": "Solid AFR", "role": "afr", "phase": "solid",
+                     "unit": "t/h", "mass_per_unit": 1000.0,
+                     "gcv_kcal_kg": 4000.0, "price_per_ton": 2500.0, "is_estimate": True},
+}
+
+
+def fuel_economics() -> dict:
+    """tag -> economics meta: estimated defaults merged with optional overrides
+    from data/fuel_economics.json. Overridden fields lose the is_estimate flag
+    only when the override explicitly sets it False."""
+    out = {k: dict(v) for k, v in _FUEL_DEFAULTS.items()}
+    override = ROOT / "data" / "fuel_economics.json"
+    if override.exists():
+        try:
+            user = json.loads(override.read_text())
+            for tag, meta in user.items():
+                if tag in out and isinstance(meta, dict):
+                    out[tag].update(meta)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return out
+
+
+# Clinker quality specification (ESTIMATED — edit to plant QC targets, or set
+# FREE_LIME_MAX / DOC_MIN in .env). Used as a HARD constraint by the optimiser.
+QUALITY_SPECS = {
+    "free_lime": {"max": float(os.getenv("FREE_LIME_MAX", "1.8")), "is_estimate": True},
+    "doc":       {"min": float(os.getenv("DOC_MIN", "92.0")),      "is_estimate": True},
+}
+
+# Objective emphasis: "cost" (min ₹/ton clinker) | "tsr" (max thermal
+# substitution) | "coal" (min coal tph). All three KPIs reported regardless.
+OPTIMIZER_MODE = os.getenv("OPTIMIZER_MODE", "cost")

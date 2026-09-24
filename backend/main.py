@@ -9,6 +9,7 @@ import datetime as _dt
 import pandas as pd
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 import config
@@ -486,3 +487,90 @@ def shadow(limit: int = 240):
             "interlocks_ok")},
         "series": _clean_records(rows.iloc[::-1]),
     })
+
+
+def _latest_optimizer_row():
+    try:
+        r = db.q("SELECT * FROM optimizer_log ORDER BY ts DESC LIMIT 1")
+    except Exception:
+        return None
+    return _clean_records(r)[0] if len(r) else None
+
+
+@app.get("/api/fuel")
+def fuel():
+    """Live fuel KPIs from the newest advisory (written by the ccr-optimizer
+    loop). All economics carry is_estimate until real prices/GCV are supplied."""
+    row = _latest_optimizer_row()
+    if row is None:
+        return _json_safe({"available": False,
+                           "reason": "ccr-optimizer loop has not logged an advisory yet"})
+    return _json_safe({
+        "available": True, "advisory": True, "mode": row.get("mode"),
+        "ts": row.get("ts"), "is_estimate": bool(row.get("is_estimate")),
+        "current": {"coal_tph": row.get("cur_coal"), "afr_total": row.get("cur_afr"),
+                    "cost_per_ton": row.get("cur_cost"), "tsr_pct": row.get("cur_tsr"),
+                    "specific_heat_kcal_kg": row.get("cur_spheat")},
+        "recommended": {"coal_tph": row.get("rec_coal"), "afr_total": row.get("rec_afr"),
+                        "cost_per_ton": row.get("rec_cost"), "tsr_pct": row.get("rec_tsr"),
+                        "specific_heat_kcal_kg": row.get("rec_spheat")},
+        "savings": {"cost_per_ton": row.get("save_cost"), "tsr_pts": row.get("save_tsr")},
+        "temp_in_band": bool(row.get("in_band_now")),
+        "quality_ok": bool(row.get("quality_ok")),
+        "interlocks_ok": bool(row.get("interlocks_ok")),
+    })
+
+
+@app.get("/api/savings")
+def savings(limit: int = Query(500, ge=1, le=5000)):
+    """M&V trend: predicted vs realised coal/₹/TSR from optimizer_log, split by
+    whether the operator actually moved toward the advice (followed)."""
+    try:
+        r = db.q("SELECT * FROM optimizer_log ORDER BY ts DESC LIMIT :n", {"n": limit})
+    except Exception:
+        r = None
+    if r is None or not len(r):
+        return _json_safe({"available": False,
+                           "reason": "no optimizer advisories logged yet"})
+    matured = r[r["matured"] == 1]
+    followed = matured[matured["followed"] == 1]
+
+    def _avg(df, col):
+        return float(df[col].mean()) if len(df) and df[col].notna().any() else None
+
+    return _json_safe({
+        "available": True, "advisory": True,
+        "n": int(len(r)), "matured": int(len(matured)), "followed": int(len(followed)),
+        "is_estimate": bool(r.iloc[0].get("is_estimate")),
+        "predicted_avg": {"cost_per_ton": _avg(r, "save_cost"), "tsr_pts": _avg(r, "save_tsr")},
+        "realized_followed_avg": {"coal_tph": _avg(followed, "realized_coal"),
+                                  "cost_per_ton": _avg(followed, "realized_cost"),
+                                  "tsr_pts": _avg(followed, "realized_tsr")},
+        "series": _clean_records(r.iloc[::-1]),
+    })
+
+
+@app.get("/fuel", response_class=HTMLResponse)
+@app.get("/fuel-dashboard", response_class=HTMLResponse)
+def fuel_dashboard():
+    """Self-contained live preview of the fuel optimiser (KPIs, advisory,
+    sensitivities, M&V). Same-origin, no build step."""
+    from backend._fuel_dashboard import HTML
+    return HTML
+
+
+@app.get("/api/optimizer")
+def optimizer_latest():
+    """Latest logged advisory + its per-lever sensitivities (what drives temp vs
+    cost vs TSR) — read from optimizer_log, so this is instant (no re-optimise)."""
+    import json as _json
+    latest = _latest_optimizer_row()
+    correlation = None
+    if latest and latest.get("sensitivities"):
+        try:
+            correlation = {"mode": latest.get("mode"),
+                           "sensitivities": _json.loads(latest["sensitivities"])}
+        except (ValueError, TypeError):
+            pass
+    return _json_safe({"available": latest is not None, "advisory": True,
+                       "latest": latest, "correlation": correlation})

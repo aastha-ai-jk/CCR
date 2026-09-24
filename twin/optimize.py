@@ -16,6 +16,7 @@ import pandas as pd
 import config
 from backend import analysis, db
 from twin import model as twin_model
+from twin import economics
 
 OPT_LEVERS = ["467RL400_TPH", "LAFR_FT", "K3V10_F1", "261WF080_TPH"]
 COAL = "467RL400_TPH"                 # minimise
@@ -85,15 +86,20 @@ def _interlocks(prediction: dict) -> list[dict]:
     return out
 
 
-def _norms(levers: dict, bounds: dict) -> tuple[float, float]:
-    """coal_norm, afr_norm — each in [0,1] over its lever range."""
-    clo, chi = bounds[COAL]
-    coal_norm = (levers[COAL] - clo) / (chi - clo) if chi > clo else 0.0
-    afr_terms = []
-    for t in AFR:
-        lo, hi = bounds[t]
-        afr_terms.append((levers[t] - lo) / (hi - lo) if hi > lo else 0.0)
-    return coal_norm, float(np.mean(afr_terms))
+def _quality_ok(quality: dict | None) -> bool:
+    """True unless a PREDICTED clinker-quality value is out of config.QUALITY_SPECS.
+    None / missing predictions are unknown -> not treated as a violation."""
+    if not quality:
+        return True
+    fl = quality.get("free_lime")
+    doc = quality.get("doc")
+    fl_max = config.QUALITY_SPECS.get("free_lime", {}).get("max")
+    doc_min = config.QUALITY_SPECS.get("doc", {}).get("min")
+    if fl is not None and fl_max is not None and float(fl) > float(fl_max):
+        return False
+    if doc is not None and doc_min is not None and float(doc) < float(doc_min):
+        return False
+    return True
 
 
 def _f(v, nd: int = 2):
@@ -147,11 +153,19 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
         in_band = reach is not None and stays
         conf = _band_confidence(settled, blo, bhi)      # chance constraint (P10/P90)
 
-        coal_norm, afr_norm = _norms(levers, bounds)
+        # HARD quality constraint: reject setpoints whose predicted clinker
+        # quality leaves spec (pushing AFR must not quietly hurt burnability).
+        # Missing predictions (None) are treated as unknown, not a violation.
+        ok_quality = _quality_ok(core.get("quality"))
+
+        # Economic objective (config.OPTIMIZER_MODE): min ₹/ton | max TSR | min
+        # coal. Replaces the old abstract coal_norm - afr_norm. Move + band-
+        # confidence terms keep the advice calm and chance-constrained.
+        econ_score = economics.objective_score(levers, conditions)
         move_pen = float(np.mean([abs(levers[t] - base_vals[t])
                                   / max(bounds[t][1] - bounds[t][0], 1e-6)
                                   for t in OPT_LEVERS]))
-        raw = (coal_norm - afr_norm + _MOVE_W * move_pen - _CONF_W * conf
+        raw = (econ_score + _MOVE_W * move_pen - _CONF_W * conf
                + 0.01 * ((reach or 30) / 5.0))          # prefer reaching sooner
 
         trial.set_user_attr("levers", levers)
@@ -160,12 +174,16 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
         trial.set_user_attr("reach", reach)
         trial.set_user_attr("conf", conf)
         trial.set_user_attr("raw", raw)
-        trial.set_user_attr("feasible", bool(in_band and ok_inter))
+        trial.set_user_attr("quality", core.get("quality"))
+        trial.set_user_attr("contributions", core.get("contributions"))
+        trial.set_user_attr("feasible", bool(in_band and ok_inter and ok_quality))
 
         penalty = 0.0
         if not in_band:
             penalty += _INFEASIBLE_PENALTY + abs(settled["mean"] - (blo + bhi) / 2.0)
         if not ok_inter:
+            penalty += _INFEASIBLE_PENALTY
+        if not ok_quality:
             penalty += _INFEASIBLE_PENALTY
         return raw + penalty
 
@@ -203,12 +221,45 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
     interlocks = _interlocks(pred)
     in_band = blo <= rec_temp <= bhi
 
+    # Economic KPIs for the recommendation + baseline, and the savings between.
+    # ₹/ton and specific-heat need the kiln feed (clinker rate); if the caller
+    # didn't pass it, fall back to the recent-median feed so cost never explodes.
+    econ = config.fuel_economics()
+    econ_cond = dict(conditions)
+    econ_cond.setdefault(config.KILN_FEED_TAG,
+                         defaults.get(config.KILN_FEED_TAG))
+    rec_kpis = economics.kpis(rec, econ_cond, econ)
+    base_kpis = economics.kpis(base_vals, econ_cond, econ)
+    fuel_savings = economics.savings(rec, base_vals, econ_cond, econ)
+    rec_quality = best.user_attrs.get("quality")
+    # Per-lever attribution: temp pull (°C, from the twin's SHAP) alongside each
+    # lever's marginal effect on cost and TSR — the "what drives what" view.
+    temp_pull = best.user_attrs.get("contributions") or {}
+    sensitivities = {}
+    for t in OPT_LEVERS:
+        bump = dict(rec)
+        bump[t] = rec[t] + 1.0                          # per-unit marginal effect
+        dk = economics.kpis(bump, econ_cond, econ)
+        sensitivities[t] = {
+            "temp_pull_c": _f(temp_pull.get(t)),
+            "d_cost_per_unit": _f(dk["cost_per_ton"] - rec_kpis["cost_per_ton"], 3),
+            "d_tsr_per_unit": _f(dk["tsr_pct"] - rec_kpis["tsr_pct"], 3),
+        }
+
     explanation = [
         f"Operating state {state}: target band {int(blo)}-{int(bhi)} °C.",
         f"Recommended coal {COAL} = {rec[COAL]:.1f} tph "
         f"({rec[COAL] - base_vals[COAL]:+.1f} vs current).",
         f"Recommended AFR total = {sum(rec[t] for t in AFR):.1f} tph "
         f"({sum(rec[t] for t in AFR) - sum(base_vals[t] for t in AFR):+.1f} vs current).",
+        (f"Fuel: {rec_kpis['cost_per_ton']:.0f} ₹/t clinker "
+         f"({fuel_savings['cost_per_ton']:+.0f} vs current), TSR {rec_kpis['tsr_pct']:.1f}% "
+         f"({fuel_savings['tsr_pts']:+.1f} pts), coal {fuel_savings['coal_tph']:+.1f} tph saved. "
+         + ("[economics are ESTIMATED defaults — edit data/fuel_economics.json]"
+            if rec_kpis["is_estimate"] else "")).strip(),
+        (f"Predicted clinker quality: free-lime {rec_quality.get('free_lime')}, "
+         f"DOC {rec_quality.get('doc')} — within spec."
+         if rec_quality else "Clinker-quality prediction unavailable this tick."),
         f"Predicted calciner temp {rec_temp:.1f} °C "
         + ("inside the target band."
            if in_band else
@@ -253,4 +304,10 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
         "trajectory": rec_traj,
         "reach_min": rec_reach,
         "band_confidence": _f(rec_conf, 3),
+        # v4 (fuel optimiser): economics, quality gate, per-lever attribution
+        "mode": config.OPTIMIZER_MODE,
+        "economics": {"recommended": rec_kpis, "baseline": base_kpis,
+                      "savings": fuel_savings},
+        "quality": {"predicted": rec_quality, "specs": config.QUALITY_SPECS},
+        "sensitivities": sensitivities,
     }
