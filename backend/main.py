@@ -314,11 +314,22 @@ def advisory():
             adv["locked_decline"] = {
                 "ts": last.get("ts"),
                 "direction": direction,
+                "reason_category": _san(last.get("reason_category")),
                 "note": _san(last.get("note")),
                 "live_actual_temp": _san(last.get("live_actual_temp")),
                 "predicted_temp": _san(last.get("predicted_temp")),
             }
     return adv
+
+
+DECLINE_REASONS = [
+    "Kiln stability at risk",
+    "Fuel quality or AFR availability",
+    "Equipment constraint or interlock",
+    "Conflicts with another change",
+    "Quality target — free lime or SO3",
+    "Operator judgement, other",
+]
 
 
 class AdvisoryDecision(BaseModel):
@@ -331,7 +342,13 @@ class AdvisoryDecision(BaseModel):
     predicted_temp: float | None = None
     moves: list = []
     reasoning: str | None = None
-    note: str | None = None            # optional free-text, e.g. decline reason
+    reason_category: str | None = None  # one of DECLINE_REASONS, required on decline
+    note: str | None = None             # optional free-text, additional to the category
+
+
+@app.get("/api/advisory/decline-reasons")
+def advisory_decline_reasons():
+    return {"reasons": DECLINE_REASONS}
 
 
 @app.post("/api/advisory/decision")
@@ -341,6 +358,8 @@ def advisory_decision(req: AdvisoryDecision):
     control system, it only records what the operator chose to do."""
     if req.decision not in ("accepted", "declined"):
         raise HTTPException(400, "decision must be 'accepted' or 'declined'")
+    if req.decision == "declined" and not req.reason_category:
+        raise HTTPException(400, "reason_category is required when declining")
     db.log_advisory_decision({
         "ts": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "decision": req.decision,
@@ -353,8 +372,22 @@ def advisory_decision(req: AdvisoryDecision):
         "moves_json": json.dumps(req.moves),
         "reasoning": req.reasoning,
         "note": req.note,
+        "reason_category": req.reason_category,
     })
     return {"ok": True}
+
+
+@app.get("/api/advisory/decisions")
+def advisory_decisions(limit: int = Query(50, ge=1, le=500)):
+    """Recent operator decisions -- feeds the shift dashboard's decision log
+    and its aggregate charts (handled-by-lever, decline reasons)."""
+    rows = db.recent_advisory_decisions(limit)
+    for r in rows:
+        try:
+            r["moves"] = json.loads(r.pop("moves_json")) if r.get("moves_json") else []
+        except Exception:
+            r["moves"] = []
+    return {"decisions": rows}
 
 
 @app.get("/api/savings")

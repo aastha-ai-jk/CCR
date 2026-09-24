@@ -67,8 +67,10 @@ export const api = {
     operating_state?: string; mode?: string;
     target_band_low?: number; target_band_high?: number;
     live_actual_temp?: number; predicted_temp?: number;
-    moves?: unknown[]; reasoning?: string; note?: string;
+    moves?: unknown[]; reasoning?: string; reason_category?: string; note?: string;
   }) => post("/api/advisory/decision", payload),
+  declineReasons: () => get<{ reasons: string[] }>("/api/advisory/decline-reasons"),
+  advisoryDecisions: (limit = 50) => get<{ decisions: any[] }>(`/api/advisory/decisions?limit=${limit}`),
   trend: (tag = "423CI400_TT_4", minutes = 60) =>
     get(`/api/trend?tag=${tag}&minutes=${minutes}`),
   series: (tags: string[], p: { start?: string; end?: string; bucket?: string; in_load?: boolean } = {}) => {
