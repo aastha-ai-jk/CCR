@@ -22,6 +22,11 @@ OPT_LEVERS = ["467RL400_TPH", "LAFR_FT", "K3V10_F1", "261WF080_TPH"]
 COAL = "467RL400_TPH"                 # minimise
 AFR = ["LAFR_FT", "K3V10_F1", "261WF080_TPH"]   # maximise
 CV = analysis.CV
+# Kiln-side levers, searched only when a caller passes levers=analysis.MV (the
+# CCR advisor screen). The plant loops (shadow, optimizer_loop) keep OPT_LEVERS.
+KILN_COAL = "467RL300_TPH"
+KILN_FEED = config.KILN_FEED_TAG
+KILN_SIDE = [KILN_COAL, KILN_FEED, "423FN010_ST", "433MD140_ST1"]
 
 # Penalty added to the objective for an infeasible trial so the study still
 # converges toward the feasible region even when early trials violate.
@@ -34,6 +39,10 @@ _CONF_W = 0.20        # reward weight for band-confidence (chance constraint)
 # "coal=0 tph looks fine"). ±15% of the engineering range per advisory is also
 # roughly what an operator can responsibly move in one 30-min window.
 _TRUST_FRAC = 0.15
+# Kiln-side levers move the whole kiln, not just the calciner, so they get a much
+# tighter trust region (±3% of range ≈ ±16 tph feed, ±0.18 rpm kiln speed,
+# ±45 rpm PH fan, ±0.45 tph kiln coal). PLACEHOLDER — needs process sign-off.
+_TRUST_FRAC_KILN = 0.03
 
 
 def _band_confidence(point: dict, blo: float, bhi: float) -> float:
@@ -47,12 +56,12 @@ def _band_confidence(point: dict, blo: float, bhi: float) -> float:
     return max(0.0, min(1.0, cdf(bhi) - cdf(blo)))
 
 
-def _bounds() -> dict[str, tuple[float, float]]:
+def _bounds(levers: list[str] = OPT_LEVERS) -> dict[str, tuple[float, float]]:
     """Lever search bounds from dim_tag y_min/y_max (fallback to median-based)."""
     cat = db.tag_catalog().set_index("tag")
     defaults = analysis.feature_defaults()
     out = {}
-    for t in OPT_LEVERS:
+    for t in levers:
         lo, hi = cat.loc[t, "y_min"], cat.loc[t, "y_max"]
         if pd.isna(lo) or pd.isna(hi) or hi <= lo:
             med = float(defaults.get(t, 1.0))
@@ -106,36 +115,55 @@ def _f(v, nd: int = 2):
     return None if v is None else round(float(v), nd)
 
 
-def optimize(conditions: dict, n_trials: int = 200) -> dict:
-    """Run the Optuna search and return the contract's advisory dict."""
+def optimize(conditions: dict, n_trials: int = 200,
+             levers: list[str] | None = None) -> dict:
+    """Run the Optuna search and return the contract's advisory dict.
+
+    ``levers`` picks which MVs to search (default: the four calciner fuel
+    levers). Levers outside the search stay at their current values.
+    """
     import optuna
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     conditions = conditions or {}
+    opt_levers = list(levers or OPT_LEVERS)
 
     if not twin_model.is_available():
         return {"available": False, "advisory": True,
                 "error": "GBT twin unavailable (models/twin_gbt.pkl not found)."}
 
-    full_bounds = _bounds()
+    full_bounds = _bounds(opt_levers)
     state, blo, bhi, votes = _band(conditions)
     defaults = analysis.feature_defaults()
-    base_vals = {t: float(conditions.get(t, defaults.get(t, 0.0))) for t in OPT_LEVERS}
+    base_vals = {t: float(conditions.get(t, defaults.get(t, 0.0))) for t in opt_levers}
+
+    # Economics over the searched levers. Kiln coal is the same coal as the
+    # calciner's, so price it identically — otherwise it would look like free
+    # heat. A searched kiln feed changes the clinker rate (₹/ton denominator).
+    econ = config.fuel_economics()
+    if KILN_COAL in opt_levers and KILN_COAL not in econ:
+        econ = {**econ, KILN_COAL: dict(econ[COAL])}
+
+    def econ_cond(lv: dict) -> dict:
+        c = dict(conditions)
+        c[KILN_FEED] = lv.get(KILN_FEED, c.get(KILN_FEED, defaults.get(KILN_FEED)))
+        return c
 
     # trust region: current setpoint ± _TRUST_FRAC of the engineering range,
     # clipped to the engineering limits
     bounds: dict[str, tuple[float, float]] = {}
-    for t in OPT_LEVERS:
+    for t in opt_levers:
         lo, hi = full_bounds[t]
         c = min(max(base_vals[t], lo), hi)
         # half-width: ±15% of the engineering range OR ±100% of the current
         # value, whichever is SMALLER (engineering ranges are much wider than
         # the operating envelope for some tags), floored at ±1 unit
-        r = min((hi - lo) * _TRUST_FRAC, max(abs(c), 1.0))
+        frac = _TRUST_FRAC_KILN if t in KILN_SIDE else _TRUST_FRAC
+        r = min((hi - lo) * frac, max(abs(c), 1.0))
         bounds[t] = (max(lo, c - r), min(hi, c + r))
 
     def objective(trial: "optuna.Trial") -> float:
-        levers = {t: trial.suggest_float(t, *bounds[t]) for t in OPT_LEVERS}
+        levers = {t: trial.suggest_float(t, *bounds[t]) for t in opt_levers}
         core = twin_model.predict_core(levers, conditions)
         if core is None:
             raise optuna.TrialPruned()
@@ -161,10 +189,10 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
         # Economic objective (config.OPTIMIZER_MODE): min ₹/ton | max TSR | min
         # coal. Replaces the old abstract coal_norm - afr_norm. Move + band-
         # confidence terms keep the advice calm and chance-constrained.
-        econ_score = economics.objective_score(levers, conditions)
+        econ_score = economics.objective_score(levers, econ_cond(levers), econ=econ)
         move_pen = float(np.mean([abs(levers[t] - base_vals[t])
                                   / max(bounds[t][1] - bounds[t][0], 1e-6)
-                                  for t in OPT_LEVERS]))
+                                  for t in opt_levers]))
         raw = (econ_score + _MOVE_W * move_pen - _CONF_W * conf
                + 0.01 * ((reach or 30) / 5.0))          # prefer reaching sooner
 
@@ -214,7 +242,6 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
     rec_conf = best.user_attrs.get("conf")
 
     # Baseline = current levers (fallback to recent medians) at current conditions.
-    base_vals = {t: float(conditions.get(t, defaults.get(t, 0.0))) for t in OPT_LEVERS}
     base_core = twin_model.predict_core(base_vals, conditions)
     base_temp = base_core["prediction"][CV]["mean"] if base_core else None
 
@@ -224,22 +251,26 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
     # Economic KPIs for the recommendation + baseline, and the savings between.
     # ₹/ton and specific-heat need the kiln feed (clinker rate); if the caller
     # didn't pass it, fall back to the recent-median feed so cost never explodes.
-    econ = config.fuel_economics()
-    econ_cond = dict(conditions)
-    econ_cond.setdefault(config.KILN_FEED_TAG,
-                         defaults.get(config.KILN_FEED_TAG))
-    rec_kpis = economics.kpis(rec, econ_cond, econ)
-    base_kpis = economics.kpis(base_vals, econ_cond, econ)
-    fuel_savings = economics.savings(rec, base_vals, econ_cond, econ)
+    # Each side uses its own feed when kiln feed is a searched lever.
+    rec_kpis = economics.kpis(rec, econ_cond(rec), econ)
+    base_kpis = economics.kpis(base_vals, econ_cond(base_vals), econ)
+    fuel_savings = {
+        "coal_tph": round(base_kpis["coal_tph"] - rec_kpis["coal_tph"], 2),
+        "cost_per_ton": round(base_kpis["cost_per_ton"] - rec_kpis["cost_per_ton"], 1),
+        "tsr_pts": round(rec_kpis["tsr_pct"] - base_kpis["tsr_pct"], 2),
+        "specific_heat_kcal_kg": round(base_kpis["specific_heat_kcal_kg"]
+                                       - rec_kpis["specific_heat_kcal_kg"], 1),
+        "is_estimate": rec_kpis["is_estimate"],
+    }
     rec_quality = best.user_attrs.get("quality")
     # Per-lever attribution: temp pull (°C, from the twin's SHAP) alongside each
     # lever's marginal effect on cost and TSR — the "what drives what" view.
     temp_pull = best.user_attrs.get("contributions") or {}
     sensitivities = {}
-    for t in OPT_LEVERS:
+    for t in opt_levers:
         bump = dict(rec)
         bump[t] = rec[t] + 1.0                          # per-unit marginal effect
-        dk = economics.kpis(bump, econ_cond, econ)
+        dk = economics.kpis(bump, econ_cond(bump), econ)
         sensitivities[t] = {
             "temp_pull_c": _f(temp_pull.get(t)),
             "d_cost_per_unit": _f(dk["cost_per_ton"] - rec_kpis["cost_per_ton"], 3),
@@ -277,7 +308,7 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
     ]
 
     return {
-        "recommended": {t: _f(rec[t]) for t in OPT_LEVERS},
+        "recommended": {t: _f(rec[t]) for t in opt_levers},
         "predicted": {
             "temp": {"mean": _f(rec_temp, 1), "p10": _f(pred[CV]["p10"], 1),
                      "p90": _f(pred[CV]["p90"], 1)},
@@ -290,7 +321,7 @@ def optimize(conditions: dict, n_trials: int = 200) -> dict:
         "state_votes": votes,
         "interlocks": [{**i, "predicted": _f(i["predicted"], 1)} for i in interlocks],
         "objective": {"coal": _f(rec[COAL]), "afr_total": _f(sum(rec[t] for t in AFR))},
-        "baseline": {"levers": {t: _f(base_vals[t]) for t in OPT_LEVERS},
+        "baseline": {"levers": {t: _f(base_vals[t]) for t in opt_levers},
                      "temp": _f(base_temp, 1)},
         "delta": {
             "coal": _f(rec[COAL] - base_vals[COAL]),

@@ -5,6 +5,8 @@ Run:  python -m uvicorn backend.main:app --reload --port 8000
 from __future__ import annotations
 
 import datetime as _dt
+import threading
+import time
 
 import pandas as pd
 from fastapi import FastAPI, Query
@@ -59,10 +61,15 @@ def _snapshot(tags: list[str] | None = None) -> dict:
     fresh (< 120 s), otherwise falls back to the newest historical row."""
     cat = db.tag_catalog()
     tags = tags or list(cat["tag"])
-    try:
-        lr = db.q("SELECT * FROM live_now LIMIT 1")
-    except Exception:
-        lr = None
+    # etl.live_feed rewrites live_now (drop + recreate) every tick, so a read can
+    # land in that gap. Retry briefly before falling back to historical.
+    lr = None
+    for attempt in range(4):
+        try:
+            lr = db.q("SELECT * FROM live_now LIMIT 1")
+            break
+        except Exception:
+            time.sleep(0.15)
     if lr is not None and len(lr):
         row = lr.iloc[0].to_dict()
         ts = row.get("ts")
@@ -205,8 +212,8 @@ def lab_clinker(limit: int = 500):
         "SELECT * FROM lab_clinker ORDER BY ts DESC LIMIT :n", {"n": limit}))
 
 
-@app.get("/api/overview")
-def overview():
+def _live_inputs() -> tuple[dict, dict, dict, dict]:
+    """Live snapshot -> (snapshot meta, values, twin conditions, twin levers)."""
     s = _snapshot()
     snap = dict(s["values"])
     snap["ts"] = s["ts"]
@@ -233,6 +240,13 @@ def overview():
                 conditions[t] = snap[t]
     except Exception:
         pass
+    levers = {k: snap.get(k) for k in analysis.FEATURES if snap.get(k) is not None}
+    return s, snap, conditions, levers
+
+
+@app.get("/api/overview")
+def overview():
+    s, snap, conditions, levers = _live_inputs()
 
     # actual (not predicted) interlock status from the latest snapshot
     names = db.tag_names()
@@ -243,12 +257,79 @@ def overview():
         interlocks.append({"tag": tag, "name": names.get(tag, tag),
                            "rule": f"{op} {lim}", "value": pv, "pass": ok})
 
-    levers = {k: snap.get(k) for k in analysis.FEATURES if snap.get(k) is not None}
     state = analysis.simulate(levers, conditions)
     return {"snapshot": snap, "conditions": conditions,
             "operating_state": state["operating_state"],
             "target_band": state["target_band"], "state_votes": state["state_votes"],
             "interlocks": interlocks, "source": s["source"], "age_sec": s["age_sec"]}
+
+
+@app.get("/api/twin/forecast")
+def twin_forecast():
+    """Twin forecast of calciner outlet temp for the CURRENT plant state:
+    t+5 prediction (mean/p10/p90) plus the t+5/10/15/30 trajectory when the
+    GBT twin is serving. `method` says whether it is the twin or the fallback."""
+    s, snap, conditions, levers = _live_inputs()
+    sim = analysis.simulate(levers, conditions)
+    return _json_safe({
+        "ts": s["ts"], "source": s["source"], "age_sec": s["age_sec"],
+        "tag": analysis.CV, "actual_now": snap.get(analysis.CV),
+        "method": sim["method"], "horizon_min": sim["horizon_min"],
+        "prediction": sim["prediction"][analysis.CV],
+        "trajectory": sim.get("trajectory"),
+        "operating_state": sim["operating_state"], "target_band": sim["target_band"],
+    })
+
+
+# CCR advisor: all-8-lever recommendation for the next DELTA minutes. One
+# optimisation takes ~40 s on a laptop, so it runs in a background thread at
+# most every ADVISOR_REFRESH_SEC and the endpoint serves the latest result.
+ADVISOR_REFRESH_SEC = 60
+ADVISOR_TRIALS = 120
+_advisor = {"result": None, "computed_at": 0.0, "busy": False}
+_advisor_lock = threading.Lock()
+
+
+def _advisor_run() -> None:
+    try:
+        from twin import optimize as twin_opt
+        s, snap, conditions, levers = _live_inputs()
+        r = twin_opt.optimize({**conditions, **levers}, n_trials=ADVISOR_TRIALS,
+                              levers=analysis.MV)
+        r["ts"], r["source"] = s["ts"], s["source"]
+        _advisor.update(result=r, computed_at=time.time())
+    except Exception as e:                       # never kill the thread silently
+        _advisor.update(result={"available": False, "error": repr(e)},
+                        computed_at=time.time())
+    finally:
+        _advisor["busy"] = False
+
+
+@app.get("/api/twin/advisor")
+def twin_advisor():
+    """Latest advisory setpoints for all 8 levers (ADVISORY ONLY), plus the
+    live current value of each lever. Kicks off a background re-optimisation
+    when the cached result is older than ADVISOR_REFRESH_SEC."""
+    with _advisor_lock:
+        stale = time.time() - _advisor["computed_at"] > ADVISOR_REFRESH_SEC
+        if stale and not _advisor["busy"]:
+            _advisor["busy"] = True
+            threading.Thread(target=_advisor_run, daemon=True).start()
+    s = _snapshot()
+    cat = db.tag_catalog().set_index("tag")
+    live = {t: {"name": str(cat.loc[t, "name"]),
+                "uom": None if pd.isna(cat.loc[t, "uom"]) else str(cat.loc[t, "uom"]),
+                "current": s["values"].get(t)} for t in analysis.MV}
+    r = _advisor["result"]
+    out = {"live": live, "live_ts": s["ts"], "live_source": s["source"],
+           "computing": _advisor["busy"], "horizon_min": analysis.DELTA}
+    if r is None:
+        out.update(available=False, pending=True)
+    else:
+        out.update(r)
+        out.setdefault("available", "recommended" in r)
+        out["age_sec"] = round(time.time() - _advisor["computed_at"], 1)
+    return _json_safe(out)
 
 
 @app.get("/api/latest")
@@ -557,6 +638,57 @@ def fuel_dashboard():
     sensitivities, M&V). Same-origin, no build step."""
     from backend._fuel_dashboard import HTML
     return HTML
+
+
+class DecisionReq(BaseModel):
+    tag: str
+    action: str                      # accepted | declined | undone
+    param_id: str | None = None
+    param_name: str | None = None
+    unit: str | None = None
+    reason: str | None = None
+    note: str | None = None
+    current_value: float | None = None
+    recommended_value: float | None = None
+    operator: str | None = None
+
+
+@app.post("/api/decisions")
+def post_decision(req: DecisionReq):
+    """Record an operator Accept / Decline / Undo on a twin recommendation,
+    with the twin's advisory context at that moment. Never writes to the plant."""
+    from fastapi import HTTPException
+    from backend import decisions
+    try:
+        return _json_safe(decisions.record(req.model_dump(), _advisor["result"], _snapshot()))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get("/api/decisions")
+def get_decisions(day: str | None = None, limit: int = Query(500, ge=1, le=5000)):
+    """Operator decisions for one date (YYYY-MM-DD, default today)."""
+    from fastapi import HTTPException
+    from backend import decisions
+    try:
+        return _json_safe(decisions.list_day(day, limit))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get("/api/decisions/days")
+def get_decision_days():
+    """Date-wise index: every day with decisions and its counts."""
+    from backend import decisions
+    return _json_safe(decisions.days())
+
+
+@app.get("/advisor", response_class=HTMLResponse)
+def advisor_page():
+    """CCR Kiln-3 advisor prototype. Only the predicted calciner temperature is
+    live (from /api/twin/forecast, same-origin); every other element is mock."""
+    from pathlib import Path
+    return (Path(__file__).parent / "static" / "ccr-kiln3-advisor.html").read_text(encoding="utf-8")
 
 
 @app.get("/api/optimizer")

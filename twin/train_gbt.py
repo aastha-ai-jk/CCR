@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,12 @@ MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 PKL_PATH = MODELS_DIR / "twin_gbt.pkl"
 METRICS_PATH = MODELS_DIR / "metrics.json"
 
+# 2026-09-23: cap threads. Without it LightGBM grabbed all 32 cores while the
+# shadow (~8) + optimizer (~5) loops were busy -> OpenMP oversubscription made
+# the weekly retrain take ~9 h (02:00 -> 10:50). Capped fits run in 1-3 min each.
+# Must be defined before _BASE_PARAMS; never exceed the machine's core count.
+_THREADS = min(20, os.cpu_count() or 20)
+
 # v2 recipe (validated on the Model Bench, 2026-08-04): L1 objective for the
 # temperature mean, deeper trees, more rounds with early stopping.
 _BASE_PARAMS = {
@@ -38,10 +45,6 @@ _BASE_PARAMS = {
     "num_threads": _THREADS,
 }
 _NUM_ROUNDS = 2000
-# 2026-09-23: cap threads. Without it LightGBM grabbed all 32 cores while the
-# shadow (~8) + optimizer (~5) loops were busy -> OpenMP oversubscription made
-# the weekly retrain take ~9 h (02:00 -> 10:50). Capped fits run in 1-3 min each.
-_THREADS = 20
 _EARLY_STOP = 40
 _ARX_W = 0.4        # v6 served-mean blend weight for the ridge ARX (exp_squeeze4)
 
