@@ -6,6 +6,7 @@ import Mimic from "@/components/Mimic";
 import SavingsPanel from "@/components/SavingsPanel";
 import Advisor from "@/components/Advisor";
 import { Panel, Stat, Badge, Loading } from "@/components/ui";
+import { Lightbulb, X } from "lucide-react";
 
 const fmt = (v: any, d = 1) =>
   v === null || v === undefined || isNaN(Number(v)) ? "—" : Number(v).toFixed(d);
@@ -23,6 +24,14 @@ export default function DigitalTwin() {
   const [btErr, setBtErr] = useState(false);
   const [shadow, setShadow] = useState<ShadowResult | null>(null);
   const [decisions, setDecisions] = useState<DecisionsResult | null>(null);
+  const [showAdvisor, setShowAdvisor] = useState(false);
+
+  useEffect(() => {
+    if (!showAdvisor) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setShowAdvisor(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showAdvisor]);
 
   const load = () => {
     api.latest().then(setLatest).catch(console.error);
@@ -119,13 +128,49 @@ export default function DigitalTwin() {
         <Mimic values={latest.values} units={latest.units} band={band} mode="live" />
       </Panel>
 
-      {/* ---------------- fuel-saving advisor: hero, recommendation, reasoning, accept/decline, dashboard ---------------- */}
-      <Panel>
-        <Advisor latest={latest} adv={adv} />
-      </Panel>
+      {/* ---------------- recommendation trigger: opens the advisor in an overlay ---------------- */}
+      <button
+        onClick={() => setShowAdvisor(true)}
+        className="w-full flex items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--panel)] px-5 py-4 hover:border-[var(--accent)] transition-colors text-left"
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex items-center justify-center w-10 h-10 rounded-lg bg-[var(--panel-2)] text-[var(--accent)]">
+            <Lightbulb size={20} />
+          </span>
+          <div>
+            <div className="font-semibold text-[var(--ink)]">Recommendation available</div>
+            <div className="text-xs text-[var(--muted)]">
+              {adv?.feasible
+                ? `${adv.operating_state} · ${adv.mode === "hold" ? "hold the band" : "approach the band"} · tap to review and accept or decline`
+                : adv ? "No safe move right now — tap for details" : "Loading…"}
+            </div>
+          </div>
+        </div>
+        <Badge tone={!adv ? "muted" : adv.feasible ? (adv.mode === "hold" ? "ok" : "warn") : "bad"}>
+          {!adv ? "…" : adv.feasible ? "Open" : "Blocked"}
+        </Badge>
+      </button>
 
-      {/* ---------------- per-parameter energy & money savings ---------------- */}
-      <SavingsPanel breakdown={adv?.breakdown} mode={adv?.mode} />
+      {showAdvisor && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:p-8"
+          onClick={(e) => { if (e.target === e.currentTarget) setShowAdvisor(false); }}>
+          <div className="w-full max-w-5xl rounded-xl border border-[var(--line)] bg-[var(--bg)] shadow-2xl my-4">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--line)] sticky top-0 bg-[var(--bg)] rounded-t-xl">
+              <div className="font-semibold text-[var(--ink)] flex items-center gap-2">
+                <Lightbulb size={18} className="text-[var(--accent)]" /> Advisor — recommendation & reasoning
+              </div>
+              <button onClick={() => setShowAdvisor(false)}
+                className="text-[var(--muted)] hover:text-[var(--ink)] p-1 rounded-md hover:bg-[var(--panel-2)]">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <Advisor latest={latest} adv={adv} />
+              <SavingsPanel breakdown={adv?.breakdown} mode={adv?.mode} />
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="text-[11px] text-[var(--muted)]">
         Every readout is your own historical/live plant data mapped onto the FLSmidth Kiln-3 flow sheet.
