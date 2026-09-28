@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { Area, ComposedChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceArea } from "recharts";
-import { api, TwinMetrics, TwinBacktest, ShadowResult } from "@/lib/api";
+import { api, TwinMetrics, TwinBacktest, ShadowResult, DecisionsResult } from "@/lib/api";
 import Mimic from "@/components/Mimic";
 import SavingsPanel from "@/components/SavingsPanel";
 import Advisor from "@/components/Advisor";
@@ -22,12 +22,14 @@ export default function DigitalTwin() {
   const [bt, setBt] = useState<TwinBacktest | null>(null);
   const [btErr, setBtErr] = useState(false);
   const [shadow, setShadow] = useState<ShadowResult | null>(null);
+  const [decisions, setDecisions] = useState<DecisionsResult | null>(null);
 
   const load = () => {
     api.latest().then(setLatest).catch(console.error);
     api.overview().then(setOv).catch(console.error);
     api.advisory().then(setAdv).catch(console.error);
     api.shadow().then(setShadow).catch(() => {});
+    api.decisions().then(setDecisions).catch(() => {});
   };
   useEffect(() => { load(); const id = setInterval(load, 2500); return () => clearInterval(id); }, []);
 
@@ -129,6 +131,58 @@ export default function DigitalTwin() {
         Every readout is your own historical/live plant data mapped onto the FLSmidth Kiln-3 flow sheet.
         The calciner outlet temperature is the controlled variable; the analyser boxes carry the combustion-safety interlocks.
       </div>
+
+      {/* ---- CCR operator decisions on the advisor's recommendations ---- */}
+      <Panel title={`CCR operator decisions — from the advisor · ${decisions?.day ?? "today"}`}
+        right={decisions && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <Badge tone="ok">{decisions.counts.accepted} accepted</Badge>
+            <Badge tone="bad">{decisions.counts.declined} declined</Badge>
+            <Badge tone="muted">{decisions.counts.undone} undone</Badge>
+          </div>
+        )}>
+        {!decisions ? (
+          <div className="text-sm text-[var(--muted)]">Decision log unavailable.</div>
+        ) : decisions.rows.length === 0 ? (
+          <div className="text-sm text-[var(--muted)]">
+            No operator decisions yet today. Accept or decline a recommendation on the advisor screen (<span className="mono">/advisor</span>) and it appears here.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-[var(--muted)] text-left">
+                <tr>
+                  <th className="py-1 pr-3">Time</th><th className="pr-3">Parameter</th><th className="pr-3">Decision</th>
+                  <th className="pr-3 text-right">Current → Recommended</th><th className="pr-3">Reason / note</th>
+                  <th className="pr-3 text-right">Twin t+{decisions.rows[0].horizon_min ?? 5} (with recs)</th><th>State</th>
+                </tr>
+              </thead>
+              <tbody>
+                {decisions.rows.slice(0, 25).map((d) => (
+                  <tr key={d.id} className="border-t border-[var(--line)] align-top">
+                    <td className="py-1.5 pr-3 mono">{d.decided_at.slice(11, 19)}</td>
+                    <td className="pr-3">{d.param_name ?? d.tag}</td>
+                    <td className="pr-3">
+                      <Badge tone={d.action === "accepted" ? "ok" : d.action === "declined" ? "bad" : "muted"}>{d.action}</Badge>
+                    </td>
+                    <td className="pr-3 text-right mono whitespace-nowrap">
+                      {d.current_value?.toFixed(2) ?? "—"} → {d.recommended_value?.toFixed(2) ?? "—"} {d.unit ?? ""}
+                    </td>
+                    <td className="pr-3">
+                      {d.reason ?? "—"}{d.note ? <span className="text-[var(--muted)]"> · {d.note}</span> : null}
+                    </td>
+                    <td className="pr-3 text-right mono">{d.predicted_temp != null ? `${d.predicted_temp.toFixed(1)} °C` : "—"}</td>
+                    <td className="text-[var(--muted)]">{d.operating_state ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="text-[11px] text-[var(--muted)] mt-2">
+          Stored date-wise in the twin database (<span className="mono">operator_decisions</span>) with the twin&apos;s advisory context, as labelled data for future retraining. Nothing here is written to the plant.
+        </div>
+      </Panel>
 
       {/* ---- Shadow mode: twin advising beside the live CCR ---- */}
       {shadow?.available && shadow.current && (() => {

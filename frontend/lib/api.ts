@@ -132,6 +132,23 @@ export interface ShadowResult {
   current?: ShadowPoint | null; series?: ShadowPoint[]; note?: string;
 }
 
+/** One CCR operator Accept / Decline / Undo on a twin recommendation. */
+export interface OperatorDecision {
+  id: number; day: string; decided_at: string; operator: string | null;
+  param_id: string | null; tag: string; param_name: string | null; unit: string | null;
+  action: "accepted" | "declined" | "undone"; reason: string | null; note: string | null;
+  current_value: number | null; recommended_value: number | null;
+  advisory_ts: string | null; data_source: string | null; horizon_min: number | null;
+  live_temp: number | null; predicted_temp: number | null;
+  operating_state: string | null; band_lo: number | null; band_hi: number | null;
+}
+export interface DecisionsResult {
+  day: string; n: number;
+  counts: { accepted: number; declined: number; undone: number };
+  status: Record<string, { status: "accepted" | "declined" | "open"; decided_at: string; reason: string | null }>;
+  rows: OperatorDecision[];
+}
+
 export const api = {
   health: () => get("/api/health"),
   tags: () => get<Tag[]>("/api/tags"),
@@ -176,6 +193,8 @@ export const api = {
   twinMetrics: () => get<TwinMetrics>("/api/twin/metrics"),
   shadow: (limit = 240) => get<ShadowResult>(`/api/shadow?limit=${limit}`),
   bench: () => get<BenchResult>("/api/bench"),
+  decisions: (day?: string) =>
+    get<DecisionsResult>(`/api/decisions${day ? `?day=${encodeURIComponent(day)}` : ""}`),
   twinBacktest: (p: { start?: string; end?: string; max_points?: number } = {}) => {
     const q = new URLSearchParams();
     if (p.start) q.set("start", p.start);
