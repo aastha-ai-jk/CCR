@@ -1,6 +1,7 @@
 """Database access layer. One engine, cached metadata, safe tag validation."""
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 
 import pandas as pd
@@ -136,3 +137,37 @@ def latest_decision_for_situation(operating_state: str, direction: str) -> dict 
         if d == direction:
             return row.to_dict()
     return None
+
+
+def declined_moves_for_situation(operating_state: str, direction: str,
+                                  lookback: int = 20) -> list[dict[str, float]]:
+    """Lever setpoints from recent declines in this exact situation (same
+    operating state + same side of its band) -- each one a {tag: to} dict.
+    advise() uses these to steer its search away from a setpoint an operator
+    has already flagged as unwanted in this situation, so a decline actually
+    changes what gets recommended next time, not just what gets displayed."""
+    try:
+        df = q("""
+            SELECT target_band_low, target_band_high, live_actual_temp, moves_json
+            FROM advisory_decisions
+            WHERE decision = 'declined' AND operating_state = :state
+            ORDER BY id DESC LIMIT :n
+        """, {"state": operating_state, "n": lookback})
+    except Exception:
+        return []
+    out: list[dict[str, float]] = []
+    for _, row in df.iterrows():
+        lo, hi, t = row["target_band_low"], row["target_band_high"], row["live_actual_temp"]
+        if pd.isna(lo) or pd.isna(hi) or pd.isna(t):
+            continue
+        d = "above" if t > hi else "below" if t < lo else "within"
+        if d != direction:
+            continue
+        try:
+            moves = json.loads(row["moves_json"]) if row["moves_json"] else []
+        except (TypeError, ValueError):
+            continue
+        pt = {m["tag"]: float(m["to"]) for m in moves if "tag" in m and m.get("to") is not None}
+        if pt:
+            out.append(pt)
+    return out

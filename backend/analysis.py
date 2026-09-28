@@ -336,6 +336,24 @@ def advise(levers: dict, conditions: dict | None = None, k: int = 400,
     state = f"State {state_num}"
     band = config.TEMP_STATE_BANDS[state]
 
+    # Learn from declines: an operator declining a recommendation flags that
+    # exact setpoint, in this exact situation (same state, same side of the
+    # band), as unwanted. Steer the search away from it next time instead of
+    # silently re-offering the same thing -- a real behavioural change, not
+    # just a note shown after the fact (see the "locked" banner elsewhere).
+    direction = "above" if T0 > band[1] else "below" if T0 < band[0] else "within"
+    declined_pts = db.declined_moves_for_situation(state, direction)
+    avoid = np.zeros(len(cand), dtype=bool)
+    AVOID_TOL = 0.15   # fraction of each lever's guardrail span counted as "the same" setpoint
+    for pt in declined_pts:
+        if not all(t in pt for t in OPT_LEVERS):
+            continue
+        close = np.ones(len(cand), dtype=bool)
+        for j, t in enumerate(OPT_LEVERS):
+            span = max(abs(cur[t]) * guardrail, 1e-6)
+            close &= np.abs(cand[:, j] - pt[t]) <= AVOID_TOL * span
+        avoid |= close
+
     ok = (temp >= band[0]) & (temp <= band[1])
     for tag, (op, lim) in config.INTERLOCKS.items():
         if tag in safety:
@@ -365,16 +383,26 @@ def advise(levers: dict, conditions: dict | None = None, k: int = 400,
                            "can be recommended.").format(guardrail),
                 "current": base, "assumptions": _assumptions(guardrail, lam)}
 
+    # Prefer candidates that don't repeat a declined setpoint, but never let
+    # that preference block a move that would otherwise be offered -- if
+    # avoiding every declined point would leave nothing usable, fall back to
+    # the full candidate set rather than get stuck or manufacture a worse move.
+    ok_use = ok & ~avoid if (ok & ~avoid).any() else ok
+    safe_use = safe & ~avoid if (safe & ~avoid).any() else safe
+    avoided_declined_repeat = bool(avoid.any() and (
+        (ok.any() and not np.array_equal(ok_use, ok)) or
+        (not ok.any() and not np.array_equal(safe_use, safe))))
+
     centre = 0.5 * (band[0] + band[1])
     cost = cand[:, 0] - lam * afr_equiv(cand)
     if ok.any():
         mode = "hold"
-        obj = np.where(ok, cost, np.inf)
+        obj = np.where(ok_use, cost, np.inf)
     else:
         # move toward the band (primary), cheapest fuel as the tie-break
         mode = "approach"
         gap = np.abs(temp - centre)
-        obj = np.where(safe, gap + 1e-3 * cost, np.inf)
+        obj = np.where(safe_use, gap + 1e-3 * cost, np.inf)
     b = int(np.argmin(obj))
     steps_to_band = None
     if mode == "approach":
@@ -397,6 +425,8 @@ def advise(levers: dict, conditions: dict | None = None, k: int = 400,
                       "toward it within one guarded move (the control logic repeats "
                       "such steps until the range is restored)."),
         "steps_to_band": steps_to_band,
+        "declined_repeats_checked": len(declined_pts),
+        "avoided_declined_repeat": avoided_declined_repeat,
         "operating_state": state,
         "target_band": {"low": band[0], "high": band[1]},
         "current": base,

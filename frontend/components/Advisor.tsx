@@ -52,6 +52,13 @@ function buildWhy(adv: any): string {
       : `No single 5% step fully reaches the target range, so this is the safe step that gets closest to it` +
         (adv.steps_to_band ? ` — expect to repeat a move like this roughly ${adv.steps_to_band} more times to fully settle in range.` : ".")
   );
+  if (adv.avoided_declined_repeat) {
+    parts.push(
+      `This move was deliberately chosen to differ from a setpoint an operator declined before in this same situation ` +
+      `(${adv.declined_repeats_checked} past decline${adv.declined_repeats_checked === 1 ? "" : "s"} checked) — ` +
+      `the system flags declined moves and steers away from repeating them.`
+    );
+  }
   return parts.join(" ");
 }
 
