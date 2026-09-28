@@ -11,6 +11,13 @@ import config
 _url = config.database_url()
 _kw = {"connect_args": {"timeout": 15}} if _url.startswith("sqlite") else {}
 _engine = create_engine(_url, pool_pre_ping=True, **_kw)
+if _url.startswith("sqlite"):
+    # WAL: readers no longer block the writer (and vice versa). Without it, the
+    # many concurrent pollers (latest/overview/advisory/shadow/decisions, every
+    # ~2.5s per open tab) can starve a single INSERT for the length of the
+    # busy-timeout above -- observed as accept/decline briefly hanging.
+    with _engine.begin() as _conn:
+        _conn.exec_driver_sql("PRAGMA journal_mode=WAL")
 
 
 def engine():
