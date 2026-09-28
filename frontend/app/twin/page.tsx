@@ -128,34 +128,38 @@ export default function DigitalTwin() {
         <Mimic values={latest.values} units={latest.units} band={band} mode="live" />
       </Panel>
 
-      {/* ---------------- recommendation trigger: opens the advisor in an overlay ---------------- */}
+      {/* ---------------- recommendation trigger: opens the advisor as a side drawer, mimic stays visible ---------------- */}
       <button
-        onClick={() => setShowAdvisor(true)}
-        className="w-full flex items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--panel)] px-5 py-4 hover:border-[var(--accent)] transition-colors text-left"
+        onClick={() => setShowAdvisor((s) => !s)}
+        className={`w-full flex items-center justify-between gap-3 rounded-xl border px-5 py-4 transition-colors text-left ${
+          showAdvisor ? "border-[var(--accent)] bg-[var(--panel-2)]" : "border-[var(--line)] bg-[var(--panel)] hover:border-[var(--accent)]"
+        }`}
       >
         <div className="flex items-center gap-3">
           <span className="flex items-center justify-center w-10 h-10 rounded-lg bg-[var(--panel-2)] text-[var(--accent)]">
             <Lightbulb size={20} />
           </span>
           <div>
-            <div className="font-semibold text-[var(--ink)]">Recommendation available</div>
+            <div className="font-semibold text-[var(--ink)]">Recommendation {showAdvisor ? "panel open" : "available"}</div>
             <div className="text-xs text-[var(--muted)]">
               {adv?.feasible
-                ? `${adv.operating_state} · ${adv.mode === "hold" ? "hold the band" : "approach the band"} · tap to review and accept or decline`
+                ? `${adv.operating_state} · ${adv.mode === "hold" ? "hold the band" : "approach the band"} · ${showAdvisor ? "tap to close" : "tap to review and accept or decline"}`
                 : adv ? "No safe move right now — tap for details" : "Loading…"}
             </div>
           </div>
         </div>
         <Badge tone={!adv ? "muted" : adv.feasible ? (adv.mode === "hold" ? "ok" : "warn") : "bad"}>
-          {!adv ? "…" : adv.feasible ? "Open" : "Blocked"}
+          {!adv ? "…" : adv.feasible ? (showAdvisor ? "Close" : "Open") : "Blocked"}
         </Badge>
       </button>
 
       {showAdvisor && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:p-8"
-          onClick={(e) => { if (e.target === e.currentTarget) setShowAdvisor(false); }}>
-          <div className="w-full max-w-5xl rounded-xl border border-[var(--line)] bg-[var(--bg)] shadow-2xl my-4">
-            <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--line)] sticky top-0 bg-[var(--bg)] rounded-t-xl">
+        <div className="fixed inset-0 z-50" onClick={() => setShowAdvisor(false)}>
+          <div
+            className="absolute top-0 right-0 h-full w-full sm:w-[520px] lg:w-[600px] bg-[var(--bg)] border-l border-[var(--line)] shadow-2xl overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--line)] sticky top-0 bg-[var(--bg)] z-10">
               <div className="font-semibold text-[var(--ink)] flex items-center gap-2">
                 <Lightbulb size={18} className="text-[var(--accent)]" /> Advisor — recommendation & reasoning
               </div>
@@ -164,7 +168,7 @@ export default function DigitalTwin() {
                 <X size={20} />
               </button>
             </div>
-            <div className="p-5 space-y-4">
+            <div className="p-4 space-y-4">
               <Advisor latest={latest} adv={adv} />
               <SavingsPanel breakdown={adv?.breakdown} mode={adv?.mode} />
             </div>
