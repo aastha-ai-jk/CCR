@@ -113,6 +113,11 @@ main{display:flex;flex-direction:column;min-width:0;}
 .hero__times{font-size:13px;color:var(--ink-dim);margin:4px 0 6px;}
 .hero__times b{font-weight:500;color:var(--amber);}
 .hero__times b:first-child{color:var(--ink-bright);}
+.hero__traj{display:grid;grid-template-columns:1fr 1fr;gap:5px 16px;margin:6px 0 8px;}
+.hero__traj:empty{display:none;}
+.hero__traj div{display:flex;align-items:baseline;gap:6px;font-size:12px;color:var(--ink-faint);white-space:nowrap;}
+.hero__traj b{font-weight:500;font-size:14px;color:var(--ink-bright);}
+.hero__traj i{font-style:normal;font-size:11px;}
 .hero__trend{font-size:13px;color:var(--ink-dim);display:flex;align-items:center;gap:7px;}
 .hero__foot{margin-top:16px;padding-top:13px;border-top:1px solid var(--line-soft);display:flex;gap:22px;}
 .hero__foot div{font-size:12px;color:var(--ink-faint);}
@@ -349,6 +354,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
           <div class="hero__label">Calciner temperature predicted for <span id="predFor">--:--</span> (next <span id="predHorizon">5</span> min) · <span id="twinSrc">connecting to digital twin…</span></div>
           <div class="hero__val"><b class="num" id="predVal">876.4</b><em>°C</em></div>
           <div class="hero__times num">Live at <b id="liveAt">--:--:--</b> <span aria-hidden="true">→</span> prediction for <b id="predAt">--:--:--</b></div>
+          <div class="hero__traj num" id="predTraj" aria-label="Calciner forecast by horizon"></div>
           <div class="hero__trend" id="predTrend">Holding steady inside the operating band</div>
           <div class="hero__foot">
             <div>Live reading<b class="num" id="liveVal">874.1 °C</b></div>
@@ -866,11 +872,17 @@ function pollTwin(){
     document.getElementById("predHorizon").textContent=f.horizon_min;
     document.getElementById("predFor").textContent=clockAt(f.ts,f.horizon_min)||"--:--";
     document.getElementById("predAt").textContent=clockAt(f.ts,f.horizon_min,true)||"--:--:--";
+    // every trained horizon (t+5/10/15/30): value, target clock time, P10–P90
+    document.getElementById("predTraj").innerHTML=(f.trajectory||[]).map(function(t){
+      return '<div><span>+'+t.min+' min · '+(clockAt(f.ts,t.min)||"--:--")+'</span><b>'+fmt(t.mean,1)
+        +'</b><i>'+fmt(t.p10,0)+'–'+fmt(t.p90,0)+'</i></div>';
+    }).join("");
     document.getElementById("twinSrc").textContent=(f.method==="gbt-twin"
       ? "digital twin" : "fallback estimate, twin model not loaded")+" · "+f.source;
     renderLive();
   }).catch(function(){
     twinPred=null;
+    document.getElementById("predTraj").innerHTML="";
     document.getElementById("twinSrc").textContent="twin offline — mock value";
   }).then(function(){ setTimeout(pollTwin,2500); });
 }

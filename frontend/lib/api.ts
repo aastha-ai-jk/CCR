@@ -132,6 +132,8 @@ export interface DecisionsResult {
   rows: OperatorDecision[];
 }
 
+export interface TrajectoryPoint { min: number; mean: number; p10: number; p90: number }
+
 /** An accepted advisor setpoint and whether it still drives the twin. */
 export interface TwinSetpoint {
   tag: string; name: string | null; unit: string | null;
@@ -146,6 +148,9 @@ export interface TwinFuture {
   prediction: { mean: number; p10: number; p90: number };
   baseline_prediction: { mean: number; p10: number; p90: number };
   setpoint_effect_c: number;
+  /** Calciner temp at each trained horizon (min = 5, 10, 15, 30); null if the twin model is not loaded. */
+  trajectory: TrajectoryPoint[] | null;
+  baseline_trajectory: TrajectoryPoint[] | null;
   setpoints: TwinSetpoint[];
   operating_state: string; target_band: { low: number; high: number };
   interlocks: { tag: string; name: string; rule: string; predicted: number | null; pass: boolean | null }[];

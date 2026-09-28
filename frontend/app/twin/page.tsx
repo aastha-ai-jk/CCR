@@ -129,6 +129,65 @@ export default function DigitalTwin() {
              The calciner outlet temperature is the controlled variable; the analyser boxes carry the combustion-safety interlocks.</>}
       </div>
 
+      {/* ---- calciner temperature trajectory: t+5 / 10 / 15 / 30 ---- */}
+      {ahead && (
+        <Panel title="Calciner outlet temperature — twin forecast by horizon"
+          right={<Badge tone="muted">band {band.low}–{band.high} °C · {future!.operating_state}</Badge>}>
+          {!future!.trajectory?.length ? (
+            <div className="text-sm text-[var(--muted)]">
+              Multi-horizon forecast unavailable — it needs the trained GBT twin (current method: <span className="mono">{future!.method}</span>).
+            </div>
+          ) : (
+            <table className="w-full text-xs">
+              <thead className="text-[var(--muted)] text-left">
+                <tr>
+                  <th className="py-1 pr-3">Horizon</th><th className="pr-3">For time</th>
+                  <th className="pr-3 text-right">{active.length ? "Twin (setpoints applied)" : "Twin"}</th>
+                  <th className="pr-3 text-right">P10–P90</th>
+                  {active.length > 0 && <><th className="pr-3 text-right">Live levers</th><th className="pr-3 text-right">Setpoint effect</th></>}
+                  <th>Band</th>
+                </tr>
+              </thead>
+              <tbody>
+                {future!.trajectory!.map((p) => {
+                  const b = future!.baseline_trajectory?.find((x) => x.min === p.min);
+                  const inBand = p.mean >= band.low && p.mean <= band.high;
+                  const at = (() => {
+                    const d = new Date(String(future!.live_ts).replace(" ", "T").slice(0, 19));
+                    if (isNaN(d.getTime())) return "—";
+                    d.setMinutes(d.getMinutes() + p.min);
+                    return d.toTimeString().slice(0, 8);
+                  })();
+                  return (
+                    <tr key={p.min} className="border-t border-[var(--line)]">
+                      <td className="py-1.5 pr-3 mono">T+{p.min} min</td>
+                      <td className="pr-3 mono">{at}</td>
+                      <td className="pr-3 text-right mono font-bold text-[var(--accent)]">{p.mean.toFixed(1)} °C</td>
+                      <td className="pr-3 text-right mono text-[var(--muted)]">{p.p10.toFixed(0)}–{p.p90.toFixed(0)}</td>
+                      {active.length > 0 && <>
+                        <td className="pr-3 text-right mono">{b ? `${b.mean.toFixed(1)} °C` : "—"}</td>
+                        <td className="pr-3 text-right mono">{b ? `${p.mean - b.mean >= 0 ? "+" : ""}${(p.mean - b.mean).toFixed(1)} °C` : "—"}</td>
+                      </>}
+                      <td><Badge tone={inBand ? "ok" : "warn"}>{inBand ? "in band" : p.mean < band.low ? "below" : "above"}</Badge></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          <div className="text-[11px] text-[var(--muted)] mt-2">
+            One twin forecast per horizon from the live plant state{active.length ? ", with the accepted setpoints applied as a step now" : ""}.
+            Uncertainty widens with the horizon (P10–P90).
+            {(() => {
+              const th = (metrics as any)?.temp_horizons as Record<string, { mae?: number }> | undefined;
+              const parts = th ? Object.entries(th).filter(([, v]) => v?.mae != null)
+                .map(([k, v]) => `T+${k} ${v.mae!.toFixed(1)}`) : [];
+              return parts.length ? ` Held-out test MAE (°C): ${parts.join(" · ")}.` : null;
+            })()}
+          </div>
+        </Panel>
+      )}
+
       {/* ---- accepted setpoints driving the twin ---- */}
       {ahead && (
         <Panel title={`Accepted setpoints driving the twin (T+${h})`}

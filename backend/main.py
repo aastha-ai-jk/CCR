@@ -325,6 +325,9 @@ def twin_future():
         "prediction": cv_twin,                       # with active setpoints
         "baseline_prediction": cv_base,              # live levers only
         "setpoint_effect_c": round(cv_twin["mean"] - cv_base["mean"], 1),
+        # calciner temp at every trained horizon (t+5/10/15/30), same split
+        "trajectory": twin.get("trajectory"),
+        "baseline_trajectory": base.get("trajectory"),
         "setpoints": list(sp.values()),
         "operating_state": twin["operating_state"], "target_band": twin["target_band"],
         "interlocks": twin["interlocks"], "all_interlocks_ok": twin["all_interlocks_ok"],
