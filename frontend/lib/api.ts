@@ -132,6 +132,26 @@ export interface DecisionsResult {
   rows: OperatorDecision[];
 }
 
+/** An accepted advisor setpoint and whether it still drives the twin. */
+export interface TwinSetpoint {
+  tag: string; name: string | null; unit: string | null;
+  accepted: number; live: number | null; tolerance: number;
+  decided_at: string; age_min: number; status: "active" | "reached" | "expired";
+}
+/** The plant `horizon_min` minutes ahead: twin-predicted / accepted-setpoint / live per tag. */
+export interface TwinFuture {
+  live_ts: string; twin_ts: string | null; horizon_min: number;
+  source: string; age_sec: number | null; method: string;
+  values: Record<string, { twin: number | null; live: number | null; basis: "twin" | "setpoint" | "live" }>;
+  prediction: { mean: number; p10: number; p90: number };
+  baseline_prediction: { mean: number; p10: number; p90: number };
+  setpoint_effect_c: number;
+  setpoints: TwinSetpoint[];
+  operating_state: string; target_band: { low: number; high: number };
+  interlocks: { tag: string; name: string; rule: string; predicted: number | null; pass: boolean | null }[];
+  all_interlocks_ok: boolean;
+}
+
 export const api = {
   health: () => get("/api/health"),
   tags: () => get<Tag[]>("/api/tags"),
@@ -162,6 +182,7 @@ export const api = {
   twinMetrics: () => get<TwinMetrics>("/api/twin/metrics"),
   shadow: (limit = 240) => get<ShadowResult>(`/api/shadow?limit=${limit}`),
   bench: () => get<BenchResult>("/api/bench"),
+  twinFuture: () => get<TwinFuture>("/api/twin/future"),
   decisions: (day?: string) =>
     get<DecisionsResult>(`/api/decisions${day ? `?day=${encodeURIComponent(day)}` : ""}`),
   twinBacktest: (p: { start?: string; end?: string; max_points?: number } = {}) => {

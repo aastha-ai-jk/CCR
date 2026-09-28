@@ -140,6 +140,52 @@ def list_day(day: str | None = None, limit: int = 500) -> dict:
             "status": status, "rows": recs}
 
 
+# An accepted setpoint drives the twin (as if applied now) until the plant
+# reaches it (live within REACH_TOL_FRAC of the tag's engineering range), it is
+# undone / superseded by a newer decision, or EXPIRY_MIN passes.
+REACH_TOL_FRAC = 0.005
+EXPIRY_MIN = 30
+
+
+def setpoints(values: dict, now: dt.datetime | None = None) -> dict:
+    """tag -> accepted setpoint state for every lever whose latest decision in
+    the last EXPIRY_MIN minutes is 'accepted'. ``status`` is ``active`` (still
+    driving the twin), ``reached`` (plant is there — live takes over) or
+    ``expired``. Levers only: accepting the calciner-temp row sets nothing."""
+    _ensure()
+    now = now or dt.datetime.now()
+    since = (now - dt.timedelta(minutes=EXPIRY_MIN + 5)).isoformat(timespec="seconds")
+    rows = db.q("SELECT * FROM operator_decisions WHERE decided_at >= :s ORDER BY id DESC",
+                {"s": since})
+    cat = db.tag_catalog().set_index("tag")
+    out: dict[str, dict] = {}
+    seen: set[str] = set()
+    for r in rows.to_dict("records"):                # newest first
+        tag = r["tag"]
+        if tag in seen:
+            continue
+        seen.add(tag)
+        if r["action"] != "accepted" or tag not in analysis.MV or r["recommended_value"] is None:
+            continue
+        age = (now - dt.datetime.fromisoformat(r["decided_at"])).total_seconds() / 60.0
+        lo, hi = cat.loc[tag, "y_min"], cat.loc[tag, "y_max"]
+        span = float(hi - lo) if pd.notna(lo) and pd.notna(hi) and hi > lo else 1.0
+        tol = REACH_TOL_FRAC * span
+        live = _num(values.get(tag))
+        rec = float(r["recommended_value"])
+        if live is not None and abs(live - rec) <= tol:
+            status = "reached"
+        elif age > EXPIRY_MIN:
+            status = "expired"
+        else:
+            status = "active"
+        out[tag] = {"tag": tag, "name": r["param_name"], "unit": r["unit"],
+                    "accepted": rec, "live": live, "tolerance": round(tol, 4),
+                    "decided_at": r["decided_at"], "age_min": round(age, 1),
+                    "status": status, "decision_id": int(r["id"])}
+    return out
+
+
 def days() -> list[dict]:
     """Every date that has decisions, with counts — the date-wise index."""
     _ensure()

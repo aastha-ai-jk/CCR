@@ -25,14 +25,25 @@ export interface MimicProps {
   units?: Record<string, string | null>;
   band?: { low: number; high: number };
   mode?: "live" | "sim";
+  /** Twin-ahead view: the live plant value per tag, shown beside `values`. */
+  live?: Record<string, number | null | undefined>;
+  /** Why a tag's value differs from live: predicted by the twin, or an accepted setpoint. */
+  basis?: Record<string, "twin" | "setpoint" | "live">;
 }
 
-export default function Mimic({ values, units = {}, band, mode = "live" }: MimicProps) {
+export default function Mimic({ values, units = {}, band, mode = "live", live, basis = {} }: MimicProps) {
   const num = (t: string) => {
     const x = values[t];
     return x == null || (typeof x === "number" && isNaN(x)) ? null : (x as number);
   };
   const fmt = (t: string, d = 0) => { const x = num(t); return x == null ? "—" : x.toFixed(d); };
+  // "live 874" beside a tag whose shown value is twin-predicted or a setpoint
+  const liveNote = (t: string, d = 0) => {
+    if (!live || !basis[t] || basis[t] === "live") return null;
+    const x = live[t];
+    return `live ${x == null || isNaN(x as number) ? "—" : (x as number).toFixed(d)}`;
+  };
+  const isSet = (t?: string) => !!t && basis[t] === "setpoint";
   const u = (t: string) => units[t] || "";
   const safeTone = (t: string) => {
     const x = num(t); const lim = LIMITS[t];
@@ -51,10 +62,14 @@ export default function Mimic({ values, units = {}, band, mode = "live" }: Mimic
     const col: Record<string, string> = { led: C.led, warn: C.warn, bad: C.bad, accent: C.gas, ink: C.ink };
     const value = val ?? (t ? fmt(t, d) : "—");
     const unt = unit ?? (t ? u(t) : "");
+    const note = t ? liveNote(t, d) : null;
     return (
       <g>
-        <rect x={x} y={y} width={w} height={38} rx={5} fill="#0a1120" stroke={C.steel} />
+        <rect x={x} y={y} width={w} height={38} rx={5} fill="#0a1120"
+          stroke={isSet(t) ? C.warn : C.steel} strokeWidth={isSet(t) ? 2 : 1} />
         <text x={x + 8} y={y + 14} fill={C.mut} fontSize="8.5" style={{ letterSpacing: 0.4 }}>{label.toUpperCase()}</text>
+        {note && <text x={x + w - 6} y={y + 31} textAnchor="end" fill={C.mut} fontSize="8.5"
+          fontFamily="ui-monospace,monospace">{note}</text>}
         <text x={x + 8} y={y + 31} fill={col[tone]} fontSize="15" fontFamily="ui-monospace,Consolas,monospace" fontWeight={700}>
           {value}<tspan fontSize="9" fill={C.mut}> {unt}</tspan>
         </text>
@@ -74,6 +89,8 @@ export default function Mimic({ values, units = {}, band, mode = "live" }: Mimic
             <tspan fill={C.mut}>{r.k} </tspan>
             <tspan fill={tone === "bad" ? C.bad : C.led} fontWeight={700}>{fmt(r.t, r.d ?? (r.k === "O₂" ? 1 : 0))}</tspan>
             <tspan fill={C.mut} fontSize="8"> {u(r.t)}</tspan>
+            {liveNote(r.t, r.d ?? (r.k === "O₂" ? 1 : 0)) &&
+              <tspan fill={C.mut} fontSize="8"> · {liveNote(r.t, r.d ?? (r.k === "O₂" ? 1 : 0))}</tspan>}
           </text>
         );
       })}
@@ -121,7 +138,9 @@ export default function Mimic({ values, units = {}, band, mode = "live" }: Mimic
         {/* ------- kiln feed ------- */}
         <rect x={520} y={8} width={160} height={40} rx={6} fill="#12213c" stroke={C.steel} />
         <text x={600} y={24} textAnchor="middle" fill={C.mut} fontSize="10">KILN FEED</text>
-        <text x={600} y={40} textAnchor="middle" fill={C.meal} fontSize="15" fontWeight={700} fontFamily="ui-monospace,monospace">{fmt("353RL130_TPH", 0)} <tspan fontSize="9" fill={C.mut}>t/h</tspan></text>
+        {isSet("353RL130_TPH") && <rect x={520} y={8} width={160} height={40} rx={6} fill="none" stroke={C.warn} strokeWidth={2} />}
+        <text x={600} y={40} textAnchor="middle" fill={C.meal} fontSize="15" fontWeight={700} fontFamily="ui-monospace,monospace">{fmt("353RL130_TPH", 0)} <tspan fontSize="9" fill={C.mut}>t/h</tspan>
+          {liveNote("353RL130_TPH") && <tspan fontSize="8" fill={C.mut}> {liveNote("353RL130_TPH")}</tspan>}</text>
         <path d={`M540 48 Q ${LX} 40 ${LX} ${cyY[0]}`} stroke={C.meal} strokeWidth={2} strokeDasharray="5 4" fill="none" />
         <path d={`M660 48 Q ${RX} 40 ${RX} ${cyY[0]}`} stroke={C.meal} strokeWidth={2} strokeDasharray="5 4" fill="none" />
 
@@ -132,9 +151,12 @@ export default function Mimic({ values, units = {}, band, mode = "live" }: Mimic
         <text x={RX} y={cyY[0] - 8} textAnchor="middle" fill={C.mut} fontSize="10" fontWeight={700}>PREHEATER STRING-2</text>
 
         {/* PH fan + outlet temp */}
-        <circle cx={90} cy={70} r={22} fill={C.vessel} stroke={C.steel} />
+        <circle cx={90} cy={70} r={22} fill={C.vessel} stroke={isSet("423FN010_ST") ? C.warn : C.steel}
+          strokeWidth={isSet("423FN010_ST") ? 2 : 1} />
         <text x={90} y={66} textAnchor="middle" fill={C.mut} fontSize="8">PH FAN</text>
         <text x={90} y={78} textAnchor="middle" fill={C.led} fontSize="10" fontFamily="ui-monospace,monospace">{fmt("423FN010_ST", 0)}</text>
+        {liveNote("423FN010_ST") && <text x={90} y={42} textAnchor="middle" fill={C.mut} fontSize="8"
+          fontFamily="ui-monospace,monospace">{liveNote("423FN010_ST")}</text>}
         <Readout x={30} y={100} label="PH outlet temp" t="423CN_TEMP" unit="°C" tone="ink" w={120} />
 
         {/* analyzers */}
@@ -158,6 +180,8 @@ export default function Mimic({ values, units = {}, band, mode = "live" }: Mimic
         {/* calciner outlet temp — the controlled variable */}
         <rect x={520} y={244} width={160} height={46} rx={7} fill="#0a1120" stroke={tempT === "warn" ? C.warn : C.led} strokeWidth={2} />
         <text x={528} y={260} fill={C.mut} fontSize="9">CALCINER OUTLET TEMP (CI400)</text>
+        {liveNote("423CI400_TT_4") && <text x={676} y={240} textAnchor="end" fill={C.mut} fontSize="9"
+          fontFamily="ui-monospace,monospace">{liveNote("423CI400_TT_4")} °C</text>}
         <text x={528} y={282} fill={tempT === "warn" ? C.warn : C.led} fontSize="20" fontWeight={800} fontFamily="ui-monospace,monospace">
           {fmt("423CI400_TT_4", 0)}<tspan fontSize="11" fill={C.mut}> °C</tspan>
         </text>
@@ -208,6 +232,11 @@ export default function Mimic({ values, units = {}, band, mode = "live" }: Mimic
           <line x1={30} y1={694} x2={54} y2={694} stroke={C.gas} strokeWidth={3} /><text x={60} y={698}>gas</text>
           <line x1={110} y1={694} x2={134} y2={694} stroke={C.meal} strokeWidth={2} strokeDasharray="5 4" /><text x={140} y={698}>meal / fuel</text>
           <line x1={230} y1={694} x2={254} y2={694} stroke={C.air} strokeWidth={2} strokeDasharray="6 5" /><text x={260} y={698}>air</text>
+          {live && <>
+            <rect x={320} y={687} width={16} height={12} rx={2} fill="none" stroke={C.warn} strokeWidth={2} />
+            <text x={342} y={698}>accepted setpoint applied</text>
+            <text x={500} y={698}>&quot;live X&quot; = plant now; bold value = twin (predicted or setpoint)</text>
+          </>}
         </g>
       </svg>
     </div>
