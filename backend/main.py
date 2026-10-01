@@ -284,6 +284,61 @@ def twin_forecast():
     })
 
 
+# Digital twin = the plant DELTA minutes ahead. Levers are the live values with
+# every ACTIVE accepted setpoint applied now (backend.decisions.setpoints); the
+# calciner temp + safety analysers are the twin's t+DELTA prediction; every
+# other tag has no model and stays live (basis "live"). Cached per live
+# snapshot + active-setpoint set, so the 2.5 s dashboard poll stays cheap.
+_future_cache: dict = {"key": None, "out": None}
+
+
+@app.get("/api/twin/future")
+def twin_future():
+    from backend import decisions
+    s, snap, conditions, levers = _live_inputs()
+    sp = decisions.setpoints(snap)
+    active = {t: v["accepted"] for t, v in sp.items() if v["status"] == "active"}
+    key = (s["ts"], tuple(sorted(active.items())))
+    if _future_cache["key"] == key:
+        return _future_cache["out"]
+
+    base = analysis.simulate(levers, conditions)
+    twin = analysis.simulate({**levers, **active}, conditions) if active else base
+    pred = twin["prediction"]
+    values = {}
+    for tag, live_v in snap.items():
+        if tag == "ts":
+            continue
+        if tag in pred:
+            values[tag] = {"twin": pred[tag]["mean"], "live": live_v, "basis": "twin"}
+        elif tag in active:
+            values[tag] = {"twin": active[tag], "live": live_v, "basis": "setpoint"}
+        else:
+            values[tag] = {"twin": live_v, "live": live_v, "basis": "live"}
+    try:
+        twin_ts = (_dt.datetime.fromisoformat(str(s["ts"]).replace(" ", "T")[:19])
+                   + _dt.timedelta(minutes=analysis.DELTA)).isoformat(timespec="seconds")
+    except ValueError:
+        twin_ts = None
+    cv_twin, cv_base = pred[analysis.CV], base["prediction"][analysis.CV]
+    out = _json_safe({
+        "live_ts": s["ts"], "twin_ts": twin_ts, "horizon_min": analysis.DELTA,
+        "source": s["source"], "age_sec": s["age_sec"], "method": twin["method"],
+        "values": values,
+        "prediction": cv_twin,                       # with active setpoints
+        "baseline_prediction": cv_base,              # live levers only
+        "setpoint_effect_c": round(cv_twin["mean"] - cv_base["mean"], 1),
+        # calciner temp at every trained horizon (t+5/10/15/30), same split
+        "trajectory": twin.get("trajectory"),
+        "baseline_trajectory": base.get("trajectory"),
+        "setpoints": list(sp.values()),
+        "operating_state": twin["operating_state"], "target_band": twin["target_band"],
+        "interlocks": twin["interlocks"], "all_interlocks_ok": twin["all_interlocks_ok"],
+    })
+    _future_cache.update(key=key, out=out)
+    return out
+
+
 # CCR advisor: all-8-lever recommendation for the next DELTA minutes. One
 # optimisation takes ~40 s on a laptop, so it runs in a background thread at
 # most every ADVISOR_REFRESH_SEC and the endpoint serves the latest result.

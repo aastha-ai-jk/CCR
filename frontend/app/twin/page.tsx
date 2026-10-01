@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { Area, ComposedChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceArea } from "recharts";
-import { api, TwinMetrics, TwinBacktest, ShadowResult, DecisionsResult } from "@/lib/api";
+import { api, TwinMetrics, TwinBacktest, ShadowResult, DecisionsResult, TwinFuture } from "@/lib/api";
 import Mimic from "@/components/Mimic";
 import SavingsPanel from "@/components/SavingsPanel";
 import Advisor from "@/components/Advisor";
@@ -25,6 +25,8 @@ export default function DigitalTwin() {
   const [shadow, setShadow] = useState<ShadowResult | null>(null);
   const [decisions, setDecisions] = useState<DecisionsResult | null>(null);
   const [showAdvisor, setShowAdvisor] = useState(false);
+  const [future, setFuture] = useState<TwinFuture | null>(null);
+  const [futureErr, setFutureErr] = useState(false);
 
   useEffect(() => {
     if (!showAdvisor) return;
@@ -39,6 +41,7 @@ export default function DigitalTwin() {
     api.advisory().then(setAdv).catch(console.error);
     api.shadow().then(setShadow).catch(() => {});
     api.decisions().then(setDecisions).catch(() => {});
+    api.twinFuture().then((f) => { setFuture(f); setFutureErr(false); }).catch(() => setFutureErr(true));
   };
   useEffect(() => { load(); const id = setInterval(load, 2500); return () => clearInterval(id); }, []);
 
@@ -79,7 +82,6 @@ export default function DigitalTwin() {
   }, [shadow]);
 
   if (!latest || !ov) return <Loading label="Injecting live plant data into the twin…" />;
-  const allOk = ov.interlocks.every((i: any) => i.pass !== false);
   const src = latest.source;
   const feedBadge = src === "opc"
     ? { tone: "ok", text: `● LIVE · OPC · ${latest.age_sec ?? "?"}s ago` }
@@ -87,24 +89,51 @@ export default function DigitalTwin() {
     ? { tone: "warn", text: "REPLAY (recent history)" }
     : { tone: "muted", text: "historical snapshot" };
 
-  const band = ov.target_band;
   const feed = latest.values?.[FEED_TAG];
   const applicable = feed != null && feed > FEED_MIN;
+
+  // Twin = the plant horizon_min ahead. Falls back to the live mimic if the
+  // twin endpoint is unavailable (and says so).
+  const ahead = !!future && !futureErr;
+  const h = future?.horizon_min ?? 5;
+  const mimicValues = ahead
+    ? Object.fromEntries(Object.entries(future!.values).map(([t, v]) => [t, v.twin]))
+    : latest.values;
+  const mimicLive = ahead
+    ? Object.fromEntries(Object.entries(future!.values).map(([t, v]) => [t, v.live]))
+    : undefined;
+  const mimicBasis = ahead
+    ? Object.fromEntries(Object.entries(future!.values).map(([t, v]) => [t, v.basis]))
+    : undefined;
+  const band = ahead ? future!.target_band : ov.target_band;
+  const allOk = ahead ? future!.all_interlocks_ok : ov.interlocks.every((i: any) => i.pass !== false);
+  const active = (future?.setpoints ?? []).filter((s) => s.status === "active");
+  const hhmmss = (ts?: string | null) => (ts ? String(ts).replace(" ", "T").slice(11, 19) : "—");
 
   return (
     <div className="space-y-4">
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold flex items-center gap-2">
-            <span className="live-dot text-[var(--ok)]">●</span> Digital Twin — Kiln-3 Process Mimic
+            <span className="live-dot text-[var(--ok)]">●</span>
+            {ahead ? `Digital Twin — Kiln-3 at T+${h} min` : "Digital Twin — Kiln-3 Process Mimic (live)"}
           </h1>
-          <div className="text-sm text-[var(--muted)] mono">snapshot · {latest.ts}</div>
+          <div className="text-sm text-[var(--muted)] mono">
+            {ahead
+              ? <>twin time {hhmmss(future!.twin_ts)} · live plant {hhmmss(future!.live_ts)} · {future!.method}</>
+              : <>snapshot · {latest.ts}{futureErr ? " · twin ahead-view unavailable, showing live" : ""}</>}
+          </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Badge tone={feedBadge.tone}>{feedBadge.text}</Badge>
-          <Badge tone="accent">{ov.operating_state}</Badge>
+          {ahead && <Badge tone={active.length ? "warn" : "muted"}>
+            {active.length ? `${active.length} accepted setpoint${active.length > 1 ? "s" : ""} applied` : "no accepted setpoints"}
+          </Badge>}
+          <Badge tone="accent">{ahead ? future!.operating_state : ov.operating_state}</Badge>
           <Badge tone="muted">Target {band.low}–{band.high} °C</Badge>
-          <Badge tone={allOk ? "ok" : "bad"}>{allOk ? "Interlocks OK" : "Interlock breach"}</Badge>
+          <Badge tone={allOk ? "ok" : "bad"}>
+            {allOk ? (ahead ? `Interlocks OK at T+${h}` : "Interlocks OK") : (ahead ? `Interlock risk at T+${h}` : "Interlock breach")}
+          </Badge>
         </div>
       </header>
 
@@ -125,7 +154,8 @@ export default function DigitalTwin() {
 
       {/* ---------------- mimic: full width so nothing is clipped ---------------- */}
       <Panel className="!p-2">
-        <Mimic values={latest.values} units={latest.units} band={band} mode="live" />
+        <Mimic values={mimicValues} units={latest.units} band={band} mode={ahead ? "sim" : "live"}
+          live={mimicLive} basis={mimicBasis} />
       </Panel>
 
       {/* ---------------- recommendation trigger: opens the advisor as a side drawer, mimic stays visible ---------------- */}
@@ -177,9 +207,112 @@ export default function DigitalTwin() {
       )}
 
       <div className="text-[11px] text-[var(--muted)]">
-        Every readout is your own historical/live plant data mapped onto the FLSmidth Kiln-3 flow sheet.
-        The calciner outlet temperature is the controlled variable; the analyser boxes carry the combustion-safety interlocks.
+        {ahead
+          ? <>The twin runs {h} min ahead of the plant. Bold values are the twin: the calciner outlet temperature and the
+             safety analysers are its t+{h} prediction, levers carry any accepted advisor setpoint (amber outline) as if applied now.
+             Tags the model does not predict (cyclone, cooler, feed-pipe temps…) are shown live. &quot;live X&quot; is the plant right now.</>
+          : <>Every readout is your own historical/live plant data mapped onto the FLSmidth Kiln-3 flow sheet.
+             The calciner outlet temperature is the controlled variable; the analyser boxes carry the combustion-safety interlocks.</>}
       </div>
+
+      {/* ---- calciner temperature trajectory: t+5 / 10 / 15 / 30 ---- */}
+      {ahead && (
+        <Panel title="Calciner outlet temperature — twin forecast by horizon"
+          right={<Badge tone="muted">band {band.low}–{band.high} °C · {future!.operating_state}</Badge>}>
+          {!future!.trajectory?.length ? (
+            <div className="text-sm text-[var(--muted)]">
+              Multi-horizon forecast unavailable — it needs the trained GBT twin (current method: <span className="mono">{future!.method}</span>).
+            </div>
+          ) : (
+            <table className="w-full text-xs">
+              <thead className="text-[var(--muted)] text-left">
+                <tr>
+                  <th className="py-1 pr-3">Horizon</th><th className="pr-3">For time</th>
+                  <th className="pr-3 text-right">{active.length ? "Twin (setpoints applied)" : "Twin"}</th>
+                  <th className="pr-3 text-right">P10–P90</th>
+                  {active.length > 0 && <><th className="pr-3 text-right">Live levers</th><th className="pr-3 text-right">Setpoint effect</th></>}
+                  <th>Band</th>
+                </tr>
+              </thead>
+              <tbody>
+                {future!.trajectory!.map((p) => {
+                  const b = future!.baseline_trajectory?.find((x) => x.min === p.min);
+                  const inBand = p.mean >= band.low && p.mean <= band.high;
+                  const at = (() => {
+                    const d = new Date(String(future!.live_ts).replace(" ", "T").slice(0, 19));
+                    if (isNaN(d.getTime())) return "—";
+                    d.setMinutes(d.getMinutes() + p.min);
+                    return d.toTimeString().slice(0, 8);
+                  })();
+                  return (
+                    <tr key={p.min} className="border-t border-[var(--line)]">
+                      <td className="py-1.5 pr-3 mono">T+{p.min} min</td>
+                      <td className="pr-3 mono">{at}</td>
+                      <td className="pr-3 text-right mono font-bold text-[var(--accent)]">{p.mean.toFixed(1)} °C</td>
+                      <td className="pr-3 text-right mono text-[var(--muted)]">{p.p10.toFixed(0)}–{p.p90.toFixed(0)}</td>
+                      {active.length > 0 && <>
+                        <td className="pr-3 text-right mono">{b ? `${b.mean.toFixed(1)} °C` : "—"}</td>
+                        <td className="pr-3 text-right mono">{b ? `${p.mean - b.mean >= 0 ? "+" : ""}${(p.mean - b.mean).toFixed(1)} °C` : "—"}</td>
+                      </>}
+                      <td><Badge tone={inBand ? "ok" : "warn"}>{inBand ? "in band" : p.mean < band.low ? "below" : "above"}</Badge></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          <div className="text-[11px] text-[var(--muted)] mt-2">
+            One twin forecast per horizon from the live plant state{active.length ? ", with the accepted setpoints applied as a step now" : ""}.
+            Uncertainty widens with the horizon (P10–P90).
+            {(() => {
+              const th = (metrics as any)?.temp_horizons as Record<string, { mae?: number }> | undefined;
+              const parts = th ? Object.entries(th).filter(([, v]) => v?.mae != null)
+                .map(([k, v]) => `T+${k} ${v.mae!.toFixed(1)}`) : [];
+              return parts.length ? ` Held-out test MAE (°C): ${parts.join(" · ")}.` : null;
+            })()}
+          </div>
+        </Panel>
+      )}
+
+      {/* ---- accepted setpoints driving the twin ---- */}
+      {ahead && (
+        <Panel title={`Accepted setpoints driving the twin (T+${h})`}
+          right={<Badge tone={active.length ? "warn" : "muted"}>
+            calciner t+{h}: {future!.prediction.mean.toFixed(1)} °C
+            {active.length ? ` (${future!.setpoint_effect_c >= 0 ? "+" : ""}${future!.setpoint_effect_c.toFixed(1)} °C vs live levers)` : ""}
+          </Badge>}>
+          {future!.setpoints.length === 0 ? (
+            <div className="text-sm text-[var(--muted)]">
+              No accepted setpoints in the last 30 min — the twin runs on the live lever values. Accept a recommendation on the advisor and it is applied here on the next refresh.
+            </div>
+          ) : (
+            <table className="w-full text-xs">
+              <thead className="text-[var(--muted)] text-left">
+                <tr><th className="py-1 pr-3">Lever</th><th className="pr-3 text-right">Accepted</th><th className="pr-3 text-right">Live now</th>
+                  <th className="pr-3">Accepted at</th><th>Status</th></tr>
+              </thead>
+              <tbody>
+                {future!.setpoints.map((s) => (
+                  <tr key={s.tag} className="border-t border-[var(--line)]">
+                    <td className="py-1.5 pr-3">{s.name ?? s.tag}</td>
+                    <td className="pr-3 text-right mono">{s.accepted.toFixed(2)} {s.unit ?? ""}</td>
+                    <td className="pr-3 text-right mono">{s.live != null ? s.live.toFixed(2) : "—"} {s.unit ?? ""}</td>
+                    <td className="pr-3 mono">{hhmmss(s.decided_at)} ({s.age_min.toFixed(0)} min ago)</td>
+                    <td>
+                      <Badge tone={s.status === "active" ? "warn" : s.status === "reached" ? "ok" : "muted"}>
+                        {s.status === "active" ? "applied to twin" : s.status === "reached" ? "plant reached it" : "expired (30 min)"}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div className="text-[11px] text-[var(--muted)] mt-2">
+            An accepted setpoint drives the twin until the plant reaches it (within 0.5% of the lever&apos;s range), it is undone or replaced on the advisor, or 30 min pass. Advisory only — nothing is written to the plant.
+          </div>
+        </Panel>
+      )}
 
       {/* ---- CCR operator decisions on the advisor's recommendations ---- */}
       <Panel title={`CCR operator decisions — from the advisor · ${decisions?.day ?? "today"}`}

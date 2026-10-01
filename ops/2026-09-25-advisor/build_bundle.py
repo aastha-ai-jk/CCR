@@ -25,6 +25,7 @@ FILES = [
     "twin/optimize.py",
     "twin/train_gbt.py",
     "frontend/app/twin/page.tsx",
+    "frontend/components/Mimic.tsx",
     "frontend/lib/api.ts",
 ]
 HERE = Path(__file__).resolve().parent

@@ -113,6 +113,11 @@ main{display:flex;flex-direction:column;min-width:0;}
 .hero__times{font-size:13px;color:var(--ink-dim);margin:4px 0 6px;}
 .hero__times b{font-weight:500;color:var(--amber);}
 .hero__times b:first-child{color:var(--ink-bright);}
+.hero__traj{display:grid;grid-template-columns:1fr 1fr;gap:5px 16px;margin:6px 0 8px;}
+.hero__traj:empty{display:none;}
+.hero__traj div{display:flex;align-items:baseline;gap:6px;font-size:12px;color:var(--ink-faint);white-space:nowrap;}
+.hero__traj b{font-weight:500;font-size:14px;color:var(--ink-bright);}
+.hero__traj i{font-style:normal;font-size:11px;}
 .hero__trend{font-size:13px;color:var(--ink-dim);display:flex;align-items:center;gap:7px;}
 .hero__foot{margin-top:16px;padding-top:13px;border-top:1px solid var(--line-soft);display:flex;gap:22px;}
 .hero__foot div{font-size:12px;color:var(--ink-faint);}
@@ -349,6 +354,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
           <div class="hero__label">Calciner temperature predicted for <span id="predFor">--:--</span> (next <span id="predHorizon">5</span> min) · <span id="twinSrc">connecting to digital twin…</span></div>
           <div class="hero__val"><b class="num" id="predVal">876.4</b><em>°C</em></div>
           <div class="hero__times num">Live at <b id="liveAt">--:--:--</b> <span aria-hidden="true">→</span> prediction for <b id="predAt">--:--:--</b></div>
+          <div class="hero__traj num" id="predTraj" aria-label="Calciner forecast by horizon"></div>
           <div class="hero__trend" id="predTrend">Holding steady inside the operating band</div>
           <div class="hero__foot">
             <div>Live reading<b class="num" id="liveVal">874.1 °C</b></div>
@@ -518,7 +524,7 @@ function postDecision(p,action,reason,note){
   return fetch("/api/decisions",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({tag:TAGS[p.id],param_id:p.id,param_name:p.name,unit:p.unit,action:action,
       reason:reason||null,note:note||null,operator:OPERATOR,
-      current_value:st.live,recommended_value:p.rec})
+      current_value:p.liveOk?p.cur:null,recommended_value:p.rec})
   }).then(function(r){
     return r.json().then(function(j){ if(!r.ok) throw new Error(j.detail||("HTTP "+r.status)); return j; });
   });
@@ -587,13 +593,14 @@ function bandGauge(live,pred){
 }
 
 /* ---------------- list render ---------------- */
-function dirOf(p){ if(p.recOk===false) return "hold"; var d=p.rec-p.cur; if(Math.abs(d)<1e-9) return "hold"; return d>0?"up":"down"; }
+function actionable(p){ return p.recOk!==false&&!!p.liveOk; }
+function dirOf(p){ if(!actionable(p)) return "hold"; var d=p.rec-p.cur; if(Math.abs(d)<1e-9) return "hold"; return d>0?"up":"down"; }
 function rowHTML(p){
   var st=state[p.id], dir=dirOf(p), d=p.rec-p.cur;
   var cls="row row--"+dir+(st.open?" is-open":"")+(st.declining?" is-declining":"");
   if(st.status==="accepted")cls+=" row--accepted";
   if(st.status==="declined")cls+=" row--declined";
-  var deltaTxt=p.recOk===false?"—":(d>0?"+":"")+fmt(d,p.dec);
+  var deltaTxt=!actionable(p)?"—":(d>0?"+":"")+fmt(d,p.dec);
   var recTxt=p.recOk===false?"—":fmt(p.rec,p.dec);
   var tag = st.status==="accepted" ? '<span class="tag tag--acc">Accepted</span>'
           : st.status==="declined" ? '<span class="tag tag--dec">Declined</span>'
@@ -602,7 +609,7 @@ function rowHTML(p){
   var h='<div class="'+cls+'" data-id="'+p.id+'">';
   h+='<button class="row__head" data-act="toggle" aria-expanded="'+(st.open?"true":"false")+'">';
   h+= '<span class="row__name"><b>'+esc(p.name)+'</b><span>'+esc(p.loc)+'</span></span>';
-  h+= '<span class="cell"><span class="cell__k">Current</span><span class="cell__v num">'+fmt(st.live,p.dec)+'</span><span class="cell__u">'+p.unit+'</span></span>';
+  h+= '<span class="cell"><span class="cell__k">Current</span><span class="cell__v num">'+(p.liveOk?fmt(p.cur,p.dec):"—")+'</span><span class="cell__u">'+p.unit+'</span></span>';
   h+= '<span class="arrow"><svg width="16" height="10" viewBox="0 0 16 10" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1 5h13M10.5 1.5 14 5l-3.5 3.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>';
   h+= '<span class="cell"><span class="cell__k">Recommended</span><span class="cell__v cell__v--rec num">'+recTxt+'</span><span class="cell__u">'+p.unit+'</span></span>';
   h+= '<span class="delta delta--'+dir+'"><span class="cell__k">Change</span>'+deltaTxt+'</span>';
@@ -618,8 +625,8 @@ function rowHTML(p){
 
   if(st.status==="open"){
     h+='<div class="actions">';
-    h+= '<button class="btn btn--accept" data-act="accept"'+(p.recOk===false?' disabled':'')+'>Accept</button>';
-    h+= '<button class="btn btn--decline" data-act="declineStart"'+(p.recOk===false?' disabled':'')+'>Decline</button>';
+    h+= '<button class="btn btn--accept" data-act="accept"'+(!actionable(p)?' disabled':'')+'>Accept</button>';
+    h+= '<button class="btn btn--decline" data-act="declineStart"'+(!actionable(p)?' disabled':'')+'>Decline</button>';
     h+= '<span class="actions__note">Advisory only — your decision is logged to the twin; nothing is written to the DCS.</span>';
     h+='</div>';
     h+='<div class="decl">';
@@ -659,7 +666,7 @@ document.getElementById("list").addEventListener("click",function(ev){
 
   if(act==="toggle"){ st.open=!st.open; if(!st.open) st.declining=false; render(); return; }
   if(act==="accept"){
-    if(p.recOk===false||busy) return;
+    if(!actionable(p)||busy) return;
     busy=true;
     postDecision(p,"accepted").then(function(row){
       st.status="accepted"; st.declining=false; st.open=false;
@@ -669,7 +676,7 @@ document.getElementById("list").addEventListener("click",function(ev){
       .then(function(){ busy=false; });
     return;
   }
-  if(act==="declineStart"){ if(p.recOk===false) return; st.declining=true; render();
+  if(act==="declineStart"){ if(!actionable(p)) return; st.declining=true; render();
     var el=document.querySelector('.row[data-id="'+id+'"] .reason input'); if(el) el.focus(); return; }
   if(act==="declineCancel"){ st.declining=false; render(); return; }
   if(act==="declineConfirm"){
@@ -862,17 +869,67 @@ function pollTwin(){
     var p=f.prediction||{};
     if(typeof p.mean!=="number") throw new Error("no prediction");
     twinPred=p.mean;
-    twinActual=(typeof f.actual_now==="number")?f.actual_now:null;
     document.getElementById("predHorizon").textContent=f.horizon_min;
     document.getElementById("predFor").textContent=clockAt(f.ts,f.horizon_min)||"--:--";
-    document.getElementById("liveAt").textContent=clockAt(f.ts,0,true)||"--:--:--";
-    document.getElementById("predAt").textContent=clockAt(f.ts,f.horizon_min,true)||"--:--:--";    document.getElementById("twinSrc").textContent=(f.method==="gbt-twin"
+    document.getElementById("predAt").textContent=clockAt(f.ts,f.horizon_min,true)||"--:--:--";
+    // every trained horizon (t+5/10/15/30): value, target clock time, P10–P90
+    document.getElementById("predTraj").innerHTML=(f.trajectory||[]).map(function(t){
+      return '<div><span>+'+t.min+' min · '+(clockAt(f.ts,t.min)||"--:--")+'</span><b>'+fmt(t.mean,1)
+        +'</b><i>'+fmt(t.p10,0)+'–'+fmt(t.p90,0)+'</i></div>';
+    }).join("");
+    document.getElementById("twinSrc").textContent=(f.method==="gbt-twin"
       ? "digital twin" : "fallback estimate, twin model not loaded")+" · "+f.source;
     renderLive();
   }).catch(function(){
-    twinPred=null; twinActual=null;
+    twinPred=null;
+    document.getElementById("predTraj").innerHTML="";
     document.getElementById("twinSrc").textContent="twin offline — mock value";
-  }).then(function(){ setTimeout(pollTwin,5000); });
+  }).then(function(){ setTimeout(pollTwin,2500); });
+}
+
+// Live plant values, at the feed's own cadence (it writes every 2 s). One
+// snapshot drives every row's Current + Change and the hero's live reading, so
+// they always agree. Updated in place — no re-render, so an open decline form
+// is never wiped. No live data -> "—", never a mock number.
+var liveTs=null;
+function pollLive(){
+  getJSON("/api/latest").then(function(l){
+    var v=l.values||{}, fresh=l.source!=="historical";
+    liveTs=l.ts;
+    var units=l.units||{}, unitChanged=false;
+    PARAMS.forEach(function(p){
+      var tag=TAGS[p.id], x=v[tag];
+      p.dec=DEC[tag];
+      if(tag!==CV&&units[tag]&&units[tag]!==p.unit){ p.unit=units[tag]; unitChanged=true; }
+      p.liveOk=fresh&&typeof x==="number";
+      if(p.liveOk){ p.cur=x; state[p.id].live=x; }
+    });
+    twinActual=(fresh&&typeof v[CV]==="number")?v[CV]:null;
+    document.getElementById("liveAt").textContent=fresh?(clockAt(l.ts,0,true)||"--:--:--"):"no live feed";
+    var declining=PARAMS.some(function(p){return state[p.id].declining;});
+    if(unitChanged&&!declining) render();       // first load: real units
+    paintLiveCells(); renderLive();
+  }).catch(function(){
+    PARAMS.forEach(function(p){ p.liveOk=false; });
+    twinActual=null;
+    document.getElementById("liveAt").textContent="offline";
+    paintLiveCells(); renderLive();
+  }).then(function(){ setTimeout(pollLive,2000); });
+}
+function paintLiveCells(){
+  PARAMS.forEach(function(p){
+    var row=document.querySelector('.row[data-id="'+p.id+'"]'); if(!row) return;
+    var cell=row.querySelector(".cell__v"), delta=row.querySelector(".delta");
+    if(cell) cell.textContent=p.liveOk?fmt(p.cur,p.dec):"—";
+    if(delta){
+      var ok=p.liveOk&&p.recOk!==false, d=p.rec-p.cur, dir=ok?dirOf(p):"hold";
+      delta.className="delta delta--"+dir;
+      delta.innerHTML='<span class="cell__k">Change</span>'+(ok?(d>0?"+":"")+fmt(d,p.dec):"—");
+      if(state[p.id].status==="open"){
+        row.classList.remove("row--up","row--down","row--hold"); row.classList.add("row--"+dir);
+      }
+    }
+  });
 }
 
 function pollAdvisor(){
@@ -887,8 +944,7 @@ function pollAdvisor(){
       &&(tl-t0)<=h*60000&&(tl-t0)>=-60000);
     PARAMS.forEach(function(p){
       var tag=TAGS[p.id]; if(!tag) return;
-      var cur=tag===CV?twinActual:(live[tag]&&live[tag].current);
-      if(typeof cur==="number"){ p.cur=cur; p.liveOk=true; }
+      // Current values come from pollLive (every 2 s); here only units + recs.
       if(tag!==CV&&live[tag]&&live[tag].uom) p.unit=live[tag].uom;
       p.dec=DEC[tag];
       var r=tag===CV?predT:rec[tag];
@@ -909,8 +965,8 @@ function pollAdvisor(){
     var declining=PARAMS.some(function(p){return state[p.id].declining;});
     if(!declining) render();
   }).catch(function(){
-    advMeta="twin optimiser offline — mock values";
-    PARAMS.forEach(function(p){ p.liveOk=false; });
+    advMeta="twin optimiser offline";
+    PARAMS.forEach(function(p){ p.recOk=false; });
     render();
   }).then(function(){ setTimeout(pollAdvisor,15000); });
 }
@@ -922,21 +978,13 @@ function tickLive(){
   pred=live+(rnd()-0.42)*4.2;
   if(pred<863)pred=863; if(pred>893)pred=893;
   renderLive();
-
-  PARAMS.forEach(function(p){
-    var st=state[p.id];
-    var jitter=(rnd()-0.5)*(p.dec===0?1.6:p.dec===1?0.35:0.03);
-    st.live=p.liveOk?p.cur:p.cur+jitter;
-    var cell=document.querySelector('.row[data-id="'+p.id+'"] .cell__v');
-    if(cell) cell.textContent=fmt(st.live,p.dec);
-  });
 }
 function renderLive(){
   if(twinPred!==null) pred=twinPred;
   if(twinActual!==null) live=twinActual;
 
   document.getElementById("predVal").textContent=fmt(pred,1);
-  document.getElementById("liveVal").textContent=fmt(live,1)+" °C";
+  document.getElementById("liveVal").textContent=twinActual!==null?fmt(live,1)+" °C":"—";
   document.getElementById("confVal").textContent=(88+Math.round(rnd()*8))+"%";
 
   var chip=document.getElementById("bandChip"), trend=document.getElementById("predTrend");
@@ -952,7 +1000,7 @@ function renderLive(){
 
 render(); bandGauge(live,pred); tickLive(); paintDash();
 setInterval(tickLive,4000);
-pollTwin(); pollAdvisor(); loadDecisions();
+pollLive(); pollTwin(); pollAdvisor(); loadDecisions();
 })();
 </script>
 </body>
