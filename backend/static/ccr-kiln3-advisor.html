@@ -113,11 +113,13 @@ main{display:flex;flex-direction:column;min-width:0;}
 .hero__times{font-size:13px;color:var(--ink-dim);margin:4px 0 6px;}
 .hero__times b{font-weight:500;color:var(--amber);}
 .hero__times b:first-child{color:var(--ink-bright);}
-.hero__traj{display:grid;grid-template-columns:1fr 1fr;gap:5px 16px;margin:6px 0 8px;}
+/* one row per horizon: label | value | range — fits the hero's left column */
+.hero__traj{display:grid;grid-template-columns:auto auto 1fr;align-items:baseline;gap:4px 12px;margin:8px 0 10px;}
 .hero__traj:empty{display:none;}
-.hero__traj div{display:flex;align-items:baseline;gap:6px;font-size:12px;color:var(--ink-faint);white-space:nowrap;}
-.hero__traj b{font-weight:500;font-size:14px;color:var(--ink-bright);}
-.hero__traj i{font-style:normal;font-size:11px;}
+.hero__traj span{font-size:12px;color:var(--ink-faint);white-space:nowrap;}
+.hero__traj b{font-weight:500;font-size:14px;color:var(--ink-bright);text-align:right;}
+.hero__traj i{font-style:normal;font-size:11.5px;color:var(--ink-faint);white-space:nowrap;}
+.hero__read{min-width:0;overflow:hidden;}
 .hero__trend{font-size:13px;color:var(--ink-dim);display:flex;align-items:center;gap:7px;}
 .hero__foot{margin-top:16px;padding-top:13px;border-top:1px solid var(--line-soft);display:flex;gap:22px;}
 .hero__foot div{font-size:12px;color:var(--ink-faint);}
@@ -874,8 +876,8 @@ function pollTwin(){
     document.getElementById("predAt").textContent=clockAt(f.ts,f.horizon_min,true)||"--:--:--";
     // every trained horizon (t+5/10/15/30): value, target clock time, P10–P90
     document.getElementById("predTraj").innerHTML=(f.trajectory||[]).map(function(t){
-      return '<div><span>+'+t.min+' min · '+(clockAt(f.ts,t.min)||"--:--")+'</span><b>'+fmt(t.mean,1)
-        +'</b><i>'+fmt(t.p10,0)+'–'+fmt(t.p90,0)+'</i></div>';
+      return '<span>+'+t.min+' min · '+(clockAt(f.ts,t.min)||"--:--")+'</span><b>'+fmt(t.mean,1)
+        +'</b><i>'+fmt(t.p10,0)+'–'+fmt(t.p90,0)+' °C</i>';
     }).join("");
     document.getElementById("twinSrc").textContent=(f.method==="gbt-twin"
       ? "digital twin" : "fallback estimate, twin model not loaded")+" · "+f.source;
