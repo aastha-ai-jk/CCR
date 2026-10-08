@@ -27,10 +27,11 @@ CV = analysis.CV
 KILN_COAL = "467RL300_TPH"
 KILN_FEED = config.KILN_FEED_TAG
 KILN_SIDE = [KILN_COAL, KILN_FEED, "423FN010_ST", "433MD140_ST1"]
-# Plant team (2026-10-08): kiln feed, PH fan speed and kiln speed stay FIXED —
-# never recommended. They remain model inputs at their live values.
-FIXED_LEVERS = [KILN_FEED, "423FN010_ST", "433MD140_ST1"]
-ADVISOR_LEVERS = [*OPT_LEVERS, KILN_COAL]
+# Plant team (2026-10-08): kiln coal, kiln feed, PH fan speed and kiln speed
+# stay FIXED — never recommended. They remain model inputs at their live values,
+# so the advisor searches the same 4 calciner fuel levers as the plant loops.
+FIXED_LEVERS = [KILN_COAL, KILN_FEED, "423FN010_ST", "433MD140_ST1"]
+ADVISOR_LEVERS = list(OPT_LEVERS)
 
 # Penalty added to the objective for an infeasible trial so the study still
 # converges toward the feasible region even when early trials violate.

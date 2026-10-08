@@ -377,7 +377,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
         <h2>Setpoint recommendations</h2>
         <p id="recMeta">9 open · refreshed every 60 s</p>
       </div>
-      <p class="advnote" id="advNote">Kiln feed, preheater fan speed and kiln speed are held fixed (plant decision) and are not recommended. The kiln coal recommendation is experimental and pending process-engineer review. Advisory only.</p>
+      <p class="advnote" id="advNote">Kiln coal, kiln feed, preheater fan speed and kiln speed are held fixed (plant decision) and are not recommended. Advisory only.</p>
       <div class="list" id="list"></div>
     </section>
 
@@ -461,11 +461,6 @@ var PARAMS=[
   why:"The model sees calciner outlet drifting to about 868 °C within 30 minutes as the alternative fuel share climbs and the current lot runs wetter. Lifting the target to 878 °C keeps an 8 °C cushion above the lower band limit and holds hotmeal calcination near 94%.",
   drivers:[["AFR heat share, rising",78],["Hotmeal calcination trend",61],["Cyclone 5 outlet gas temp",44]],
   impact:[["Calcination","+0.6 %"],["Free lime","−0.08 %"],["Band risk","Low"]]},
-
- {id:"kiln_coal",name:"Kiln coal firing",loc:"Main burner 342-CF1",unit:"TPH",cur:9.8,rec:9.6,dec:1,
-  why:"Burning zone is sitting at 1465 °C with secondary air temperature still rising after the last cooler adjustment. Trimming 0.2 TPH holds the burning zone without losing coating, and hands the heat budget over to the calciner where it is needed.",
-  drivers:[["Burning zone temp",76],["Secondary air temp, rising",63],["NOx trend",29]],
-  impact:[["Burning zone","1465 → 1461 °C"],["Heat rate","−4 kcal/kg"],["NOx","−22 mg/Nm³"]]},
 
  {id:"calc_coal",name:"Calciner coal firing",loc:"Calciner firing 345-CF2",unit:"TPH",cur:18.4,rec:19.1,dec:1,
   why:"The current alternative fuel blend is running about 380 kcal/kg below the reference calorific value. An extra 0.7 TPH of coal offsets that gap and brings the calciner back to target inside 12 minutes without disturbing the string.",

@@ -337,8 +337,8 @@ def twin_future():
 
 
 # CCR advisor: recommendation for the next DELTA minutes over the advisor
-# levers (4 fuel levers + kiln coal); kiln feed, PH fan speed and kiln speed are
-# fixed by the plant team and stay at their live values. One optimisation takes
+# levers (the 4 calciner fuel levers); kiln coal, kiln feed, PH fan speed and
+# kiln speed are fixed by the plant team and stay at their live values. One optimisation takes
 # ~40 s on a laptop, so it runs in a background thread at most every
 # ADVISOR_REFRESH_SEC and the endpoint serves the latest result.
 ADVISOR_REFRESH_SEC = 60
