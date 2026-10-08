@@ -123,10 +123,52 @@ def load_hotmeal() -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+# eLIMS section for THIS kiln. result.xlsx (QC_NBH.py) holds one sheet per
+# section (CLK-1, CLK-2, CLK-3, ...); reading the first sheet loaded Kiln 1.
+CLINKER_SECTION = "CLK-3"
+_CLINKER_COLS = {"xrf test datetime": "ts", "Degree of Calcination": "doc",
+                 "Cl": "cl", "CL": "cl", "So3": "so3", "SO3": "so3",
+                 "Ltr.Wt.": "liter_weight", "lime": "free_lime", "C3S": "c3s", "LIQ": "liq"}
+CLINKER_COLUMNS = ["ts", "doc", "cl", "so3", "liter_weight", "free_lime", "c3s", "liq"]
+
+
 def load_clinker() -> pd.DataFrame:
-    d = pd.read_excel(config.QC_DIR / "result.xlsx")
-    d = d.rename(columns={"xrf test datetime": "ts", "Degree of Calcination": "doc",
-                          "Cl": "cl", "So3": "so3", "Ltr.Wt.": "liter_weight",
-                          "lime": "free_lime", "C3S": "c3s", "LIQ": "liq"})
-    d["ts"] = _parse_lab_dt(d["ts"])
-    return d.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+    """Kiln-3 clinker QC from result.xlsx: the CLINKER_SECTION sheet when the
+    workbook has one sheet per section, else rows of that section only."""
+    path = config.QC_DIR / "result.xlsx"
+    sheets = pd.ExcelFile(path).sheet_names
+    if CLINKER_SECTION in sheets:
+        d = pd.read_excel(path, sheet_name=CLINKER_SECTION)
+    else:
+        d = pd.read_excel(path, sheet_name=0)
+        if "section name" in d.columns:
+            d = d[d["section name"] == CLINKER_SECTION]
+    d = d.rename(columns=_CLINKER_COLS)
+    for c in CLINKER_COLUMNS:
+        if c not in d.columns:
+            d[c] = pd.NA
+    d = d[CLINKER_COLUMNS].copy()
+    d["ts"] = (pd.to_datetime(d["ts"], errors="coerce")
+               if pd.api.types.is_datetime64_any_dtype(d["ts"]) else _parse_lab_dt(d["ts"]))
+    d = validate_clinker(d)
+    d = d.dropna(subset=["ts"]).drop_duplicates(subset=["ts"]).sort_values("ts")
+    return d.reset_index(drop=True)
+
+
+def validate_clinker(d: pd.DataFrame) -> pd.DataFrame:
+    """Numeric coerce + blank physically impossible values (row kept)."""
+    d = d.copy()
+    for c in CLINKER_COLUMNS[1:]:
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+            lo, hi = _CLINKER_VALID.get(c, (None, None))
+            if lo is not None:
+                d.loc[~d[c].between(lo, hi), c] = pd.NA
+    return d
+
+
+# Physically possible ranges; outside = lab entry / instrument error (seen:
+# free lime -4.24 and 110.78 %, liter weight 0, C3S -332).
+_CLINKER_VALID = {"free_lime": (0.0, 10.0), "liter_weight": (800.0, 1600.0),
+                  "c3s": (0.0, 100.0), "liq": (0.0, 60.0), "so3": (0.0, 10.0),
+                  "cl": (0.0, 5.0), "doc": (50.0, 100.0)}

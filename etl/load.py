@@ -12,7 +12,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 
 import config
-from etl.clean import load_all_plc, load_hotmeal, load_clinker
+from etl.clean import load_all_plc, load_hotmeal, load_clinker, validate_clinker
 
 
 ROADMAP_SEED = [
@@ -25,10 +25,37 @@ ROADMAP_SEED = [
 ]
 
 
+def refresh_clinker(engine) -> None:
+    """Reload only lab_clinker from result.xlsx (Kiln-3 sheet), merged with the
+    rows already in the DB so samples missing from the file are kept."""
+    new = load_clinker()
+    try:
+        old = pd.read_sql("SELECT * FROM lab_clinker", engine)
+        old["ts"] = pd.to_datetime(old["ts"], format="mixed")
+    except Exception:
+        old = pd.DataFrame(columns=new.columns)
+    both = pd.concat([old.reindex(columns=new.columns), new], ignore_index=True)
+    both = (validate_clinker(both).sort_values("ts")
+            .drop_duplicates(subset=["ts"], keep="last").reset_index(drop=True))
+    both.to_sql("lab_clinker", engine, if_exists="replace", index=False)
+    with engine.begin() as cx:
+        cx.execute(text("CREATE INDEX IF NOT EXISTS ix_clinker_ts ON lab_clinker (ts)"))
+    print(f"lab_clinker: {len(old)} rows before, {len(new)} in file, {len(both)} after "
+          f"({both['ts'].min()} -> {both['ts'].max()}, free_lime valid {both['free_lime'].notna().sum()})")
+
+
 def main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", choices=["clinker"],
+                    help="reload just this source (others untouched)")
+    args = ap.parse_args()
     url = config.database_url()
     print(f"Target DB: {url.split('@')[-1] if '@' in url else url}")
     engine = create_engine(url)
+    if args.only == "clinker":
+        refresh_clinker(engine)
+        return
 
     t0 = time.time()
     print("\n[1/4] Cleaning + loading PLC process history (all months)...")
