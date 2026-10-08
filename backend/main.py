@@ -343,6 +343,12 @@ def twin_future():
 # ADVISOR_REFRESH_SEC and the endpoint serves the latest result.
 ADVISOR_REFRESH_SEC = 60
 ADVISOR_TRIALS = 120
+
+
+def _adv_setting(key: str, default):
+    """data/plant_settings.json "advisor" value (re-read each call), else default."""
+    v = (config.plant_settings().get("advisor") or {}).get(key)
+    return default if v is None else v
 _advisor = {"result": None, "computed_at": 0.0, "busy": False}
 _advisor_lock = threading.Lock()
 
@@ -351,7 +357,8 @@ def _advisor_run() -> None:
     try:
         from twin import optimize as twin_opt
         s, snap, conditions, levers = _live_inputs()
-        r = twin_opt.optimize({**conditions, **levers}, n_trials=ADVISOR_TRIALS,
+        r = twin_opt.optimize({**conditions, **levers},
+                              n_trials=int(_adv_setting("trials", ADVISOR_TRIALS)),
                               levers=twin_opt.ADVISOR_LEVERS)
         r["ts"], r["source"] = s["ts"], s["source"]
         _advisor.update(result=r, computed_at=time.time())
@@ -369,7 +376,8 @@ def twin_advisor():
     re-optimisation when the cached result is older than ADVISOR_REFRESH_SEC."""
     from twin.optimize import ADVISOR_LEVERS, FIXED_LEVERS
     with _advisor_lock:
-        stale = time.time() - _advisor["computed_at"] > ADVISOR_REFRESH_SEC
+        stale = (time.time() - _advisor["computed_at"]
+                 > float(_adv_setting("refresh_sec", ADVISOR_REFRESH_SEC)))
         if stale and not _advisor["busy"]:
             _advisor["busy"] = True
             threading.Thread(target=_advisor_run, daemon=True).start()

@@ -61,8 +61,18 @@ def _band_confidence(point: dict, blo: float, bhi: float) -> float:
     return max(0.0, min(1.0, cdf(bhi) - cdf(blo)))
 
 
+def _opt_settings() -> dict:
+    """data/plant_settings.json "optimizer" section, re-read every run."""
+    return config.plant_settings().get("optimizer") or {}
+
+
+def _lever_settings(tag: str) -> dict:
+    return ((_opt_settings().get("levers") or {}).get(tag)) or {}
+
+
 def _bounds(levers: list[str] = OPT_LEVERS) -> dict[str, tuple[float, float]]:
-    """Lever search bounds from dim_tag y_min/y_max (fallback to median-based)."""
+    """Lever search bounds: plant-confirmed min/max when set, else dim_tag
+    y_min/y_max (fallback to median-based)."""
     cat = db.tag_catalog().set_index("tag")
     defaults = analysis.feature_defaults()
     out = {}
@@ -71,6 +81,9 @@ def _bounds(levers: list[str] = OPT_LEVERS) -> dict[str, tuple[float, float]]:
         if pd.isna(lo) or pd.isna(hi) or hi <= lo:
             med = float(defaults.get(t, 1.0))
             lo, hi = 0.0, max(med * 2.0, 1.0)
+        ls = _lever_settings(t)
+        lo = ls["min"] if ls.get("min") is not None else lo
+        hi = ls["max"] if ls.get("max") is not None else hi
         out[t] = (float(lo), float(hi))
     return out
 
@@ -160,12 +173,20 @@ def optimize(conditions: dict, n_trials: int = 200,
     for t in opt_levers:
         lo, hi = full_bounds[t]
         c = min(max(base_vals[t], lo), hi)
-        # half-width: ±15% of the engineering range OR ±100% of the current
-        # value, whichever is SMALLER (engineering ranges are much wider than
-        # the operating envelope for some tags), floored at ±1 unit
-        frac = _TRUST_FRAC_KILN if t in KILN_SIDE else _TRUST_FRAC
-        r = min((hi - lo) * frac, max(abs(c), 1.0))
+        step = _lever_settings(t).get("max_step")
+        if step is not None:
+            r = float(step)                      # plant-confirmed largest single step
+        else:
+            # half-width: ±15% of the engineering range OR ±100% of the current
+            # value, whichever is SMALLER (engineering ranges are much wider than
+            # the operating envelope for some tags), floored at ±1 unit
+            frac = _TRUST_FRAC_KILN if t in KILN_SIDE else _TRUST_FRAC
+            r = min((hi - lo) * frac, max(abs(c), 1.0))
         bounds[t] = (max(lo, c - r), min(hi, c + r))
+    obj = _opt_settings().get("objective") or {}
+    mode = obj.get("mode") or config.OPTIMIZER_MODE
+    move_w = float(obj["move_weight"]) if obj.get("move_weight") is not None else _MOVE_W
+    conf_w = float(obj["confidence_weight"]) if obj.get("confidence_weight") is not None else _CONF_W
 
     def objective(trial: "optuna.Trial") -> float:
         levers = {t: trial.suggest_float(t, *bounds[t]) for t in opt_levers}
@@ -194,11 +215,11 @@ def optimize(conditions: dict, n_trials: int = 200,
         # Economic objective (config.OPTIMIZER_MODE): min ₹/ton | max TSR | min
         # coal. Replaces the old abstract coal_norm - afr_norm. Move + band-
         # confidence terms keep the advice calm and chance-constrained.
-        econ_score = economics.objective_score(levers, econ_cond(levers), econ=econ)
+        econ_score = economics.objective_score(levers, econ_cond(levers), mode=mode, econ=econ)
         move_pen = float(np.mean([abs(levers[t] - base_vals[t])
                                   / max(bounds[t][1] - bounds[t][0], 1e-6)
                                   for t in opt_levers]))
-        raw = (econ_score + _MOVE_W * move_pen - _CONF_W * conf
+        raw = (econ_score + move_w * move_pen - conf_w * conf
                + 0.01 * ((reach or 30) / 5.0))          # prefer reaching sooner
 
         trial.set_user_attr("levers", levers)
@@ -341,7 +362,7 @@ def optimize(conditions: dict, n_trials: int = 200,
         "reach_min": rec_reach,
         "band_confidence": _f(rec_conf, 3),
         # v4 (fuel optimiser): economics, quality gate, per-lever attribution
-        "mode": config.OPTIMIZER_MODE,
+        "mode": mode,
         "economics": {"recommended": rec_kpis, "baseline": base_kpis,
                       "savings": fuel_savings},
         "quality": {"predicted": rec_quality, "specs": config.QUALITY_SPECS},

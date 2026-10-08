@@ -100,6 +100,13 @@ def fuel_economics() -> dict:
                     out[tag].update(meta)
         except (json.JSONDecodeError, OSError):
             pass
+    # plant_settings.json "fuels" wins over both (a set value = no longer an estimate)
+    for tag, meta in ((plant_settings().get("fuels") or {}).items()):
+        if tag in out and isinstance(meta, dict):
+            given = {k: v for k, v in meta.items() if v is not None and not k.startswith("_")}
+            out[tag].update(given)
+            if "gcv_kcal_kg" in given and "price_per_ton" in given:
+                out[tag]["is_estimate"] = False
     return out
 
 
@@ -113,3 +120,47 @@ QUALITY_SPECS = {
 # Objective emphasis: "cost" (min ₹/ton clinker) | "tsr" (max thermal
 # substitution) | "coal" (min coal tph). All three KPIs reported regardless.
 OPTIMIZER_MODE = os.getenv("OPTIMIZER_MODE", "cost")
+
+
+# --- Plant settings (data/plant_settings.json) -----------------------------
+# One plant-editable file for every value the plant team confirms (see
+# data/plant_settings.README.md for the question each key answers). A missing
+# file, key or null value keeps the default above, so behaviour only changes
+# when the plant sets a value. Bands, interlocks, quality specs, clinker factor,
+# kiln-running threshold and state thresholds are applied here at import
+# (restart the backend after editing); the optimizer section is read per run.
+PLANT_SETTINGS_PATH = ROOT / "data" / "plant_settings.json"
+
+
+def plant_settings() -> dict:
+    """The parsed plant settings file, or {} if absent/unreadable."""
+    try:
+        return json.loads(PLANT_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _set(value, default):
+    return default if value is None else value
+
+
+def _apply_plant_settings() -> None:
+    global CLINKER_FACTOR, KILN_FEED_MIN_TPH
+    s = plant_settings()
+    proc = s.get("process") or {}
+    CLINKER_FACTOR = float(_set(proc.get("clinker_factor"), CLINKER_FACTOR))
+    KILN_FEED_MIN_TPH = float(_set(proc.get("kiln_running_min_feed_tph"), KILN_FEED_MIN_TPH))
+    for state, band in (s.get("temperature_bands") or {}).items():
+        if state in TEMP_STATE_BANDS and band and None not in band:
+            TEMP_STATE_BANDS[state] = (float(band[0]), float(band[1]))
+    for tag, limit in (s.get("interlocks") or {}).items():
+        if tag in INTERLOCKS and limit is not None:
+            INTERLOCKS[tag] = (INTERLOCKS[tag][0], float(limit))
+    q = s.get("quality") or {}
+    if q.get("free_lime_max") is not None:
+        QUALITY_SPECS["free_lime"] = {"max": float(q["free_lime_max"]), "is_estimate": False}
+    if q.get("doc_min") is not None:
+        QUALITY_SPECS["doc"] = {"min": float(q["doc_min"]), "is_estimate": False}
+
+
+_apply_plant_settings()

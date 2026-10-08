@@ -1,0 +1,73 @@
+{
+  "_about": "Plant-confirmed settings for the CCR Kiln-3 advisor. null = keep the current default (see plant_settings.README.md for each key's question number and default). Restart the backend after editing process / bands / state_rules / interlocks / quality; fuels, optimizer and advisor are re-read on every run.",
+
+  "process": {
+    "clinker_factor": null,
+    "kiln_running_min_feed_tph": null
+  },
+
+  "temperature_bands": {
+    "State 1": null,
+    "State 2": null,
+    "State 3": null
+  },
+
+  "state_rules": {
+    "free_lime": null,
+    "liter_weight": null,
+    "liquid": null,
+    "doc": null,
+    "433MD140_TQ": null,
+    "423AM822_NO": null,
+    "443KH050_TT1": null
+  },
+
+  "interlocks": {
+    "423AM823_CO_PPM": null,
+    "423AM823_O2": null,
+    "423AM822_CO_PPM": null,
+    "423AM822_O2": null,
+    "423AM820_CO_PPM": null,
+    "423AM821_CO_PPM": null
+  },
+
+  "quality": {
+    "free_lime_max": null,
+    "doc_min": null
+  },
+
+  "fuels": {
+    "467RL400_TPH": {"gcv_kcal_kg": null, "price_per_ton": null},
+    "LAFR_FT":      {"gcv_kcal_kg": null, "price_per_ton": null, "mass_per_unit": null},
+    "K3V10_F1":     {"gcv_kcal_kg": null, "price_per_ton": null, "mass_per_unit": null},
+    "261WF080_TPH": {"gcv_kcal_kg": null, "price_per_ton": null}
+  },
+
+  "optimizer": {
+    "levers": {
+      "467RL400_TPH": {"min": null, "max": null, "max_step": null},
+      "LAFR_FT":      {"min": null, "max": null, "max_step": null},
+      "K3V10_F1":     {"min": null, "max": null, "max_step": null},
+      "261WF080_TPH": {"min": null, "max": null, "max_step": null}
+    },
+    "objective": {
+      "mode": null,
+      "move_weight": null,
+      "confidence_weight": null
+    },
+    "afr": {
+      "max_tsr_pct": null,
+      "priority": null
+    },
+    "heat_balance": {
+      "max_change_pct": null
+    }
+  },
+
+  "advisor": {
+    "refresh_sec": null,
+    "trials": null,
+    "setpoint_reach_tol_frac": null,
+    "setpoint_expiry_min": null
+  }
+}

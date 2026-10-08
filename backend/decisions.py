@@ -153,10 +153,14 @@ def setpoints(values: dict, now: dt.datetime | None = None) -> dict:
     the last EXPIRY_MIN minutes is 'accepted'. ``status`` is ``active`` (still
     driving the twin), ``reached`` (plant is there — live takes over) or
     ``expired``. Levers only: accepting the calciner-temp row sets nothing."""
+    import config
     from twin.optimize import ADVISOR_LEVERS     # fixed levers never drive the twin
     _ensure()
+    adv = config.plant_settings().get("advisor") or {}
+    tol_frac = float(adv.get("setpoint_reach_tol_frac") or REACH_TOL_FRAC)
+    expiry = float(adv.get("setpoint_expiry_min") or EXPIRY_MIN)
     now = now or dt.datetime.now()
-    since = (now - dt.timedelta(minutes=EXPIRY_MIN + 5)).isoformat(timespec="seconds")
+    since = (now - dt.timedelta(minutes=expiry + 5)).isoformat(timespec="seconds")
     rows = db.q("SELECT * FROM operator_decisions WHERE decided_at >= :s ORDER BY id DESC",
                 {"s": since})
     cat = db.tag_catalog().set_index("tag")
@@ -172,12 +176,12 @@ def setpoints(values: dict, now: dt.datetime | None = None) -> dict:
         age = (now - dt.datetime.fromisoformat(r["decided_at"])).total_seconds() / 60.0
         lo, hi = cat.loc[tag, "y_min"], cat.loc[tag, "y_max"]
         span = float(hi - lo) if pd.notna(lo) and pd.notna(hi) and hi > lo else 1.0
-        tol = REACH_TOL_FRAC * span
+        tol = tol_frac * span
         live = _num(values.get(tag))
         rec = float(r["recommended_value"])
         if live is not None and abs(live - rec) <= tol:
             status = "reached"
-        elif age > EXPIRY_MIN:
+        elif age > expiry:
             status = "expired"
         else:
             status = "active"

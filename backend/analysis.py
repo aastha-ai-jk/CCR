@@ -69,6 +69,11 @@ STATE_RULES = {
     "liter_weight": ("up", [(1100, 1150), (1150, 1200), (1200, 9999)]),
     "doc":          ("up", [(92, 94), (94, 95), (95, 96)]),
 }
+# Plant-confirmed thresholds (data/plant_settings.json "state_rules": key ->
+# three [low, high] pairs for State 1/2/3) replace the defaults above.
+for _key, _bands in ((config.plant_settings().get("state_rules") or {}).items()):
+    if _key in STATE_RULES and _bands and all(b and None not in b for b in _bands):
+        STATE_RULES[_key] = (STATE_RULES[_key][0], [tuple(map(float, b)) for b in _bands])
 
 
 def _classify_state(key: str, value: float | None) -> int | None:
