@@ -12,7 +12,8 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 
 import config
-from etl.clean import load_all_plc, load_hotmeal, load_clinker, validate_clinker
+from etl.clean import (load_all_plc, load_hotmeal, load_clinker, load_clinker_csv,
+                       validate_clinker)
 
 
 ROADMAP_SEED = [
@@ -25,16 +26,35 @@ ROADMAP_SEED = [
 ]
 
 
-def refresh_clinker(engine) -> None:
+def refresh_clinker(engine, csv_path: str | None = None) -> None:
     """Reload only lab_clinker from result.xlsx (Kiln-3 sheet), merged with the
-    rows already in the DB so samples missing from the file are kept."""
+    rows already in the DB so samples missing from the file are kept. With
+    csv_path, also add the plant's monthly clinker reports (merged CSV): a CSV
+    row within 60 min of an existing sample is the same sample at an
+    hour-rounded time, so it is dropped in favour of the exact-time row."""
     new = load_clinker()
     try:
         old = pd.read_sql("SELECT * FROM lab_clinker", engine)
         old["ts"] = pd.to_datetime(old["ts"], format="mixed")
     except Exception:
         old = pd.DataFrame(columns=new.columns)
-    both = pd.concat([old.reindex(columns=new.columns), new], ignore_index=True)
+    base = pd.concat([old.reindex(columns=new.columns), new], ignore_index=True)
+    if csv_path:
+        csv = load_clinker_csv(csv_path).sort_values("ts").reset_index(drop=True)
+        ref = base[["ts", "free_lime", "liter_weight"]].dropna(subset=["ts"]).sort_values("ts")
+        near = pd.merge_asof(csv[["ts"]], ref[["ts"]].assign(_hit=1), on="ts",
+                             direction="nearest", tolerance=pd.Timedelta("60min"))
+        # same sample logged >60 min apart: identical free lime + liter weight within 3 h
+        same = pd.merge_asof(csv[["ts", "free_lime", "liter_weight"]],
+                             ref.rename(columns={"free_lime": "fl", "liter_weight": "lw"}),
+                             on="ts", direction="nearest", tolerance=pd.Timedelta("180min"))
+        twin = ((same["free_lime"] - same["fl"]).abs().lt(0.005)
+                & (same["liter_weight"] - same["lw"]).abs().lt(0.5))
+        hit = (near["_hit"].notna() | twin).to_numpy()
+        print(f"clinker CSV: {len(csv)} rows, {hit.sum()} duplicate existing samples, "
+              f"{(~hit).sum()} new")
+        base = pd.concat([base, csv[~hit]], ignore_index=True)
+    both = base
     both = (validate_clinker(both).sort_values("ts")
             .drop_duplicates(subset=["ts"], keep="last").reset_index(drop=True))
     both.to_sql("lab_clinker", engine, if_exists="replace", index=False)
@@ -49,12 +69,13 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", choices=["clinker"],
                     help="reload just this source (others untouched)")
+    ap.add_argument("--clinker-csv", help="plant monthly clinker reports merged to one CSV")
     args = ap.parse_args()
     url = config.database_url()
     print(f"Target DB: {url.split('@')[-1] if '@' in url else url}")
     engine = create_engine(url)
     if args.only == "clinker":
-        refresh_clinker(engine)
+        refresh_clinker(engine, args.clinker_csv)
         return
 
     t0 = time.time()

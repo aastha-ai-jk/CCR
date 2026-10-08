@@ -155,6 +155,22 @@ def load_clinker() -> pd.DataFrame:
     return d.reset_index(drop=True)
 
 
+def load_clinker_csv(path) -> pd.DataFrame:
+    """Plant monthly clinker reports merged to one CSV (columns Time, Ltr.Wt.,
+    F.CAO, C3S, LIQ, source_file). F.CAO = free lime. Times are rounded to the
+    hour; refresh_clinker drops rows that duplicate an eLIMS sample."""
+    d = pd.read_csv(path)
+    d = d.rename(columns={"Time": "ts", "F.CAO": "free_lime", "Ltr.Wt.": "liter_weight",
+                          "C3S": "c3s", "LIQ": "liq"})
+    for c in CLINKER_COLUMNS:
+        if c not in d.columns:
+            d[c] = pd.NA
+    d = d[CLINKER_COLUMNS].copy()
+    d["ts"] = pd.to_datetime(d["ts"], errors="coerce")
+    d = validate_clinker(d)
+    return d.dropna(subset=["ts"]).drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+
+
 def validate_clinker(d: pd.DataFrame) -> pd.DataFrame:
     """Numeric coerce + blank physically impossible values (row kept)."""
     d = d.copy()
