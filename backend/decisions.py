@@ -68,9 +68,10 @@ def _num(v):
 def record(body: dict, advisory: dict | None, snapshot: dict) -> dict:
     """Validate one decision, attach twin context, insert it. Returns the row."""
     _ensure()
+    from twin.optimize import ADVISOR_LEVERS
     tag = str(body.get("tag") or "")
-    if tag not in (*analysis.MV, analysis.CV):
-        raise ValueError(f"unknown parameter tag: {tag!r}")
+    if tag not in (*ADVISOR_LEVERS, analysis.CV):
+        raise ValueError(f"not a recommended parameter: {tag!r}")
     action = str(body.get("action") or "")
     if action not in ACTIONS:
         raise ValueError(f"action must be one of {ACTIONS}")
@@ -152,6 +153,7 @@ def setpoints(values: dict, now: dt.datetime | None = None) -> dict:
     the last EXPIRY_MIN minutes is 'accepted'. ``status`` is ``active`` (still
     driving the twin), ``reached`` (plant is there — live takes over) or
     ``expired``. Levers only: accepting the calciner-temp row sets nothing."""
+    from twin.optimize import ADVISOR_LEVERS     # fixed levers never drive the twin
     _ensure()
     now = now or dt.datetime.now()
     since = (now - dt.timedelta(minutes=EXPIRY_MIN + 5)).isoformat(timespec="seconds")
@@ -165,7 +167,7 @@ def setpoints(values: dict, now: dt.datetime | None = None) -> dict:
         if tag in seen:
             continue
         seen.add(tag)
-        if r["action"] != "accepted" or tag not in analysis.MV or r["recommended_value"] is None:
+        if r["action"] != "accepted" or tag not in ADVISOR_LEVERS or r["recommended_value"] is None:
             continue
         age = (now - dt.datetime.fromisoformat(r["decided_at"])).total_seconds() / 60.0
         lo, hi = cat.loc[tag, "y_min"], cat.loc[tag, "y_max"]

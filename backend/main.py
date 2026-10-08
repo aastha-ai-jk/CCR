@@ -336,9 +336,11 @@ def twin_future():
     return out
 
 
-# CCR advisor: all-8-lever recommendation for the next DELTA minutes. One
-# optimisation takes ~40 s on a laptop, so it runs in a background thread at
-# most every ADVISOR_REFRESH_SEC and the endpoint serves the latest result.
+# CCR advisor: recommendation for the next DELTA minutes over the advisor
+# levers (4 fuel levers + kiln coal); kiln feed, PH fan speed and kiln speed are
+# fixed by the plant team and stay at their live values. One optimisation takes
+# ~40 s on a laptop, so it runs in a background thread at most every
+# ADVISOR_REFRESH_SEC and the endpoint serves the latest result.
 ADVISOR_REFRESH_SEC = 60
 ADVISOR_TRIALS = 120
 _advisor = {"result": None, "computed_at": 0.0, "busy": False}
@@ -350,7 +352,7 @@ def _advisor_run() -> None:
         from twin import optimize as twin_opt
         s, snap, conditions, levers = _live_inputs()
         r = twin_opt.optimize({**conditions, **levers}, n_trials=ADVISOR_TRIALS,
-                              levers=analysis.MV)
+                              levers=twin_opt.ADVISOR_LEVERS)
         r["ts"], r["source"] = s["ts"], s["source"]
         _advisor.update(result=r, computed_at=time.time())
     except Exception as e:                       # never kill the thread silently
@@ -362,9 +364,10 @@ def _advisor_run() -> None:
 
 @app.get("/api/twin/advisor")
 def twin_advisor():
-    """Latest advisory setpoints for all 8 levers (ADVISORY ONLY), plus the
-    live current value of each lever. Kicks off a background re-optimisation
-    when the cached result is older than ADVISOR_REFRESH_SEC."""
+    """Latest advisory setpoints for the advisor levers (ADVISORY ONLY), plus
+    the live current value of each lever. Kicks off a background
+    re-optimisation when the cached result is older than ADVISOR_REFRESH_SEC."""
+    from twin.optimize import ADVISOR_LEVERS, FIXED_LEVERS
     with _advisor_lock:
         stale = time.time() - _advisor["computed_at"] > ADVISOR_REFRESH_SEC
         if stale and not _advisor["busy"]:
@@ -374,10 +377,11 @@ def twin_advisor():
     cat = db.tag_catalog().set_index("tag")
     live = {t: {"name": str(cat.loc[t, "name"]),
                 "uom": None if pd.isna(cat.loc[t, "uom"]) else str(cat.loc[t, "uom"]),
-                "current": s["values"].get(t)} for t in analysis.MV}
+                "current": s["values"].get(t)} for t in ADVISOR_LEVERS}
     r = _advisor["result"]
     out = {"live": live, "live_ts": s["ts"], "live_source": s["source"],
-           "computing": _advisor["busy"], "horizon_min": analysis.DELTA}
+           "computing": _advisor["busy"], "horizon_min": analysis.DELTA,
+           "fixed_levers": FIXED_LEVERS}
     if r is None:
         out.update(available=False, pending=True)
     else:

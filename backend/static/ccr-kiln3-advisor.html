@@ -377,7 +377,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
         <h2>Setpoint recommendations</h2>
         <p id="recMeta">9 open · refreshed every 60 s</p>
       </div>
-      <p class="advnote" id="advNote">Kiln-side recommendations (kiln coal, kiln feed, preheater fan, kiln speed) are experimental and pending process-engineer review. Advisory only.</p>
+      <p class="advnote" id="advNote">Kiln feed, preheater fan speed and kiln speed are held fixed (plant decision) and are not recommended. The kiln coal recommendation is experimental and pending process-engineer review. Advisory only.</p>
       <div class="list" id="list"></div>
     </section>
 
@@ -462,16 +462,6 @@ var PARAMS=[
   drivers:[["AFR heat share, rising",78],["Hotmeal calcination trend",61],["Cyclone 5 outlet gas temp",44]],
   impact:[["Calcination","+0.6 %"],["Free lime","−0.08 %"],["Band risk","Low"]]},
 
- {id:"ph_fan",name:"Preheater fan speed",loc:"PH fan 331-FN1",unit:"rpm",cur:892,rec:905,dec:0,
-  why:"Stage-1 outlet oxygen is at 3.1%, below the 3.4% the current fuel mix needs for clean burnout. Adding 13 rpm restores combustion air while keeping cyclone pressure drop under 58 mbar, so there is no risk of pulling fines into the string.",
-  drivers:[["Stage-1 O₂ deficit",84],["Kiln inlet CO, 30-min trend",52],["Cyclone ΔP headroom",33]],
-  impact:[["Stage-1 O₂","3.1 → 3.4 %"],["Fan power","+11 kW"],["Kiln inlet CO","−60 ppm"]]},
-
- {id:"kiln_spd",name:"Kiln speed",loc:"Main drive 341-KM1",unit:"rpm",cur:3.42,rec:3.50,dec:2,
-  why:"Feed is going up by 3 TPH, so bed depth has to be matched or residence time stretches and free lime climbs. Adding 0.08 rpm keeps residence time at about 26 minutes and protects the coating in the burning zone.",
-  drivers:[["Kiln feed change",71],["Bed depth estimate",58],["Free lime, last lab result",40]],
-  impact:[["Residence time","26.2 min"],["Free lime","stable"],["Torque","+3 %"]]},
-
  {id:"kiln_coal",name:"Kiln coal firing",loc:"Main burner 342-CF1",unit:"TPH",cur:9.8,rec:9.6,dec:1,
   why:"Burning zone is sitting at 1465 °C with secondary air temperature still rising after the last cooler adjustment. Trimming 0.2 TPH holds the burning zone without losing coating, and hands the heat budget over to the calciner where it is needed.",
   drivers:[["Burning zone temp",76],["Secondary air temp, rising",63],["NOx trend",29]],
@@ -481,11 +471,6 @@ var PARAMS=[
   why:"The current alternative fuel blend is running about 380 kcal/kg below the reference calorific value. An extra 0.7 TPH of coal offsets that gap and brings the calciner back to target inside 12 minutes without disturbing the string.",
   drivers:[["AFR calorific value gap",88],["Calciner outlet setpoint move",67],["Hotmeal calcination",46]],
   impact:[["Calciner outlet","+5.4 °C"],["Heat rate","+7 kcal/kg"],["Recovery","12 min"]]},
-
- {id:"kiln_feed",name:"Kiln feed",loc:"Feed belt 338-WF1",unit:"TPH",cur:285,rec:288,dec:0,
-  why:"Hotmeal calcination has been steady at 94.2% for the past two hours and the preheater still has draft headroom. Three more tonnes an hour captures the available throughput at the current fuel rate, with no change to the fuel-to-feed ratio.",
-  drivers:[["Preheater draft headroom",69],["Calcination stability",64],["Cooler grate loading",37]],
-  impact:[["Clinker output","+72 t/day"],["Specific heat","−2 kcal/kg"],["Draft margin","Adequate"]]},
 
  {id:"lafr_pc",name:"LAFR feed rate PC",loc:"Liquid AFR, precalciner",unit:"TPH",cur:4.2,rec:5.0,dec:1,
   why:"The precalciner has thermal headroom now that outlet temperature is being held higher, and the liquid line pressure is stable. Adding 0.8 TPH displaces roughly 0.6 TPH of petcoke at equal heat input and lifts the thermal substitution rate.",

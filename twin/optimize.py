@@ -22,11 +22,15 @@ OPT_LEVERS = ["467RL400_TPH", "LAFR_FT", "K3V10_F1", "261WF080_TPH"]
 COAL = "467RL400_TPH"                 # minimise
 AFR = ["LAFR_FT", "K3V10_F1", "261WF080_TPH"]   # maximise
 CV = analysis.CV
-# Kiln-side levers, searched only when a caller passes levers=analysis.MV (the
-# CCR advisor screen). The plant loops (shadow, optimizer_loop) keep OPT_LEVERS.
+# Kiln-side levers. The plant loops (shadow, optimizer_loop) search OPT_LEVERS
+# only; the CCR advisor searches ADVISOR_LEVERS.
 KILN_COAL = "467RL300_TPH"
 KILN_FEED = config.KILN_FEED_TAG
 KILN_SIDE = [KILN_COAL, KILN_FEED, "423FN010_ST", "433MD140_ST1"]
+# Plant team (2026-10-08): kiln feed, PH fan speed and kiln speed stay FIXED —
+# never recommended. They remain model inputs at their live values.
+FIXED_LEVERS = [KILN_FEED, "423FN010_ST", "433MD140_ST1"]
+ADVISOR_LEVERS = [*OPT_LEVERS, KILN_COAL]
 
 # Penalty added to the objective for an infeasible trial so the study still
 # converges toward the feasible region even when early trials violate.
