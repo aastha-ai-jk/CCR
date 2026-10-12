@@ -33,6 +33,10 @@
 
   "quality": {
     "free_lime_max": null,
+    "free_lime_min": null,
+    "liter_weight_min": null,
+    "liter_weight_max": null,
+    "clinker_lab_max_age_h": null,
     "doc_min": null
   },
 

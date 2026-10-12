@@ -345,6 +345,31 @@ ADVISOR_REFRESH_SEC = 60
 ADVISOR_TRIALS = 120
 
 
+def _latest_clinker() -> dict | None:
+    """Newest clinker lab result (ts, free_lime, liter_weight) from lab_clinker
+    and, where the eLIMS live feed runs, lab_freelime_live."""
+    rows = []
+    for sql in ("SELECT ts, free_lime, liter_weight FROM lab_clinker "
+                "WHERE free_lime IS NOT NULL OR liter_weight IS NOT NULL ORDER BY ts DESC LIMIT 20",
+                "SELECT ts, free_lime, NULL AS liter_weight FROM lab_freelime_live "
+                "WHERE free_lime IS NOT NULL ORDER BY ts DESC LIMIT 20"):
+        try:
+            rows.append(db.q(sql))
+        except Exception:
+            pass                                   # table absent on this install
+    if not rows:
+        return None
+    d = pd.concat(rows, ignore_index=True)
+    d["t"] = pd.to_datetime(d["ts"], format="mixed", errors="coerce")
+    d = d.dropna(subset=["t"]).sort_values("t")
+    if not len(d):
+        return None
+    r = d.iloc[-1]
+    num = lambda v: None if pd.isna(v) else float(v)
+    return {"ts": r["t"].isoformat(timespec="seconds"),
+            "free_lime": num(r["free_lime"]), "liter_weight": num(r["liter_weight"])}
+
+
 def _adv_setting(key: str, default):
     """data/plant_settings.json "advisor" value (re-read each call), else default."""
     v = (config.plant_settings().get("advisor") or {}).get(key)
@@ -359,7 +384,8 @@ def _advisor_run() -> None:
         s, snap, conditions, levers = _live_inputs()
         r = twin_opt.optimize({**conditions, **levers},
                               n_trials=int(_adv_setting("trials", ADVISOR_TRIALS)),
-                              levers=twin_opt.ADVISOR_LEVERS)
+                              levers=twin_opt.ADVISOR_LEVERS,
+                              clinker=_latest_clinker() or {})
         r["ts"], r["source"] = s["ts"], s["source"]
         _advisor.update(result=r, computed_at=time.time())
     except Exception as e:                       # never kill the thread silently

@@ -129,16 +129,63 @@ def _quality_ok(quality: dict | None) -> bool:
     return True
 
 
+def clinker_guard(clinker: dict | None) -> dict:
+    """Lab-based clinker-quality guard (the free-lime / DOC models are too weak
+    to judge recommendations, R2 < 0). From the LATEST clinker lab result vs
+    config.CLINKER_ZONE: under-burnt (free lime above max, liter weight below
+    min) -> no cut in total calciner heat; over-burnt (free lime below min,
+    liter weight above max) -> no rise. Inactive without a result younger than
+    config.CLINKER_LAB_MAX_AGE_H."""
+    import datetime as _dt
+    z = config.CLINKER_ZONE
+    c = clinker or {}
+    out = {"active": False, "direction": None, "status": "no_recent_lab", "reasons": [],
+           "free_lime": c.get("free_lime"), "liter_weight": c.get("liter_weight"),
+           "lab_ts": c.get("ts"), "age_h": None,
+           "zone": {k: dict(v) for k, v in z.items()},
+           "max_age_h": config.CLINKER_LAB_MAX_AGE_H}
+    try:
+        lab = pd.Timestamp(str(c.get("ts")).replace(" ", "T")[:19])
+        now = pd.Timestamp(c["now"]) if c.get("now") else pd.Timestamp(_dt.datetime.now())
+        out["age_h"] = round((now - lab).total_seconds() / 3600.0, 2)
+    except Exception:
+        return out
+    if out["age_h"] is None or out["age_h"] > config.CLINKER_LAB_MAX_AGE_H or out["age_h"] < -1:
+        return out
+    fl, lw = c.get("free_lime"), c.get("liter_weight")
+    under, over = [], []
+    if fl is not None and z["free_lime"]["max"] is not None and fl > z["free_lime"]["max"]:
+        under.append(f"free lime {fl:.2f}% above {z['free_lime']['max']:g}%")
+    if lw is not None and z["liter_weight"]["min"] is not None and lw < z["liter_weight"]["min"]:
+        under.append(f"liter weight {lw:.0f} below {z['liter_weight']['min']:g} g/l")
+    if fl is not None and z["free_lime"]["min"] is not None and fl < z["free_lime"]["min"]:
+        over.append(f"free lime {fl:.2f}% below {z['free_lime']['min']:g}%")
+    if lw is not None and z["liter_weight"]["max"] is not None and lw > z["liter_weight"]["max"]:
+        over.append(f"liter weight {lw:.0f} above {z['liter_weight']['max']:g} g/l")
+    if under and not over:
+        out.update(active=True, direction="no_heat_cut", status="under_burnt", reasons=under)
+    elif over and not under:
+        out.update(active=True, direction="no_heat_rise", status="over_burnt", reasons=over)
+    elif under and over:                     # conflicting signals: hold heat steady
+        out.update(active=True, direction="hold_heat", status="conflicting", reasons=under + over)
+    else:
+        out["status"] = "in_zone"
+    return out
+
+
 def _f(v, nd: int = 2):
     return None if v is None else round(float(v), nd)
 
 
 def optimize(conditions: dict, n_trials: int = 200,
-             levers: list[str] | None = None) -> dict:
+             levers: list[str] | None = None, clinker: dict | None = None) -> dict:
     """Run the Optuna search and return the contract's advisory dict.
 
     ``levers`` picks which MVs to search (default: the four calciner fuel
     levers). Levers outside the search stay at their current values.
+    ``clinker`` (the latest clinker lab result: ts, free_lime, liter_weight)
+    switches the quality check from the predicted-quality models to the
+    lab-based clinker_guard. The plant loops pass none and are unchanged.
     """
     import optuna
 
@@ -188,6 +235,22 @@ def optimize(conditions: dict, n_trials: int = 200,
     move_w = float(obj["move_weight"]) if obj.get("move_weight") is not None else _MOVE_W
     conf_w = float(obj["confidence_weight"]) if obj.get("confidence_weight") is not None else _CONF_W
 
+    # Lab-based clinker guard (advisor): compares each trial's total calciner
+    # heat with the current heat input of the same levers.
+    guard = clinker_guard(clinker) if clinker is not None else None
+    base_heat = economics._heat_per_h(base_vals, econ)[1]
+
+    def heat_ok(lv: dict) -> bool:
+        if not guard or not guard["active"]:
+            return True
+        h = economics._heat_per_h(lv, econ)[1]
+        tol = 0.002 * max(base_heat, 1.0)            # rounding slack (0.2%)
+        if guard["direction"] == "no_heat_cut":
+            return h >= base_heat - tol
+        if guard["direction"] == "no_heat_rise":
+            return h <= base_heat + tol
+        return abs(h - base_heat) <= 0.01 * max(base_heat, 1.0)   # hold_heat: ±1%
+
     def objective(trial: "optuna.Trial") -> float:
         levers = {t: trial.suggest_float(t, *bounds[t]) for t in opt_levers}
         core = twin_model.predict_core(levers, conditions)
@@ -207,10 +270,10 @@ def optimize(conditions: dict, n_trials: int = 200,
         in_band = reach is not None and stays
         conf = _band_confidence(settled, blo, bhi)      # chance constraint (P10/P90)
 
-        # HARD quality constraint: reject setpoints whose predicted clinker
-        # quality leaves spec (pushing AFR must not quietly hurt burnability).
-        # Missing predictions (None) are treated as unknown, not a violation.
-        ok_quality = _quality_ok(core.get("quality"))
+        # HARD quality constraint. Advisor (clinker given): the lab-based guard
+        # on total calciner heat. Plant loops: predicted quality vs spec, where
+        # missing predictions (None) are unknown, not a violation.
+        ok_quality = heat_ok(levers) if guard is not None else _quality_ok(core.get("quality"))
 
         # Economic objective (config.OPTIMIZER_MODE): min ₹/ton | max TSR | min
         # coal. Replaces the old abstract coal_norm - afr_norm. Move + band-
@@ -309,14 +372,24 @@ def optimize(conditions: dict, n_trials: int = 200,
         f"({rec[COAL] - base_vals[COAL]:+.1f} vs current).",
         f"Recommended AFR total = {sum(rec[t] for t in AFR):.1f} tph "
         f"({sum(rec[t] for t in AFR) - sum(base_vals[t] for t in AFR):+.1f} vs current).",
+        # deltas read "recommended minus current" (savings dict keeps its own
+        # positive-is-better convention for the KPI cards)
         (f"Fuel: {rec_kpis['cost_per_ton']:.0f} ₹/t clinker "
-         f"({fuel_savings['cost_per_ton']:+.0f} vs current), TSR {rec_kpis['tsr_pct']:.1f}% "
-         f"({fuel_savings['tsr_pts']:+.1f} pts), coal {fuel_savings['coal_tph']:+.1f} tph saved. "
+         f"({-fuel_savings['cost_per_ton']:+.0f} ₹/t vs current), TSR {rec_kpis['tsr_pct']:.1f}% "
+         f"({fuel_savings['tsr_pts']:+.1f} pts), coal {-fuel_savings['coal_tph']:+.1f} t/h vs current. "
          + ("[economics are ESTIMATED defaults — edit data/fuel_economics.json]"
             if rec_kpis["is_estimate"] else "")).strip(),
-        (f"Predicted clinker quality: free-lime {rec_quality.get('free_lime')}, "
-         f"DOC {rec_quality.get('doc')} — within spec."
-         if rec_quality else "Clinker-quality prediction unavailable this tick."),
+        (("Clinker quality guard: " + "; ".join(guard["reasons"]) + {
+            "no_heat_cut": " — total calciner heat may not be cut.",
+            "no_heat_rise": " — total calciner heat may not be raised.",
+            "hold_heat": " — conflicting signals, total heat held within ±1%."}[guard["direction"]])
+         if guard and guard["active"] else
+         ("Clinker in quality zone (latest lab result)." if guard and guard["status"] == "in_zone"
+          else "No clinker lab result in the last "
+               f"{config.CLINKER_LAB_MAX_AGE_H:g} h — clinker guard inactive." if guard else
+          (f"Predicted clinker quality: free-lime {rec_quality.get('free_lime')}, "
+           f"DOC {rec_quality.get('doc')} — within spec."
+           if rec_quality else "Clinker-quality prediction unavailable this tick."))),
         f"Predicted calciner temp {rec_temp:.1f} °C "
         + ("inside the target band."
            if in_band else
@@ -366,5 +439,8 @@ def optimize(conditions: dict, n_trials: int = 200,
         "economics": {"recommended": rec_kpis, "baseline": base_kpis,
                       "savings": fuel_savings},
         "quality": {"predicted": rec_quality, "specs": config.QUALITY_SPECS},
+        "clinker_guard": guard,
+        "heat": {"current_kcal_h": _f(base_heat, 0),
+                 "recommended_kcal_h": _f(economics._heat_per_h(rec, econ)[1], 0)},
         "sensitivities": sensitivities,
     }

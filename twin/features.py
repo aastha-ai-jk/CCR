@@ -82,6 +82,11 @@ _GAP_LO, _GAP_HI = 4 * 60, 7 * 60       # forward-gap guard (s), like analysis._
 _DOC_LO, _DOC_HI = 85.0, 100.0          # valid hot-meal degree-of-calcination window
 _FL_LO, _FL_HI = 0.2, 5.0               # valid clinker free-lime window (%)
 _LAB_TOL = pd.Timedelta("90min")        # nearest-lab join tolerance
+# Clinker is sampled at the kiln outlet, ~2 h of kiln residence after the
+# calciner conditions that shaped it: the PLC row at t is labelled with the
+# free-lime sample nearest t + FREE_LIME_LAG (so the model predicts free lime
+# ~2 h ahead). Hot-meal DOC is sampled at the calciner, so it stays unshifted.
+FREE_LIME_LAG = pd.Timedelta("120min")
 
 
 # --------------------------------------------------------------------------- #
@@ -218,24 +223,28 @@ def _load() -> pd.DataFrame:
     return _engineer(df)
 
 
-def _quality_targets(ts: pd.Series) -> tuple[pd.Series, pd.Series]:
-    """Nearest-in-time lab join: clinker free-lime and hot-meal degree-of-calc."""
-    base = pd.DataFrame({"ts": pd.to_datetime(ts).values}).reset_index(drop=True)
+def _quality_targets(ts: pd.Series, free_lime_lag: pd.Timedelta = FREE_LIME_LAG
+                     ) -> tuple[pd.Series, pd.Series]:
+    """Nearest-in-time lab join: clinker free-lime (looked up free_lime_lag
+    after the PLC row) and hot-meal degree-of-calc (same time)."""
+    base = pd.DataFrame({"ts": pd.to_datetime(ts).astype("datetime64[ns]").values}
+                        ).reset_index(drop=True)
 
-    def _asof(lab: pd.DataFrame, col: str) -> pd.Series:
+    def _asof(lab: pd.DataFrame, col: str, lag: pd.Timedelta = pd.Timedelta(0)) -> pd.Series:
         lab = lab.dropna(subset=[col]).sort_values("ts")
-        merged = pd.merge_asof(base, lab[["ts", col]], on="ts",
+        lab["ts"] = lab["ts"].astype("datetime64[ns]")      # same unit as base (merge_asof)
+        merged = pd.merge_asof(base.assign(ts=base["ts"] + lag), lab[["ts", col]], on="ts",
                                direction="nearest", tolerance=_LAB_TOL)
         return merged[col]
 
     cl = db.q("SELECT ts, free_lime FROM lab_clinker")
-    cl["ts"] = pd.to_datetime(cl["ts"])
+    cl["ts"] = pd.to_datetime(cl["ts"], format="mixed")
     cl["free_lime"] = pd.to_numeric(cl["free_lime"], errors="coerce")
     cl.loc[~cl["free_lime"].between(_FL_LO, _FL_HI), "free_lime"] = np.nan
-    free_lime = _asof(cl, "free_lime")
+    free_lime = _asof(cl, "free_lime", free_lime_lag)
 
     hm = db.q("SELECT ts, doc FROM lab_hotmeal")
-    hm["ts"] = pd.to_datetime(hm["ts"])
+    hm["ts"] = pd.to_datetime(hm["ts"], format="mixed")
     hm["doc"] = pd.to_numeric(hm["doc"], errors="coerce")
     hm.loc[~hm["doc"].between(_DOC_LO, _DOC_HI), "doc"] = np.nan
     hm = hm.groupby("ts", as_index=False)["doc"].mean()   # average kiln sides

@@ -21,8 +21,11 @@ Fill values from the plant questionnaire (`CCR_Kiln3_Advisor_Plant_Inputs.docx`)
 | 5.1–5.3 | `temperature_bands."State N"` | `[low, high]` °C | [920,940] · [900,920] · [880,900] |
 | 5.5–5.11 | `state_rules.<key>` | three `[low, high]` pairs for State 1, 2, 3 | see `backend/analysis.py` STATE_RULES |
 | 5.12 | `process.kiln_running_min_feed_tph` | t/h | 461 |
-| 6.1 | `quality.free_lime_max` | % | 1.8 |
-| 6.2 | `quality.doc_min` | % | 92 |
+| 6.1 | `quality.free_lime_max` | % — above it, recommendations may not cut total calciner heat | 1.8 |
+| 6.1 | `quality.free_lime_min` | % — below it (over-burnt), recommendations may not raise total heat | off |
+| 6.1 | `quality.liter_weight_min` / `.liter_weight_max` | g/l — below min = under-burnt (no heat cut), above max = over-burnt (no heat rise) | off |
+| — | `quality.clinker_lab_max_age_h` | hours; an older lab result leaves the clinker guard inactive | 4 |
+| 6.2 | `quality.doc_min` | % | 92 (not used to accept/reject: the DOC model is too weak) |
 | 7.1–7.4 | `optimizer.levers.<tag>.max_step` | lever unit, ± per recommendation | ±15% of range, capped at ±100% of current value |
 | 8.4 | `advisor.refresh_sec` | seconds | 60 |
 | 8.6 | `advisor.setpoint_expiry_min` | minutes | 30 |

@@ -117,6 +117,17 @@ QUALITY_SPECS = {
     "doc":       {"min": float(os.getenv("DOC_MIN", "92.0")),      "is_estimate": True},
 }
 
+# Clinker quality ZONE for the advisor's lab-based guard (twin.optimize): the
+# latest lab clinker result decides whether a recommendation may cut or raise
+# total calciner heat. None = that edge is not checked until the plant
+# confirms it. Free lime max mirrors QUALITY_SPECS. A lab result older than
+# CLINKER_LAB_MAX_AGE_H leaves the guard inactive.
+CLINKER_ZONE = {
+    "free_lime":    {"min": None, "max": QUALITY_SPECS["free_lime"]["max"]},   # %
+    "liter_weight": {"min": None, "max": None},                                # g/l
+}
+CLINKER_LAB_MAX_AGE_H = 4.0
+
 # Objective emphasis: "cost" (min ₹/ton clinker) | "tsr" (max thermal
 # substitution) | "coal" (min coal tph). All three KPIs reported regardless.
 OPTIMIZER_MODE = os.getenv("OPTIMIZER_MODE", "cost")
@@ -145,7 +156,7 @@ def _set(value, default):
 
 
 def _apply_plant_settings() -> None:
-    global CLINKER_FACTOR, KILN_FEED_MIN_TPH
+    global CLINKER_FACTOR, KILN_FEED_MIN_TPH, CLINKER_LAB_MAX_AGE_H
     s = plant_settings()
     proc = s.get("process") or {}
     CLINKER_FACTOR = float(_set(proc.get("clinker_factor"), CLINKER_FACTOR))
@@ -159,8 +170,16 @@ def _apply_plant_settings() -> None:
     q = s.get("quality") or {}
     if q.get("free_lime_max") is not None:
         QUALITY_SPECS["free_lime"] = {"max": float(q["free_lime_max"]), "is_estimate": False}
+        CLINKER_ZONE["free_lime"]["max"] = float(q["free_lime_max"])
     if q.get("doc_min") is not None:
         QUALITY_SPECS["doc"] = {"min": float(q["doc_min"]), "is_estimate": False}
+    for key, prop in (("free_lime_min", ("free_lime", "min")),
+                      ("liter_weight_min", ("liter_weight", "min")),
+                      ("liter_weight_max", ("liter_weight", "max"))):
+        if q.get(key) is not None:
+            CLINKER_ZONE[prop[0]][prop[1]] = float(q[key])
+    if q.get("clinker_lab_max_age_h") is not None:
+        CLINKER_LAB_MAX_AGE_H = float(q["clinker_lab_max_age_h"])
 
 
 _apply_plant_settings()
