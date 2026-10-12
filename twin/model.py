@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from backend import analysis
 
@@ -20,6 +21,7 @@ MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "twin_gbt.pkl"
 
 CV = analysis.CV
 MV = analysis.MV
+HORIZON = analysis.DELTA          # min; the point prediction's horizon (t+5)
 SAFETY = analysis.SAFETY
 METHOD = "gbt-twin"
 
@@ -147,6 +149,105 @@ def _conformal_q() -> float | None:
         return None
 
 
+# --- Measured fuel response (hybrid what-if) --------------------------------
+# The GBT learned from closed-loop data (operators move fuel to HOLD the
+# temperature), so its own lever response is ~20-30x too weak (+0.1-0.2 C per
+# t/h coal). For a what-if, the temperature is predicted with the levers at
+# their LIVE values and the MEASURED plant response is added for each lever's
+# deviation from live. Defaults: event studies on Aug 2025 - Jul 2026 history
+# (coal: 3,328 operator steps vs a matched no-change control with the same
+# prior temperature trend; SAFR: ~1,400 feeder trips/restarts with coal steady;
+# LAFR: ~820 LAFR PC steps, TAD assumed equal). Units: C per lever unit
+# (t/h, or l/h for LAFR) at each horizon (min). Overridable per lever in
+# data/plant_settings.json "process_response".
+RESPONSE_DEFAULTS = {
+    "467RL400_TPH": {5: 0.3, 10: 2.2, 15: 4.0, 30: 3.3},          # calciner coal, C per t/h
+    "261WF080_TPH": {5: 0.0, 10: 0.35, 15: 0.4, 30: 0.45},        # SAFR, C per t/h
+    "LAFR_FT":      {5: 0.0015, 10: 0.0025, 15: 0.0025, 30: 0.0025},  # C per l/h
+    "K3V10_F1":     {5: 0.0015, 10: 0.0025, 15: 0.0025, 30: 0.0025},  # C per l/h
+}
+
+
+def _response() -> dict:
+    """lever -> {horizon_min: C per unit}; plant_settings overrides defaults."""
+    import config
+    out = {t: dict(g) for t, g in RESPONSE_DEFAULTS.items()}
+    for tag, g in ((config.plant_settings().get("process_response") or {}).items()):
+        if tag in out and isinstance(g, dict):
+            for h, v in g.items():
+                if v is not None and not str(h).startswith("_"):
+                    out[tag][int(h)] = float(v)
+    return out
+
+
+def _gain(g: dict, h: int) -> float:
+    """Response at horizon h, linear between the measured horizons."""
+    hs = sorted(g)
+    if h <= hs[0]:
+        return g[hs[0]]
+    if h >= hs[-1]:
+        return g[hs[-1]]
+    for a, b in zip(hs, hs[1:]):
+        if a <= h <= b:
+            return g[a] + (g[b] - g[a]) * (h - a) / (b - a)
+    return 0.0
+
+
+def _live_levers() -> dict:
+    """Current value of each response lever from the live history (last row)."""
+    try:
+        from twin import features
+        hist = features._live_history()
+        if hist is None or not len(hist):
+            return {}
+        last = hist.iloc[-1]
+        return {t: float(last[t]) for t in RESPONSE_DEFAULTS
+                if t in hist.columns and pd.notna(last[t])}
+    except Exception:
+        return {}
+
+
+def _whatif(levers: dict, conditions: dict) -> tuple[dict, dict]:
+    """(levers with response levers reset to their live values, deviations).
+    No live reference -> levers unchanged and no deviations (plain model)."""
+    # reference = the caller's live snapshot (conditions) when given, so a
+    # forecast at the live levers has zero deviation; else the live history
+    ref = {t: float(conditions[t]) for t in RESPONSE_DEFAULTS
+           if (conditions or {}).get(t) is not None}
+    for t, v in _live_levers().items():
+        ref.setdefault(t, v)
+    dev = {t: float(levers[t]) - ref[t] for t in RESPONSE_DEFAULTS
+           if levers.get(t) is not None and t in ref and abs(float(levers[t]) - ref[t]) > 1e-9}
+    return {**(levers or {}), **{t: ref[t] for t in dev}}, dev
+
+
+_REF_X: dict = {}
+
+
+def _ref_row(ref_levers: dict, conditions: dict):
+    """Feature row at the live levers. An optimizer run asks for the same row
+    in every trial (only the response levers vary, and they are reset to live
+    here), so the last few rows are memoised on their exact inputs."""
+    def _key(d):
+        return tuple(sorted((k, v) for k, v in (d or {}).items()
+                            if isinstance(v, (int, float, str, type(None)))))
+    key = (_key(ref_levers), _key(conditions))
+    X = _REF_X.get(key)
+    if X is None:
+        X = _feature_row(ref_levers, conditions)
+        if len(_REF_X) > 8:
+            _REF_X.clear()
+        _REF_X[key] = X
+    return X
+
+
+def _response_at(dev: dict, h: int) -> float:
+    if not dev:
+        return 0.0
+    r = _response()
+    return sum(_gain(r[t], h) * d for t, d in dev.items())
+
+
 def _mean_delta(heads: dict, X) -> float:
     """Served mean delta: GBT blended with the bundled ridge ARX (v6).
 
@@ -195,8 +296,13 @@ def predict_core(levers: dict, conditions: dict) -> dict | None:
         return None
     try:
         X = _feature_row(levers, conditions)
+        # temperature: ML at live lever values + measured response to deviations
+        ref_levers, dev = _whatif(levers, conditions)
+        X_t = _ref_row(ref_levers, conditions) if dev else X
 
-        mean, lo, hi = _temp_from(bundle, X, conditions)
+        mean, lo, hi = _temp_from(bundle, X_t, conditions)
+        shift = _response_at(dev, HORIZON)
+        mean, lo, hi = mean + shift, lo + shift, hi + shift
         prediction = {CV: {"mean": _r(mean),
                            "p10": _r(min(lo, mean)), "p90": _r(max(hi, mean))}}
 
@@ -227,8 +333,10 @@ def predict_core(levers: dict, conditions: dict) -> dict | None:
 
         out = {"prediction": prediction, "contributions": contributions,
                "quality": quality, "method": METHOD,
-               "bias_correction": _r(_live_bias(), 2)}
-        traj = predict_trajectory(levers, conditions)
+               "bias_correction": _r(_live_bias(), 2),
+               "fuel_response_c": {str(h): _r(_response_at(dev, h), 2) for h in (5, 10, 15, 30)}
+               if dev else None}
+        traj = predict_trajectory(levers, conditions, _X=X_t, _dev=dev)
         if traj:
             out["trajectory"] = traj
         return out
@@ -236,17 +344,21 @@ def predict_core(levers: dict, conditions: dict) -> dict | None:
         return None
 
 
-def predict_trajectory(levers: dict, conditions: dict) -> list[dict] | None:
+def predict_trajectory(levers: dict, conditions: dict, _X=None, _dev=None) -> list[dict] | None:
     """Predicted temperature path over every trained horizon (v3 bundles).
 
     Returns [{"min": h, "mean": ..., "p10": ..., "p90": ...}, ...] with the
-    delta reconstructed onto current_temp, or None when unavailable.
+    delta reconstructed onto current_temp, or None when unavailable. Lever
+    deviations from live get the measured fuel response at each horizon.
     """
     bundle = _load()
     if bundle is None or not bundle.get("temp_multi"):
         return None
     try:
-        X = _feature_row(levers, conditions)
+        if _X is None:
+            ref_levers, _dev = _whatif(levers, conditions)
+            _X = _ref_row(ref_levers, conditions) if _dev else _feature_row(levers, conditions)
+        X, dev = _X, (_dev or {})
         base = _t0(conditions)
         c = _live_bias()                   # same offset applies along the path
         out = []
@@ -257,7 +369,8 @@ def predict_trajectory(levers: dict, conditions: dict) -> list[dict] | None:
             hi = float(heads["p90"].predict(X)[0])
             if bundle.get("temp_delta"):
                 m, lo, hi = base + m, base + lo, base + hi
-            m, lo, hi = m + c, lo + c, hi + c
+            s = _response_at(dev, int(h))
+            m, lo, hi = m + c + s, lo + c + s, hi + c + s
             lo, hi = min(lo, hi), max(lo, hi)
             out.append({"min": int(h), "mean": _r(m), "p10": _r(lo), "p90": _r(hi)})
         return out

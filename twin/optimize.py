@@ -304,6 +304,10 @@ def optimize(conditions: dict, n_trials: int = 200,
             penalty += _INFEASIBLE_PENALTY
         return raw + penalty
 
+    # Baseline = current levers at current conditions, predicted BEFORE the
+    # search: the live history moves on during a run (fast in replay), and the
+    # baseline must describe the same moment as the trials it is compared with.
+    base_core = twin_model.predict_core(base_vals, conditions)
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=1))
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
@@ -330,8 +334,8 @@ def optimize(conditions: dict, n_trials: int = 200,
     rec_reach = best.user_attrs.get("reach")
     rec_conf = best.user_attrs.get("conf")
 
-    # Baseline = current levers (fallback to recent medians) at current conditions.
-    base_core = twin_model.predict_core(base_vals, conditions)
+    # Baseline (current levers) was predicted BEFORE the search, from the same
+    # live history the trials used (see above).
     base_temp = base_core["prediction"][CV]["mean"] if base_core else None
 
     interlocks = _interlocks(pred)

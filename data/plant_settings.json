@@ -68,6 +68,14 @@
     }
   },
 
+  "process_response": {
+    "_about": "Calciner outlet temp change (C) per unit lever change, at 5/10/15/30 min. null = measured default (twin/model.py RESPONSE_DEFAULTS).",
+    "467RL400_TPH": {"5": null, "10": null, "15": null, "30": null},
+    "261WF080_TPH": {"5": null, "10": null, "15": null, "30": null},
+    "LAFR_FT":      {"5": null, "10": null, "15": null, "30": null},
+    "K3V10_F1":     {"5": null, "10": null, "15": null, "30": null}
+  },
+
   "advisor": {
     "refresh_sec": null,
     "trials": null,

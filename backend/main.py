@@ -241,6 +241,11 @@ def _live_inputs() -> tuple[dict, dict, dict, dict]:
     except Exception:
         pass
     levers = {k: snap.get(k) for k in analysis.FEATURES if snap.get(k) is not None}
+    # live lever values ride in conditions too: the twin's what-if layer
+    # measures every lever change against this same snapshot
+    for t in analysis.MV:
+        if snap.get(t) is not None:
+            conditions[t] = snap[t]
     return s, snap, conditions, levers
 
 

@@ -27,6 +27,9 @@ Fill values from the plant questionnaire (`CCR_Kiln3_Advisor_Plant_Inputs.docx`)
 | — | `quality.clinker_lab_max_age_h` | hours; an older lab result leaves the clinker guard inactive | 4 |
 | 6.2 | `quality.doc_min` | % | 92 (not used to accept/reject: the DOC model is too weak) |
 | 7.1–7.4 | `optimizer.levers.<tag>.max_step` | lever unit, ± per recommendation | ±15% of range, capped at ±100% of current value |
+| new | `process_response.467RL400_TPH."5"` … `."30"` | °C per t/h of calciner coal at 5/10/15/30 min | 0.3 / 2.2 / 4.0 / 3.3 (3,328 operator coal steps vs matched control) |
+| new | `process_response.261WF080_TPH.*` | °C per t/h of SAFR | 0.0 / 0.35 / 0.4 / 0.45 (~1,400 SAFR trips/restarts) |
+| new | `process_response.LAFR_FT.*` / `.K3V10_F1.*` | °C per l/h of LAFR | 0.0015 / 0.0025 / 0.0025 / 0.0025 (~820 LAFR PC steps; TAD assumed equal) |
 | 8.4 | `advisor.refresh_sec` | seconds | 60 |
 | 8.6 | `advisor.setpoint_expiry_min` | minutes | 30 |
 | — | `advisor.setpoint_reach_tol_frac` | fraction of the lever's range | 0.005 |
