@@ -9,6 +9,7 @@ the server is expected to run) and at NEW. Output:
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import io
 import subprocess
@@ -18,19 +19,13 @@ from pathlib import Path
 
 BASE = "6763a01"                                    # feature/digital-twin-ml tip = server
 NEW = sys.argv[1] if len(sys.argv) > 1 else "HEAD"
-FILES = [
-    "backend/main.py",
-    "backend/decisions.py",
-    "backend/static/ccr-kiln3-advisor.html",
-    "twin/optimize.py",
-    "twin/train_gbt.py",
-    "frontend/app/twin/page.tsx",
-    "frontend/components/Mimic.tsx",
-    "frontend/lib/api.ts",
-]
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-NAME = "ccr-advisor-20260925"
+# every app file changed since BASE (the ops scripts themselves are not deployed)
+FILES = [f for f in subprocess.run(["git", "diff", "--name-only", BASE, NEW], cwd=ROOT,
+                                   capture_output=True, text=True, check=True).stdout.split()
+         if not f.startswith("ops/")]
+NAME = "ccr-advisor-" + datetime.date.today().strftime("%Y%m%d")
 
 
 def blob(rev: str, path: str) -> bytes | None:
@@ -70,7 +65,7 @@ def main() -> None:
             add(tar, s, lf(HERE / s), 0o755)
         add(tar, "README.md", lf(HERE / "README.md"))
     print("\n".join(rows))
-    print(f"wrote {out} ({out.stat().st_size / 1024:.0f} KiB) from {NEW} (base {BASE})")
+    print(f"wrote {out} ({out.stat().st_size / 1024:.0f} KiB, {len(FILES)} files) from {NEW} (base {BASE})")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,6 @@ while IFS=$'\t' read -r path base new; do
     rm -f "$path" && echo "  removed  $path"
   fi
 done < "$HERE/MANIFEST.tsv"
-find backend twin -name "*.pyc" -delete
+find backend twin etl -name "*.pyc" -delete 2>/dev/null
 (cd frontend && npm run build 2>&1 | tail -5)
 pm2 restart ccr-backend ccr-frontend --update-env >/dev/null && echo "ROLLED BACK to pre-$TS"
