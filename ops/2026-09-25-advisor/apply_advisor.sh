@@ -36,6 +36,10 @@ if [ "$bad" -ne 0 ]; then
   echo "       copy them back to the repo so the change can be merged, then rebuild the bundle."
   exit 1
 fi
+if [ "${1:-}" = "--check" ]; then
+  echo "CHECK ONLY: pre-flight passed, nothing was changed."
+  exit 0
+fi
 [ -x .venv/bin/python ] || { echo "ABORT: $APP/.venv/bin/python not found"; exit 1; }
 command -v pm2 >/dev/null || { echo "ABORT: pm2 not on PATH"; exit 1; }
 
