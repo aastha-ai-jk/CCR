@@ -57,7 +57,7 @@ echo "=== 3/6 compile + import smoke test ==="
 PYS=$(cut -f1 "$HERE/MANIFEST.tsv" | grep '\.py$' | tr '\n' ' ')
 .venv/bin/python -m py_compile $PYS
 find backend twin etl -name "*.pyc" -delete 2>/dev/null || true
-.venv/bin/python -c "import config, json; json.load(open('data/plant_settings.json')); import backend.analysis, backend.decisions, backend.main, twin.features, twin.model, twin.optimize, twin.train_gbt, etl.clean, etl.load; print('  IMPORT_OK')"
+.venv/bin/python -c "import config, json; json.load(open('data/plant_settings.json')); import backend.analysis, backend.decisions, backend._fuel_dashboard, backend.main, twin.features, twin.model, twin.economics, twin.optimize, twin.optimizer_loop, twin.monitor, twin.retrain, twin.train_gbt, etl.clean, etl.load, etl.live_feed; print('  IMPORT_OK')"
 
 echo "=== 4/6 frontend production build ==="
 (cd frontend && npm run build 2>&1 | tail -15)   # pipefail: a failed build trips the ERR trap
