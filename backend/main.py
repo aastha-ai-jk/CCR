@@ -390,7 +390,8 @@ def _advisor_run() -> None:
         r = twin_opt.optimize({**conditions, **levers},
                               n_trials=int(_adv_setting("trials", ADVISOR_TRIALS)),
                               levers=twin_opt.ADVISOR_LEVERS,
-                              clinker=_latest_clinker() or {})
+                              clinker=_latest_clinker() or {},
+                              objective_mode="least_coal")   # plant aim; settings can override
         r["ts"], r["source"] = s["ts"], s["source"]
         _advisor.update(result=r, computed_at=time.time())
     except Exception as e:                       # never kill the thread silently

@@ -5,15 +5,15 @@ Fill values from the plant questionnaire (`CCR_Kiln3_Advisor_Plant_Inputs.docx`)
 
 | Q | Key | Unit / format | Current default |
 |---|---|---|---|
-| 1.1 | `optimizer.levers.LAFR_FT.min` / `.max` | l/h | 0 / 9,000 (PLC range) |
-| 1.2 | `optimizer.levers.K3V10_F1.min` / `.max` | l/h | 0 / 4,000 |
-| 1.3 | `optimizer.levers.261WF080_TPH.min` / `.max` | t/h | 0 / 30 |
-| 1.4 | `optimizer.afr.max_tsr_pct` | % of calciner heat from AFR | no limit (*used from step 3*) |
-| 1.7 | `optimizer.afr.priority` | list of tags, first raised first | none (*step 3*) |
+| 1.1 | `optimizer.levers.LAFR_FT.min` / `.max` | l/h | observed 11 / 3,795 (1st–99th percentile of history) |
+| 1.2 | `optimizer.levers.K3V10_F1.min` / `.max` | l/h | observed 0 / 3,406 |
+| 1.3 | `optimizer.levers.261WF080_TPH.min` / `.max` | t/h | observed 0.06 / 26.2 |
+| 1.4 | `optimizer.afr.max_tsr_pct` | % of calciner heat from AFR — hard cap | no limit |
+| 1.7 | `optimizer.afr.priority` | list of tags, first raised first | none (*not used yet*) |
 | 2.1–2.5 | `interlocks.<tag>` | ppm / % (the limit value) | CO 1,500 · O₂ 1.5 · kiln CO 800 · kiln O₂ 0.5 · PH CO 3,000 |
-| 3.1 | `optimizer.levers.467RL400_TPH.min` / `.max` | t/h | 0 / 35 |
-| 3.3 | `optimizer.heat_balance.max_change_pct` | ± % of total calciner heat | no rule (*step 3*) |
-| 3.5 | `optimizer.objective.mode` | `"cost"` · `"tsr"` · `"coal"` | `"cost"` |
+| 3.1 | `optimizer.levers.467RL400_TPH.min` / `.max` | t/h | observed 14.1 / 34.9 |
+| 3.3 | `optimizer.heat_balance.max_change_pct` | ± % change of total calciner heat per recommendation — hard rule | no rule |
+| 3.5 | `optimizer.objective.mode` | `"least_coal"` (least coal, then most AFR) · `"cost"` · `"tsr"` · `"coal"` | advisor `"least_coal"`; plant loops `OPTIMIZER_MODE` env (`"cost"`) |
 | 4.1, 4.7 | `fuels.467RL400_TPH.gcv_kcal_kg` / `.price_per_ton` | kcal/kg · ₹/t | 6,000 · 8,000 |
 | 4.2, 4.8 | `fuels.261WF080_TPH.gcv_kcal_kg` / `.price_per_ton` | kcal/kg · ₹/t | 4,000 · 2,500 |
 | 4.4, 4.5, 4.9 | `fuels.LAFR_FT` and `fuels.K3V10_F1`: `gcv_kcal_kg`, `mass_per_unit` (density), `price_per_ton` | kcal/kg · kg/l · ₹/t | 5,500 · 0.95 · 2,000 |

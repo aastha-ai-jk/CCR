@@ -88,6 +88,11 @@ def objective_score(levers: dict, conditions: dict | None,
     econ = econ or config.fuel_economics()
     mode = mode or config.OPTIMIZER_MODE
     k = kpis(levers, conditions, econ)
+    if mode == "least_coal":
+        # plant aim: burn as little coal as possible, then as much AFR as the
+        # limits allow. Coal dominates (-1 t/h = -0.033); TSR breaks ties
+        # (+5 pts = -0.0125), so AFR rises wherever coal cannot fall further.
+        return k["coal_tph"] / 30.0 - 0.25 * k["tsr_pct"] / 100.0
     if mode == "coal":
         return k["coal_tph"] / 30.0                    # ~coal engineering range
     if mode == "tsr":

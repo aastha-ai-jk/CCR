@@ -70,17 +70,60 @@ def _lever_settings(tag: str) -> dict:
     return ((_opt_settings().get("levers") or {}).get(tag)) or {}
 
 
+_OBSERVED: dict = {}
+
+
+def _observed_limits() -> dict[str, tuple[float, float]]:
+    """1st-99th percentile of each lever while the kiln is feeding: what the
+    plant actually runs. The PLC engineering ranges are far wider (SAFR 0-30,
+    LAFR PC 0-9,000 l/h) and would let 'most AFR' push past real operation."""
+    if not _OBSERVED:
+        try:
+            tags = [*OPT_LEVERS, KILN_COAL]
+            d = db.q("SELECT " + ", ".join(f'"{t}"' for t in tags)
+                     + " FROM process_1min WHERE feed_gate=1").apply(pd.to_numeric, errors="coerce")
+            for t in tags:
+                v = d[t].dropna()
+                if len(v) > 1000:
+                    _OBSERVED[t] = (float(v.quantile(0.01)), float(v.quantile(0.99)))
+        except Exception:
+            pass
+    return _OBSERVED
+
+
+def _limit_info(levers: list[str]) -> dict[str, dict]:
+    """Each lever's min/max and where it came from: plant / observed / plc."""
+    cat = db.tag_catalog().set_index("tag")
+    obs = _observed_limits()
+    out = {}
+    for t in levers:
+        ls = _lever_settings(t)
+        src, (lo, hi) = "plc", (cat.loc[t, "y_min"], cat.loc[t, "y_max"])
+        if t in obs:
+            src, (lo, hi) = "observed", obs[t]
+        if ls.get("min") is not None or ls.get("max") is not None:
+            src = "plant"
+            lo = ls["min"] if ls.get("min") is not None else lo
+            hi = ls["max"] if ls.get("max") is not None else hi
+        out[t] = {"min": _f(lo), "max": _f(hi), "source": src}
+    return out
+
+
 def _bounds(levers: list[str] = OPT_LEVERS) -> dict[str, tuple[float, float]]:
-    """Lever search bounds: plant-confirmed min/max when set, else dim_tag
-    y_min/y_max (fallback to median-based)."""
+    """Lever search bounds: plant-confirmed min/max when set, else the observed
+    operating range (1st-99th percentile), else dim_tag y_min/y_max (fallback
+    to median-based)."""
     cat = db.tag_catalog().set_index("tag")
     defaults = analysis.feature_defaults()
+    obs = _observed_limits()
     out = {}
     for t in levers:
         lo, hi = cat.loc[t, "y_min"], cat.loc[t, "y_max"]
         if pd.isna(lo) or pd.isna(hi) or hi <= lo:
             med = float(defaults.get(t, 1.0))
             lo, hi = 0.0, max(med * 2.0, 1.0)
+        if t in obs and obs[t][1] > obs[t][0]:
+            lo, hi = obs[t]
         ls = _lever_settings(t)
         lo = ls["min"] if ls.get("min") is not None else lo
         hi = ls["max"] if ls.get("max") is not None else hi
@@ -178,7 +221,8 @@ def _f(v, nd: int = 2):
 
 
 def optimize(conditions: dict, n_trials: int = 200,
-             levers: list[str] | None = None, clinker: dict | None = None) -> dict:
+             levers: list[str] | None = None, clinker: dict | None = None,
+             objective_mode: str | None = None) -> dict:
     """Run the Optuna search and return the contract's advisory dict.
 
     ``levers`` picks which MVs to search (default: the four calciner fuel
@@ -231,7 +275,8 @@ def optimize(conditions: dict, n_trials: int = 200,
             r = min((hi - lo) * frac, max(abs(c), 1.0))
         bounds[t] = (max(lo, c - r), min(hi, c + r))
     obj = _opt_settings().get("objective") or {}
-    mode = obj.get("mode") or config.OPTIMIZER_MODE
+    # plant setting > caller's mode (advisor: least_coal) > OPTIMIZER_MODE env
+    mode = obj.get("mode") or objective_mode or config.OPTIMIZER_MODE
     move_w = float(obj["move_weight"]) if obj.get("move_weight") is not None else _MOVE_W
     conf_w = float(obj["confidence_weight"]) if obj.get("confidence_weight") is not None else _CONF_W
 
@@ -250,6 +295,27 @@ def optimize(conditions: dict, n_trials: int = 200,
         if guard["direction"] == "no_heat_rise":
             return h <= base_heat + tol
         return abs(h - base_heat) <= 0.01 * max(base_heat, 1.0)   # hold_heat: ±1%
+
+    # AFR cap (max TSR %) and total-heat rule (max +-% change vs current), both
+    # from plant_settings.json; None = not applied.
+    afr_s = _opt_settings().get("afr") or {}
+    max_tsr = afr_s.get("max_tsr_pct")
+    max_heat_pct = (_opt_settings().get("heat_balance") or {}).get("max_change_pct")
+
+    def limits_excess(lv: dict) -> float:
+        """How far a setpoint set breaks the AFR cap (TSR points over) and the
+        heat rule (% beyond the allowed change), plus the clinker guard (% of
+        heat cut/raised against it). 0 = every limit met. Graded, so when no
+        option meets them all the search still moves toward the least breach."""
+        ex = 0.0
+        h = economics._heat_per_h(lv, econ)[1]
+        if max_tsr is not None:
+            ex += max(0.0, economics.kpis(lv, econ_cond(lv), econ)["tsr_pct"] - float(max_tsr))
+        if max_heat_pct is not None and base_heat > 0:
+            ex += max(0.0, abs(h - base_heat) / base_heat * 100.0 - float(max_heat_pct))
+        if guard and guard["active"] and not heat_ok(lv) and base_heat > 0:
+            ex += abs(h - base_heat) / base_heat * 100.0
+        return ex
 
     def objective(trial: "optuna.Trial") -> float:
         levers = {t: trial.suggest_float(t, *bounds[t]) for t in opt_levers}
@@ -273,7 +339,9 @@ def optimize(conditions: dict, n_trials: int = 200,
         # HARD quality constraint. Advisor (clinker given): the lab-based guard
         # on total calciner heat. Plant loops: predicted quality vs spec, where
         # missing predictions (None) are unknown, not a violation.
-        ok_quality = heat_ok(levers) if guard is not None else _quality_ok(core.get("quality"))
+        q_ok = True if guard is not None else _quality_ok(core.get("quality"))
+        excess = limits_excess(levers)                  # clinker guard + AFR cap + heat rule
+        ok_quality = q_ok and excess == 0.0
 
         # Economic objective (config.OPTIMIZER_MODE): min ₹/ton | max TSR | min
         # coal. Replaces the old abstract coal_norm - afr_norm. Move + band-
@@ -300,8 +368,11 @@ def optimize(conditions: dict, n_trials: int = 200,
             penalty += _INFEASIBLE_PENALTY + abs(settled["mean"] - (blo + bhi) / 2.0)
         if not ok_inter:
             penalty += _INFEASIBLE_PENALTY
-        if not ok_quality:
+        if not q_ok:
             penalty += _INFEASIBLE_PENALTY
+        if excess > 0.0:
+            penalty += _INFEASIBLE_PENALTY + 10.0 * excess
+        trial.set_user_attr("limits_excess", excess)
         return raw + penalty
 
     # Baseline = current levers at current conditions, predicted BEFORE the
@@ -444,6 +515,12 @@ def optimize(conditions: dict, n_trials: int = 200,
                       "savings": fuel_savings},
         "quality": {"predicted": rec_quality, "specs": config.QUALITY_SPECS},
         "clinker_guard": guard,
+        "lever_limits": _limit_info(opt_levers),
+        "afr_rules": {"max_tsr_pct": max_tsr, "max_heat_change_pct": max_heat_pct},
+        # False = no option met band + interlocks + limits; the recommendation
+        # is the closest one, and the screen must say so
+        "all_limits_met": bool(feasible),
+        "limits_excess": _f(best.user_attrs.get("limits_excess"), 2),
         "heat": {"current_kcal_h": _f(base_heat, 0),
                  "recommended_kcal_h": _f(economics._heat_per_h(rec, econ)[1], 0)},
         "sensitivities": sensitivities,
