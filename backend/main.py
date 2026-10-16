@@ -5,17 +5,20 @@ Run:  python -m uvicorn backend.main:app --reload --port 8000
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import threading
 import time
 
+import numpy as np
 import pandas as pd
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 import config
 from backend import db, analysis
+from backend import forecast as forecast_mod
 
 app = FastAPI(title="Calcination Combustion Control API", version="0.1")
 app.add_middleware(
@@ -220,7 +223,7 @@ def _live_inputs() -> tuple[dict, dict, dict, dict]:
     lime = db.q("SELECT free_lime, liter_weight, liq FROM lab_clinker "
                 "WHERE free_lime IS NOT NULL ORDER BY ts DESC LIMIT 1")
     doc = db.q("SELECT doc FROM lab_hotmeal WHERE doc IS NOT NULL ORDER BY ts DESC LIMIT 1")
-    conditions = {}
+    conditions: dict = {}
     if len(lime):
         conditions.update({"free_lime": float(lime["free_lime"][0]),
                            "liter_weight": float(lime["liter_weight"][0]),
@@ -447,6 +450,167 @@ def live():
     return latest()
 
 
+@app.get("/api/trend")
+def trend(tag: str = "423CI400_TT_4", minutes: int = 60, max_points: int = 300):
+    """Rolling trend for one tag. Streams from the live OPC feed (`process_live`)
+    when it has data, otherwise falls back to the newest historical window.
+
+    Live and historical are never mixed: the two are ~2 weeks apart, so joining
+    them would draw a misleading straight line across the gap.
+    """
+    tag = (db.safe_tags([tag]) or ["423CI400_TT_4"])[0]
+    src, df = "live", None
+    try:                                    # ~2 s cadence -> 30 rows/min, allow margin
+        df = db.q(f'SELECT ts, "{tag}" AS v FROM process_live '
+                  f'ORDER BY ts DESC LIMIT :n', {"n": int(minutes * 45)})
+        df = df.dropna(subset=["v"]) if df is not None else None
+    except Exception:
+        df = None
+    if df is None or len(df) < 2:
+        src = "historical"
+        df = db.q(f'SELECT ts, "{tag}" AS v FROM process_1min '
+                  f'ORDER BY ts DESC LIMIT :n', {"n": int(minutes)})
+        df = df.dropna(subset=["v"])
+
+    if not len(df):
+        return {"tag": tag, "source": src, "points": []}
+
+    df["ts"] = pd.to_datetime(df["ts"])
+    df = df.sort_values("ts")
+    df = df[df["ts"] >= df["ts"].max() - pd.Timedelta(minutes=minutes)]
+    if len(df) > max_points:                # even downsample, always keep the last point
+        step = int(np.ceil(len(df) / max_points))
+        df = pd.concat([df.iloc[::step], df.iloc[[-1]]]).drop_duplicates(subset=["ts"])
+    df["v"] = pd.to_numeric(df["v"], errors="coerce").round(2)
+    fmt = "%H:%M" if src == "live" else "%d-%b %H:%M"
+    return {
+        "tag": tag, "name": db.tag_names().get(tag, tag), "source": src,
+        "window_min": minutes,
+        "from": df["ts"].min().strftime("%Y-%m-%d %H:%M:%S"),
+        "to": df["ts"].max().strftime("%Y-%m-%d %H:%M:%S"),
+        "points": [{"t": t.strftime(fmt), "v": (None if pd.isna(v) else float(v))}
+                   for t, v in zip(df["ts"], df["v"])],
+    }
+
+
+@app.get("/api/advisory")
+def advisory():
+    """Live fuel-saving advisory for the CURRENT plant state: the cheapest
+    in-band, interlock-safe fuel mix within one guarded move, plus the saving
+    that would represent. Estimate of potential — see `assumptions`."""
+    s, snap, conditions, _levers = _live_inputs()
+    levers = {k: snap[k] for k in analysis.MV if snap.get(k) is not None}
+
+    now = analysis.simulate(levers, conditions)
+    adv = analysis.advise(levers, conditions)
+    adv["ts"] = s["ts"]
+    adv["source"] = s["source"]
+    p = now["prediction"]["423CI400_TT_4"]
+    adv["baseline"] = {
+        "predicted_temp": p["mean"], "p10": p["p10"], "p90": p["p90"],
+        "temp_in_band": now["temp_in_band"],
+        "all_interlocks_ok": now["all_interlocks_ok"],
+        "horizon_min": now["horizon_min"],
+    }
+    adv["live_actual_temp"] = snap.get("423CI400_TT_4")
+    if config.COAL_PRICE_PER_T and adv.get("feasible"):
+        sv = adv["saving"]
+        adv["saving"]["cost_per_year"] = round(
+            sv["coal_tpy"] * config.COAL_PRICE_PER_T, 0)
+        adv["saving"]["currency"] = config.CURRENCY
+    # per-parameter energy + money breakdown
+    adv["breakdown"] = analysis.savings_breakdown(
+        adv, snap, days_per_year=adv["assumptions"]["operating_days_per_year"])
+
+    # "Locked" decline: if the operator's last decision for this exact
+    # situation (same operating state + same side of the band) was a
+    # decline, resurface their own reasoning instead of silently repeating
+    # the same suggestion as if it were new.
+    band = adv.get("target_band")
+    temp = adv.get("live_actual_temp")
+    if band and temp is not None:
+        direction = "above" if temp > band["high"] else "below" if temp < band["low"] else "within"
+        last = db.latest_decision_for_situation(adv["operating_state"], direction)
+        if last is not None and last.get("decision") == "declined":
+            adv["locked_decline"] = {
+                "ts": last.get("ts"),
+                "direction": direction,
+                "reason_category": _san(last.get("reason_category")),
+                "note": _san(last.get("note")),
+                "live_actual_temp": _san(last.get("live_actual_temp")),
+                "predicted_temp": _san(last.get("predicted_temp")),
+            }
+    return adv
+
+
+DECLINE_REASONS = [
+    "Kiln stability at risk",
+    "Fuel quality or AFR availability",
+    "Equipment constraint or interlock",
+    "Conflicts with another change",
+    "Quality target — free lime or SO3",
+    "Operator judgement, other",
+]
+
+
+class AdvisoryDecision(BaseModel):
+    decision: str                      # "accepted" | "declined"
+    operating_state: str | None = None
+    mode: str | None = None
+    target_band_low: float | None = None
+    target_band_high: float | None = None
+    live_actual_temp: float | None = None
+    predicted_temp: float | None = None
+    moves: list = []
+    reasoning: str | None = None
+    reason_category: str | None = None  # one of DECLINE_REASONS, required on decline
+    note: str | None = None             # optional free-text, additional to the category
+
+
+@app.get("/api/advisory/decline-reasons")
+def advisory_decline_reasons():
+    return {"reasons": DECLINE_REASONS}
+
+
+@app.post("/api/advisory/decision")
+def advisory_decision(req: AdvisoryDecision):
+    """Log the operator's accept/decline of a shown recommendation, together
+    with the reasoning as displayed. Advisory-only: this never writes to any
+    control system, it only records what the operator chose to do."""
+    if req.decision not in ("accepted", "declined"):
+        raise HTTPException(400, "decision must be 'accepted' or 'declined'")
+    if req.decision == "declined" and not req.reason_category:
+        raise HTTPException(400, "reason_category is required when declining")
+    db.log_advisory_decision({
+        "ts": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "decision": req.decision,
+        "operating_state": req.operating_state,
+        "mode": req.mode,
+        "target_band_low": req.target_band_low,
+        "target_band_high": req.target_band_high,
+        "live_actual_temp": req.live_actual_temp,
+        "predicted_temp": req.predicted_temp,
+        "moves_json": json.dumps(req.moves),
+        "reasoning": req.reasoning,
+        "note": req.note,
+        "reason_category": req.reason_category,
+    })
+    return {"ok": True}
+
+
+@app.get("/api/advisory/decisions")
+def advisory_decisions(limit: int = Query(50, ge=1, le=500)):
+    """Recent operator decisions -- feeds the shift dashboard's decision log
+    and its aggregate charts (handled-by-lever, decline reasons)."""
+    rows = db.recent_advisory_decisions(limit)
+    for r in rows:
+        try:
+            r["moves"] = json.loads(r.pop("moves_json")) if r.get("moves_json") else []
+        except Exception:
+            r["moves"] = []
+    return {"decisions": rows}
+
+
 @app.get("/api/simulate/defaults")
 def sim_defaults():
     cat = db.tag_catalog().set_index("tag")
@@ -470,8 +634,19 @@ def simulate(req: SimReq):
     return analysis.simulate(req.levers, req.conditions, req.k)
 
 
+@app.get("/api/forecast")
+def forecast(minutes_back: int = Query(20, ge=6, le=180)):
+    """ML twin: calciner temperature 60 s ahead, from REAL recent trailing
+    history (not a what-if) -- see backend/forecast.py. Held-out test MAE
+    5.73 degC. Needs `python -m etl.live_feed` (or --replay) populating
+    process_live; returns available=False with a reason if there isn't
+    enough recent buffered history yet."""
+    return forecast_mod.forecast_from_live_buffer(minutes_back)
+
+
 # ---------------------------------------------------------------------------
 # Digital-twin (GBT) endpoints — optimise / metrics / backtest.
+# (from feature/digital-twin-ml; see twin/CONTRACT.md)
 # ---------------------------------------------------------------------------
 def _json_safe(obj):
     """Recursively replace NaN/Inf floats with None so FastAPI can serialise."""

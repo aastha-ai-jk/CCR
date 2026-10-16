@@ -8,6 +8,9 @@ frontend/.next/
 # runtime logs
 *.log
 data/*.parquet
+# generated experiment artefacts (re-created by: python -m experiments.gbt_trial)
+experiments/models/
+experiments/out/
 # raw historian exports (large; live outside git)
 data/*.csv
 # trained model binaries (regenerable via twin/train_* and twin/bench);

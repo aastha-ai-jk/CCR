@@ -38,6 +38,11 @@ QC_DIR = Path(os.getenv("QC_DIR", r"D:/QC_NBH"))
 OPC_DIR = Path(os.getenv("OPC_DIR", r"D:/OPC"))
 TAGS_XLSX = Path(os.getenv("TAGS_XLSX", r"D:/QC_NBH/PLC & QC Data and Tags (1).xlsx"))
 
+# 1-second-resolution PLC export (same 31 tags as the monthly PLC_DIR .xlsx
+# files, just finer-grained and more current). Used by etl.load_csv_1s to
+# refresh process_1min with a higher-fidelity source -> feeds the ML twin.
+CSV_1S_PATH = Path(os.getenv("CSV_1S_PATH", r"D:/ccr_clean_1s.csv"))
+
 # --- Domain constants (from Combustion Control logic doc) -----------------
 KILN_FEED_TAG = "353RL130_TPH"
 KILN_FEED_MIN_TPH = 461.0          # control actions only apply above this
@@ -52,6 +57,29 @@ INTERLOCKS = {
     "423AM820_CO_PPM": ("<", 3000),   # PH outlet CO string-1
     "423AM821_CO_PPM": ("<", 3000),   # PH outlet CO string-2
 }
+
+# --- Fuel economics (for the savings breakdown) ---------------------------
+# Prices are OPTIONAL and default to 0 = "not configured". When a price is 0 the
+# app shows ENERGY ONLY for that stream and no money figure, so nothing is ever
+# fabricated. Put your own landed costs in .env to switch currency on.
+CURRENCY = os.getenv("CURRENCY", "INR")
+COAL_PRICE_PER_T = float(os.getenv("COAL_PRICE_PER_T", "0") or 0)
+KILN_COAL_PRICE_PER_T = float(os.getenv("KILN_COAL_PRICE_PER_T", "0") or 0) or COAL_PRICE_PER_T
+LAFR_PRICE_PER_L = float(os.getenv("LAFR_PRICE_PER_L", "0") or 0)
+SAFR_PRICE_PER_T = float(os.getenv("SAFR_PRICE_PER_T", "0") or 0)
+
+# Calorific values (kcal/kg) — CCR screen: Coal CV 5200, AFR Calorific SP 2500.
+COAL_CV_KCAL_KG = float(os.getenv("COAL_CV_KCAL_KG", "5200"))
+AFR_LIQ_CV_KCAL_KG = float(os.getenv("AFR_LIQ_CV_KCAL_KG", "2500"))
+AFR_SOL_CV_KCAL_KG = float(os.getenv("AFR_SOL_CV_KCAL_KG", "2500"))
+# Liquid AFR is metered volumetrically (l/h); density converts it to mass.
+LAFR_DENSITY_KG_PER_L = float(os.getenv("LAFR_DENSITY_KG_PER_L", "1.0"))
+
+# Clinker output per tonne of kiln feed — used only to express the saving as
+# specific heat consumption (kcal/kg clinker).
+CLINKER_PER_FEED = float(os.getenv("CLINKER_PER_FEED", "0.63"))
+
+KCAL_TO_GJ = 4.1868e-6          # 1 kcal = 4.1868 kJ
 
 # Dynamic target band selection (State -> calciner temp band in degC)
 TEMP_STATE_BANDS = {

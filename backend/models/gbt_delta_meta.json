@@ -1,0 +1,48 @@
+{
+  "model": "gbt_delta_60s.txt",
+  "delta_target": true,
+  "target": "423CI400_TT_4(t+60s) - 423CI400_TT_4(t)",
+  "horizon_s": 60,
+  "momentum_tag": "423CI400_TT_4",
+  "momentum_stats": [
+    "rmean",
+    "ema"
+  ],
+  "level_free_stats": [
+    "rstd",
+    "rskew"
+  ],
+  "test_metrics_absolute_degC": {
+    "rmse": 3.3890984151735393,
+    "mae": 2.5308327646166346,
+    "mape": 0.28692168508208493,
+    "r2": 0.9463429127520833
+  },
+  "test_metrics_delta": {
+    "rmse": 3.3890984151735393,
+    "mae": 2.5308327646166346,
+    "mape": 121.18664164719404,
+    "r2": 0.48504302888314543
+  },
+  "persistence_baseline": {
+    "rmse": 4.722790811802491,
+    "mae": 3.5219632619159227,
+    "mape": 0.3993301683040377,
+    "r2": 0.8958027752162542
+  },
+  "test_period": [
+    "2026-07-13 00:00:00",
+    "2026-08-11 00:00:00"
+  ],
+  "best_iteration": 97,
+  "why_delta_target": "the prior absolute-value model (test MAE 5.69) showed a same-direction, different-magnitude bias across two real backtests (8.29 vs 3.66 degC) -- the signature of a model implicitly encoding 'what regime was I trained in' via absolute temperature level. Predicting the CHANGE, with the target's own lag/rolling-mean/EMA expressed as deviation-from-now (momentum) instead of absolute level, removes that leak -- the same fix already proven in feature/digital-twin-ml (a colleague's branch), which found absolute-target models scored worse than persistence.",
+  "live_deployment_backtest": {
+    "how": "python -m etl.backtest_forecast -- runs backend.forecast.forecast_from_recent() (the exact function the live API calls) against real historical 1-second data, scored against a causally-denoised actual.",
+    "windows_tested": [
+      {"window": "2026-08-10 06:00 -> 12:00 (volatile morning)", "n": 72, "mae": 2.613, "rmse": 3.575, "bias": -0.878},
+      {"window": "2026-08-05 12:00 -> 18:00 (calm afternoon)", "n": 72, "mae": 1.988, "rmse": 2.478, "bias": 0.029}
+    ],
+    "combined_empirical_mae": 2.30,
+    "conclusion": "the delta-target retrain closes the training/serving gap almost completely (2.53 training vs ~2.30 combined empirical), AND removes the regime-dependent bias swing seen on the prior absolute-value model (both windows now near-zero bias, both comfortably under the 5 degC target). This is the strongest verified result in this project's history for this task."
+  }
+}

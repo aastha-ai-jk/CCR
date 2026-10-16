@@ -3,23 +3,42 @@ import { useEffect, useMemo, useState } from "react";
 import { Area, ComposedChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceArea } from "recharts";
 import { api, TwinMetrics, TwinBacktest, ShadowResult, DecisionsResult, TwinFuture } from "@/lib/api";
 import Mimic from "@/components/Mimic";
+import SavingsPanel from "@/components/SavingsPanel";
+import Advisor from "@/components/Advisor";
 import { Panel, Stat, Badge, Loading } from "@/components/ui";
+import { Lightbulb, X } from "lucide-react";
+
+const fmt = (v: any, d = 1) =>
+  v === null || v === undefined || isNaN(Number(v)) ? "—" : Number(v).toFixed(d);
+
+const FEED_TAG = "353RL130_TPH";
+const FEED_MIN = 461; // Combustion Control logic doc: applicability notice
 
 export default function DigitalTwin() {
   const [latest, setLatest] = useState<any>(null);
   const [ov, setOv] = useState<any>(null);
+  const [adv, setAdv] = useState<any>(null);
   const [metrics, setMetrics] = useState<TwinMetrics | null>(null);
   const [metricsErr, setMetricsErr] = useState(false);
   const [bt, setBt] = useState<TwinBacktest | null>(null);
   const [btErr, setBtErr] = useState(false);
   const [shadow, setShadow] = useState<ShadowResult | null>(null);
   const [decisions, setDecisions] = useState<DecisionsResult | null>(null);
+  const [showAdvisor, setShowAdvisor] = useState(false);
   const [future, setFuture] = useState<TwinFuture | null>(null);
   const [futureErr, setFutureErr] = useState(false);
+
+  useEffect(() => {
+    if (!showAdvisor) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setShowAdvisor(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showAdvisor]);
 
   const load = () => {
     api.latest().then(setLatest).catch(console.error);
     api.overview().then(setOv).catch(console.error);
+    api.advisory().then(setAdv).catch(console.error);
     api.shadow().then(setShadow).catch(() => {});
     api.decisions().then(setDecisions).catch(() => {});
     api.twinFuture().then((f) => { setFuture(f); setFutureErr(false); }).catch(() => setFutureErr(true));
@@ -70,6 +89,9 @@ export default function DigitalTwin() {
     ? { tone: "warn", text: "REPLAY (recent history)" }
     : { tone: "muted", text: "historical snapshot" };
 
+  const feed = latest.values?.[FEED_TAG];
+  const applicable = feed != null && feed > FEED_MIN;
+
   // Twin = the plant horizon_min ahead. Falls back to the live mimic if the
   // twin endpoint is unavailable (and says so).
   const ahead = !!future && !futureErr;
@@ -115,10 +137,74 @@ export default function DigitalTwin() {
         </div>
       </header>
 
+      {/* ---- applicability gate: doc's own prerequisite for ANY automated advisory action ---- */}
+      {!applicable && (
+        <Panel className="border border-[var(--warn)]">
+          <div className="text-sm text-[var(--warn)] font-semibold">
+            Advisory not applicable — kiln feed {fmt(feed, 0)} t/h is at or below the {FEED_MIN} t/h threshold.
+          </div>
+          <div className="text-[11px] text-[var(--muted)] mt-1">
+            Per the Combustion Control logic doc's Applicability Notice: automated control actions
+            only apply when kiln feed ({FEED_TAG}) is above {FEED_MIN} t/h. The plant is in a
+            transient/low-load state — the recommendation below should be treated as informational
+            only, not actioned.
+          </div>
+        </Panel>
+      )}
+
+      {/* ---------------- mimic: full width so nothing is clipped ---------------- */}
       <Panel className="!p-2">
         <Mimic values={mimicValues} units={latest.units} band={band} mode={ahead ? "sim" : "live"}
           live={mimicLive} basis={mimicBasis} />
       </Panel>
+
+      {/* ---------------- recommendation trigger: opens the advisor as a side drawer, mimic stays visible ---------------- */}
+      <button
+        onClick={() => setShowAdvisor((s) => !s)}
+        className={`w-full flex items-center justify-between gap-3 rounded-xl border px-5 py-4 transition-colors text-left ${
+          showAdvisor ? "border-[var(--accent)] bg-[var(--panel-2)]" : "border-[var(--line)] bg-[var(--panel)] hover:border-[var(--accent)]"
+        }`}
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex items-center justify-center w-10 h-10 rounded-lg bg-[var(--panel-2)] text-[var(--accent)]">
+            <Lightbulb size={20} />
+          </span>
+          <div>
+            <div className="font-semibold text-[var(--ink)]">Recommendation {showAdvisor ? "panel open" : "available"}</div>
+            <div className="text-xs text-[var(--muted)]">
+              {adv?.feasible
+                ? `${adv.operating_state} · ${adv.mode === "hold" ? "hold the band" : "approach the band"} · ${showAdvisor ? "tap to close" : "tap to review and accept or decline"}`
+                : adv ? "No safe move right now — tap for details" : "Loading…"}
+            </div>
+          </div>
+        </div>
+        <Badge tone={!adv ? "muted" : adv.feasible ? (adv.mode === "hold" ? "ok" : "warn") : "bad"}>
+          {!adv ? "…" : adv.feasible ? (showAdvisor ? "Close" : "Open") : "Blocked"}
+        </Badge>
+      </button>
+
+      {showAdvisor && (
+        <div className="fixed inset-0 z-50" onClick={() => setShowAdvisor(false)}>
+          <div
+            className="absolute top-0 right-0 h-full w-full sm:w-[520px] lg:w-[600px] bg-[var(--bg)] border-l border-[var(--line)] shadow-2xl overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--line)] sticky top-0 bg-[var(--bg)] z-10">
+              <div className="font-semibold text-[var(--ink)] flex items-center gap-2">
+                <Lightbulb size={18} className="text-[var(--accent)]" /> Advisor — recommendation & reasoning
+              </div>
+              <button onClick={() => setShowAdvisor(false)}
+                className="text-[var(--muted)] hover:text-[var(--ink)] p-1 rounded-md hover:bg-[var(--panel-2)]">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-4 space-y-4">
+              <Advisor latest={latest} adv={adv} />
+              <SavingsPanel breakdown={adv?.breakdown} mode={adv?.mode} />
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="text-[11px] text-[var(--muted)]">
         {ahead

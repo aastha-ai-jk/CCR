@@ -1,5 +1,11 @@
-# Heavy twin-training libs (kept separate from the app's requirements.txt).
-lightgbm>=4.3
+# Heavy/ML libs (kept separate from the app's requirements.txt).
+# The app itself only needs lightgbm (backend/forecast.py imports it lazily;
+# GET /api/forecast returns available=False without it). polars is only for
+# the offline ETL refresh + backtest validation tools.
+lightgbm>=4.5
+polars>=1.20        # etl.load_csv_1s, etl.backtest_forecast (fast filtered CSV scans)
+
+# twin/ package (feature/digital-twin-ml): training, benchmarking, live optimizer loop
 optuna>=3.6
 shap>=0.45
 joblib>=1.3

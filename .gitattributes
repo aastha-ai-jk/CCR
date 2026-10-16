@@ -1,1 +1,6 @@
 *.sqlite filter=lfs diff=lfs merge=lfs -text
+
+# LightGBM's text model format is line-structure-sensitive -- CRLF conversion
+# on a Windows checkout corrupts it (breaks the "[Fatal] Model format error"
+# way). Force no line-ending conversion, ever.
+backend/models/*.txt -text

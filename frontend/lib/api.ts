@@ -36,6 +36,23 @@ export interface DQ {
 export interface Milestone {
   phase: string; title: string; detail: string; status: string; ordinal: number;
 }
+// GBT model trained on 1-second PLC data (nn_twin/plc_pipeline.py) -- see
+// backend/forecast.py and README.md "uat branch" section for the honest
+// accuracy caveat (model_test_mae is a training-time, non-causal-smoothing
+// number; real live-serving accuracy is closer to ~7-9 degC).
+export interface ForecastResponse {
+  available: boolean;
+  reason?: string;
+  predicted_temp_60s?: number;
+  current_temp?: number | null;
+  predicted_change?: number | null;
+  horizon_s?: number;
+  method?: string;
+  model_test_mae?: number;
+  model_test_r2?: number;
+  as_of?: string;
+  imputed_tags?: string[];
+}
 
 // ---- Twin / optimizer response shapes (see twin/CONTRACT.md) ----
 export interface Interval { mean: number; p10: number; p90: number; }
@@ -164,6 +181,18 @@ export const api = {
   roadmap: () => get<Milestone[]>("/api/roadmap"),
   overview: () => get("/api/overview"),
   latest: () => get("/api/latest"),
+  advisory: () => get("/api/advisory"),
+  advisoryDecision: (payload: {
+    decision: "accepted" | "declined";
+    operating_state?: string; mode?: string;
+    target_band_low?: number; target_band_high?: number;
+    live_actual_temp?: number; predicted_temp?: number;
+    moves?: unknown[]; reasoning?: string; reason_category?: string; note?: string;
+  }) => post("/api/advisory/decision", payload),
+  declineReasons: () => get<{ reasons: string[] }>("/api/advisory/decline-reasons"),
+  advisoryDecisions: (limit = 50) => get<{ decisions: any[] }>(`/api/advisory/decisions?limit=${limit}`),
+  trend: (tag = "423CI400_TT_4", minutes = 60) =>
+    get(`/api/trend?tag=${tag}&minutes=${minutes}`),
   series: (tags: string[], p: { start?: string; end?: string; bucket?: string; in_load?: boolean; window?: "day" | "week" | "month" } = {}) => {
     const q = new URLSearchParams({ tags: tags.join(",") });
     if (p.start) q.set("start", p.start);
@@ -182,6 +211,8 @@ export const api = {
   simDefaults: () => get("/api/simulate/defaults"),
   simulate: (levers: Record<string, number>, conditions: Record<string, number>, k = 200) =>
     post("/api/simulate", { levers, conditions, k }),
+  forecast: (minutesBack = 20) =>
+    get<ForecastResponse>(`/api/forecast?minutes_back=${minutesBack}`),
   optimize: (conditions: Record<string, number>) =>
     post<OptimizeResult>("/api/optimize", { conditions }),
   twinMetrics: () => get<TwinMetrics>("/api/twin/metrics"),
