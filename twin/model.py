@@ -33,11 +33,15 @@ _CACHE: dict = {}
 
 def _load() -> dict | None:
     """Return the loaded model bundle (+ cached SHAP explainer) or None."""
+    try:
+        mtime = MODEL_PATH.stat().st_mtime
+    except OSError:
+        return _CACHE.get("bundle")              # file briefly absent mid-retrain: keep serving
     bundle = _CACHE.get("bundle")
-    if bundle is not None:
+    if bundle is not None and _CACHE.get("mtime") == mtime:
         return bundle
-    if not MODEL_PATH.exists():
-        return None
+    # first load, or the weekly retrain promoted a new model: (re)load it, so
+    # serving picks it up without a process restart (PM2 or Docker)
     try:
         import joblib
         import shap
@@ -49,10 +53,11 @@ def _load() -> dict | None:
         # (raw value, lags, rolls, rates, valid mask). Tag names are distinct
         # enough that a substring test is unambiguous.
         mv_cols = {mv: [i for i, c in enumerate(cols) if mv in c] for mv in MV}
-        _CACHE.update(bundle=bundle, explainer=explainer, mv_cols=mv_cols)
+        _CACHE.update(bundle=bundle, explainer=explainer, mv_cols=mv_cols, mtime=mtime)
         return bundle
     except Exception:
-        return None
+        # unreadable (e.g. still being written): keep the previous model if any
+        return _CACHE.get("bundle")
 
 
 def is_available() -> bool:
