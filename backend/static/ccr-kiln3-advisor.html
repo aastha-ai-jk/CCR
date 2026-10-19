@@ -185,17 +185,15 @@ main{display:flex;flex-direction:column;min-width:0;}
 /* expanded body */
 .row__body{border-top:1px solid var(--line-soft);padding:16px 18px 16px 15px;display:none;}
 .row.is-open .row__body{display:block;}
-.why{display:grid;grid-template-columns:1fr 250px;gap:26px;}
+.why{display:block;}
 .why h3{margin:0 0 6px;font-size:12.5px;font-weight:600;color:var(--ink-dim);}
 .why p{margin:0;font-size:14px;line-height:1.62;color:var(--ink);max-width:66ch;}
-.drivers{display:flex;flex-direction:column;gap:7px;}
-.driver{display:grid;grid-template-columns:1fr 62px;align-items:center;gap:10px;font-size:12.5px;color:var(--ink-dim);}
-.driver__bar{height:5px;background:var(--panel-3);border-radius:3px;overflow:hidden;grid-column:1/-1;}
-.driver__bar i{display:block;height:100%;background:var(--violet);border-radius:3px;}
-.driver__v{font-family:var(--mono);text-align:right;color:var(--ink);}
-.impact{display:flex;gap:26px;margin-top:15px;padding-top:13px;border-top:1px solid var(--line-soft);}
-.impact div{font-size:11.5px;color:var(--ink-faint);}
-.impact b{display:block;font-family:var(--mono);font-size:14px;color:var(--ink);font-weight:500;margin-top:2px;}
+.pts{display:flex;flex-wrap:wrap;gap:7px;margin:0;padding:0;list-style:none;}
+.pts li{font-size:13px;padding:5px 11px;border:1px solid var(--line);border-radius:999px;background:var(--panel-2);color:var(--ink);}
+.pts li.ok{border-color:#2E5A47;color:var(--green);}
+.pts li.warn{border-color:#5E4A2A;color:var(--amber);}
+.pts li.bad{border-color:#5E3530;color:var(--red);}
+.pts li.muted{color:var(--ink-dim);}
 .actions{display:flex;gap:10px;align-items:center;margin-top:16px;}
 .btn{padding:8px 18px;border-radius:var(--r);font-size:14px;font-weight:500;transition:background .12s ease,border-color .12s ease;}
 .btn--accept{background:var(--green);color:#0B1512;font-weight:600;}
@@ -604,11 +602,8 @@ function rowHTML(p){
   h+='</button>';
 
   h+='<div class="row__body">';
-  h+= '<div class="why"><div><h3>Why the model is suggesting this</h3><p>'+esc(p.why)+'</p>';
-  h+=  '<div class="impact">'+p.impact.map(function(i){return '<div>'+esc(i[0])+'<b>'+esc(i[1])+'</b></div>';}).join("")+'</div></div>';
-  h+=  '<div><h3>Strongest signals behind it</h3><div class="drivers">'+p.drivers.map(function(dr){
-         return '<div class="driver"><span>'+esc(dr[0])+'</span><span class="driver__v">'+dr[1]+'%</span><span class="driver__bar"><i style="width:'+dr[1]+'%"></i></span></div>';}).join("")+'</div></div>';
-  h+= '</div>';
+  h+= '<div class="why"><div><h3>Why</h3><ul class="pts">'+(p.points&&p.points.length?p.points:[["Waiting for twin","muted"]]).map(function(t){
+         return '<li class="'+(t[1]||"")+'">'+esc(t[0])+'</li>';}).join("")+'</ul></div></div>';
 
   if(st.status==="open"){
     h+='<div class="actions">';
