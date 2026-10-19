@@ -197,16 +197,50 @@ def run_replay(engine, interval: float, hours: int = 12):
         time.sleep(interval)
 
 
+# --------------------------- EDGE MIRROR ----------------------------------
+def run_edge(engine, interval: float, base: str):
+    """Mirror the live plant values another twin deployment (the CCR edge
+    device) already reads from OPC, via its read-only GET /api/live. For dev
+    machines that are not on the OT network. Uses the edge's own timestamps."""
+    import json
+    import urllib.request
+
+    url = base.rstrip("/") + "/api/live"
+    print(f"EDGE mode: mirroring live plant values from {url} every {interval}s (read-only).\n")
+    last_ts = None
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=10) as r:
+                live = json.load(r)
+            if live.get("source") != "opc":
+                print(f"[{dt.datetime.now():%H:%M:%S}] edge feed is '{live.get('source')}', not live OPC — waiting")
+            elif live.get("ts") != last_ts:
+                last_ts = live["ts"]
+                values = {k: _num(v) for k, v in (live.get("values") or {}).items()}
+                write_snapshot(engine, last_ts, values, "edge")
+                print(f"[{last_ts}] (edge) calciner={values.get('423CI400_TT_4')}°C  "
+                      f"feed={values.get('353RL130_TPH')}  ({len(values)} tags)")
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print(f"[{dt.datetime.now():%H:%M:%S}] edge unreachable: {e} — retrying")
+        time.sleep(interval)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval", type=float, default=2.0, help="seconds between reads")
     ap.add_argument("--replay", action="store_true", help="stream recent history instead of OPC")
+    ap.add_argument("--from-edge", nargs="?", const="http://10.4.2.10:8010", metavar="URL",
+                    help="mirror live values from another twin's /api/live (default: CCR edge device)")
     args = ap.parse_args()
 
     engine = make_engine()
     print(f"DB: {config.database_url().split('@')[-1]}")
     try:
-        if args.replay:
+        if args.from_edge:
+            run_edge(engine, args.interval, args.from_edge)
+        elif args.replay:
             run_replay(engine, args.interval)
         else:
             try:

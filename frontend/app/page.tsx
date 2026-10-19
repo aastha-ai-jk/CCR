@@ -43,6 +43,7 @@ export default function Overview() {
   const src = ov.source;
   const feedBadge = src === "opc"
     ? { tone: "ok", text: `● LIVE · OPC · ${ov.age_sec ?? "?"}s ago` }
+    : src === "edge" ? { tone: "ok", text: `● LIVE · via edge · ${ov.age_sec ?? "?"}s ago` }
     : src === "replay" ? { tone: "warn", text: "REPLAY" }
     : { tone: "muted", text: "historical" };
   const s = ov.snapshot;

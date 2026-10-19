@@ -94,7 +94,7 @@ export default function Simulator() {
   const err = temp?.mean != null && actualTemp != null ? temp.mean - actualTemp : null;
   const anyOverride = Object.values(overrides).some(Boolean);
   const src = baseline?.source;
-  const feed = src === "opc" ? { tone: "ok", text: `● LIVE · ${baseline.age_sec ?? "?"}s` }
+  const feed = src === "opc" || src === "edge" ? { tone: "ok", text: `● LIVE · ${baseline.age_sec ?? "?"}s` }
     : src === "replay" ? { tone: "warn", text: "REPLAY" } : { tone: "muted", text: "historical" };
 
   const setLever = (k: string, v: number) => {

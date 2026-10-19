@@ -66,6 +66,8 @@ export default function DigitalTwin() {
   const src = latest.source;
   const feedBadge = src === "opc"
     ? { tone: "ok", text: `● LIVE · OPC · ${latest.age_sec ?? "?"}s ago` }
+    : src === "edge"
+    ? { tone: "ok", text: `● LIVE · via edge · ${latest.age_sec ?? "?"}s ago` }
     : src === "replay"
     ? { tone: "warn", text: "REPLAY (recent history)" }
     : { tone: "muted", text: "historical snapshot" };
