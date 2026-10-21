@@ -28,6 +28,11 @@ Status as of 16 Oct 2026. To be closed once the plant team's answers arrive
 | 9 | Lab-based DOC guard; live eLIMS lab feed on the GPU so quality guards are active | Dev + IT |
 | 10 | Replace the mock "why" text with real lever effects | Dev |
 
+## Pending on Advisory
+| # | Item | Plan |
+|---|---|---|
+| A1 | Advisor screen shows a fixed **870–885 °C** band ("Band", band chart, legend, "Inside band" chip; `LO=870, HI=885` in `ccr-kiln3-advisor.html`). It is a placeholder from the uploaded design mock-up (21 Sep, `1bdcb46`), not from the plant or the optimizer, which uses the State band (State 3 = 880–900 °C). Plant setpoint on 21 Oct = 885 °C. | Show the band for the **current state**: the state is set for each set of kiln conditions (state-vote logic), and the screen band follows it, the same band the optimizer uses. |
+
 ## 3. Open items — ML model accuracy
 | # | Item | Notes |
 |---|---|---|
