@@ -32,6 +32,7 @@ Status as of 16 Oct 2026. To be closed once the plant team's answers arrive
 | # | Item | Plan |
 |---|---|---|
 | A1 | Advisor screen shows a fixed **870–885 °C** band ("Band", band chart, legend, "Inside band" chip; `LO=870, HI=885` in `ccr-kiln3-advisor.html`). It is a placeholder from the uploaded design mock-up (21 Sep, `1bdcb46`), not from the plant or the optimizer, which uses the State band (State 3 = 880–900 °C). Plant setpoint on 21 Oct = 885 °C. | Show the band for the **current state**: the state is set for each set of kiln conditions (state-vote logic), and the screen band follows it, the same band the optimizer uses. |
+| A2 | **Weekly retrain learns from PLC data only.** `twin/retrain.py` ingests live PLC minutes; quality labels (`lab_clinker` free lime / liter weight, `lab_hotmeal` DOC) are loaded manually from Excel and stop around 8 Aug 2026. The eLIMS live free lime (`lab_freelime_live`, on the edge) feeds only the clinker guard, not training. Temperature model unaffected (PLC inputs); free-lime / DOC models never get new labels. | 1) fold eLIMS live free lime into `lab_clinker` for training; 2) add eLIMS feeds for hot-meal DOC and raw-meal chemistry (LSF, SM); 3) retrain then learns from quality data too. |
 
 ## 3. Open items — ML model accuracy
 | # | Item | Notes |

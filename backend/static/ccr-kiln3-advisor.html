@@ -358,22 +358,22 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
       <div class="hero">
         <div class="hero__read">
           <div class="hero__label">Calciner temperature predicted for <span id="predFor">--:--</span> (next <span id="predHorizon">5</span> min) · <span id="twinSrc">connecting to digital twin…</span></div>
-          <div class="hero__val"><b class="num" id="predVal">876.4</b><em>°C</em></div>
+          <div class="hero__val"><b class="num" id="predVal">—</b><em>°C</em></div>
           <div class="hero__times num">Live at <b id="liveAt">--:--:--</b> <span aria-hidden="true">→</span> prediction for <b id="predAt">--:--:--</b></div>
           <div class="hero__traj num" id="predTraj" aria-label="Calciner forecast by horizon"></div>
-          <div class="hero__trend" id="predTrend">Holding steady inside the operating band</div>
+          <div class="hero__trend" id="predTrend">Waiting for the twin optimiser…</div>
           <div class="hero__foot">
-            <div>Live reading<b class="num" id="liveVal">874.1 °C</b></div>
-            <div>Band<b class="num">870 – 885</b></div>
-            <div>Confidence<b class="num" id="confVal">92%</b></div>
+            <div>Live reading<b class="num" id="liveVal">—</b></div>
+            <div>Band<span id="bandState"></span><b class="num" id="bandVal">—</b></div>
+            <div>In band at T+30<b class="num" id="confVal">—</b></div>
           </div>
         </div>
         <div class="hero__band">
           <div class="hero__bandtop">
             <h2>Position in operating band</h2>
-            <span class="chip chip--in" id="bandChip">Inside band</span>
+            <span class="chip" id="bandChip">—</span>
           </div>
-          <svg viewBox="0 0 760 132" id="bandSvg" role="img" aria-label="Calciner temperature against its 870 to 885 degree operating band"></svg>
+          <svg viewBox="0 0 760 132" id="bandSvg" role="img" aria-label="Calciner temperature against the operating band of the current state"></svg>
         </div>
       </div>
 
@@ -389,8 +389,8 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
     <!-- ============ VIEW: DASHBOARD ============ -->
     <section class="view" id="view-dash" hidden>
       <div class="sec" style="margin-top:0">
-        <h2>Shift summary</h2>
-        <p>Shift A, 06:00 onward — Kiln 3</p>
+        <h2>Today's summary</h2>
+        <p id="dashSub">Kiln 3 — today from 00:00</p>
       </div>
 
       <div class="stats" id="stats"></div>
@@ -404,13 +404,13 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
           <svg viewBox="0 0 900 250" id="trendSvg" role="img" aria-label="Calciner outlet temperature trend over the last twelve hours against the operating band"></svg>
           <div class="legend">
             <span><i style="background:var(--amber)"></i>Actual</span>
-            <span><i style="background:rgba(79,184,138,.28)"></i>Operating band 870–885 °C</span>
+            <span><i style="background:rgba(79,184,138,.28)"></i>Operating band <span id="trendBand">—</span></span>
             <span><i style="background:var(--blue)"></i>Accepted recommendation</span>
           </div>
         </div>
 
         <div class="card">
-          <div class="card__h"><h3>How recommendations were handled</h3><span>Today</span></div>
+          <div class="card__h"><h3>How recommendations were handled</h3><span>Today · accepted / decisions</span></div>
           <div class="hbars" id="paramBars"></div>
           <div class="legend">
             <span><i style="background:var(--green)"></i>Accepted</span>
@@ -425,7 +425,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
         </div>
 
         <div class="card">
-          <div class="card__h"><h3>Prediction error by hour</h3><span>Predicted minus actual, °C</span></div>
+          <div class="card__h"><h3>Prediction error by hour</h3><span id="errSub">Predicted minus actual, °C</span></div>
           <svg viewBox="0 0 440 210" id="errSvg" role="img" aria-label="Model prediction error by hour"></svg>
         </div>
 
@@ -456,37 +456,19 @@ function tickClock(){
 }
 tickClock(); setInterval(tickClock,1000);
 
-/* ---------------- seeded noise ---------------- */
-var seed=20260918;
-function rnd(){seed=(seed*1664525+1013904223)%4294967296;return seed/4294967296;}
-
 /* ---------------- parameters ---------------- */
+// cur/rec are placeholders until the live feed and the twin optimiser answer
+// (liveOk/recOk false -> shown as "—"). why/drivers/impact are filled from the
+// optimiser output by explainRows().
+var WAIT="Waiting for the twin optimiser…";
 var PARAMS=[
- {id:"calc_out",name:"Calciner outlet temperature",loc:"Cyclone 5 outlet, TI-5312",unit:"°C",cur:872.6,rec:878.0,dec:1,
-  why:"The model sees calciner outlet drifting to about 868 °C within 30 minutes as the alternative fuel share climbs and the current lot runs wetter. Lifting the target to 878 °C keeps an 8 °C cushion above the lower band limit and holds hotmeal calcination near 94%.",
-  drivers:[["AFR heat share, rising",78],["Hotmeal calcination trend",61],["Cyclone 5 outlet gas temp",44]],
-  impact:[["Calcination","+0.6 %"],["Free lime","−0.08 %"],["Band risk","Low"]]},
-
- {id:"calc_coal",name:"Calciner coal firing",loc:"Calciner firing 345-CF2",unit:"TPH",cur:18.4,rec:19.1,dec:1,
-  why:"The current alternative fuel blend is running about 380 kcal/kg below the reference calorific value. An extra 0.7 TPH of coal offsets that gap and brings the calciner back to target inside 12 minutes without disturbing the string.",
-  drivers:[["AFR calorific value gap",88],["Calciner outlet setpoint move",67],["Hotmeal calcination",46]],
-  impact:[["Calciner outlet","+5.4 °C"],["Heat rate","+7 kcal/kg"],["Recovery","12 min"]]},
-
- {id:"lafr_pc",name:"LAFR feed rate PC",loc:"Liquid AFR, precalciner",unit:"TPH",cur:4.2,rec:5.0,dec:1,
-  why:"The precalciner has thermal headroom now that outlet temperature is being held higher, and the liquid line pressure is stable. Adding 0.8 TPH displaces roughly 0.6 TPH of petcoke at equal heat input and lifts the thermal substitution rate.",
-  drivers:[["PC thermal headroom",73],["Liquid line pressure, stable",55],["TSR target gap",49]],
-  impact:[["TSR","18.6 → 20.1 %"],["Petcoke","−0.6 TPH"],["Fuel cost","−₹ 6.4 k/h"]]},
-
- {id:"lafr_tad",name:"LAFR feed rate TAD",loc:"Liquid AFR, tertiary air duct",unit:"TPH",cur:1.8,rec:1.5,dec:2,
-  why:"Nozzle backpressure on the tertiary air duct line has been creeping up over the last 40 minutes, which usually means atomisation is degrading. Easing to 1.5 TPH avoids incomplete burnout and the CO spikes that follow at the riser.",
-  drivers:[["TAD nozzle backpressure",81],["Riser CO, short-term trend",58],["TAD air temperature",31]],
-  impact:[["Riser CO risk","Reduced"],["TSR","−0.5 %"],["Burnout","Improved"]]},
-
- {id:"safr",name:"SAFR feed rate",loc:"Solid AFR, calciner line",unit:"TPH",cur:6.5,rec:7.2,dec:1,
-  why:"Moisture on the current solid fuel lot has come down to 11% and kiln inlet CO is steady at 380 ppm, so the calciner can take more. Adding 0.7 TPH moves the thermal substitution rate up without touching the kiln side of the heat balance.",
-  drivers:[["AFR lot moisture, 11%",75],["Kiln inlet CO, stable",60],["Calciner residence time",42]],
-  impact:[["TSR","+1.2 %"],["Coal","−0.45 TPH"],["CO risk","Low"]]}
+ {id:"calc_out",name:"Calciner outlet temperature",loc:"Calciner outlet · 423CI400_TT_4",unit:"°C",cur:0,rec:0,dec:1},
+ {id:"calc_coal",name:"Calciner coal firing",loc:"Calciner coal · 467RL400_TPH",unit:"t/h",cur:0,rec:0,dec:2},
+ {id:"lafr_pc",name:"LAFR feed rate PC",loc:"Liquid AFR, precalciner · LAFR_FT",unit:"l/h",cur:0,rec:0,dec:0},
+ {id:"lafr_tad",name:"LAFR feed rate TAD",loc:"Liquid AFR, tertiary air duct · K3V10_F1",unit:"l/h",cur:0,rec:0,dec:0},
+ {id:"safr",name:"SAFR feed rate",loc:"Solid AFR, calciner · 261WF080_TPH",unit:"t/h",cur:0,rec:0,dec:2}
 ];
+PARAMS.forEach(function(p){ p.why=WAIT; p.drivers=[]; p.impact=[]; p.liveOk=false; p.recOk=false; });
 
 var REASONS=[
  "Kiln stability at risk",
@@ -529,6 +511,8 @@ function logEntry(row){
 function loadDecisions(){
   return fetch("/api/decisions",{cache:"no-store"}).then(function(r){return r.json();}).then(function(d){
     var byTag=d.status||{};
+    dayRows=d.rows||[];
+    document.getElementById("dashSub").textContent="Kiln 3 — "+(d.day||"today")+", from 00:00";
     PARAMS.forEach(function(p){
       var s=byTag[TAGS[p.id]], st=state[p.id];
       st.status=s?s.status:"open"; st.reason=s?s.reason:null; st.note=s&&s.note||"";
@@ -555,28 +539,39 @@ function toast(msg,kind){
 }
 
 /* ---------------- band gauge ---------------- */
-var LO=870, HI=885, AX0=858, AX1=897;
+// LO/HI = the band of the CURRENT operating state, exactly what the twin
+// optimiser targets (from /api/twin/advisor). Null until it first answers.
+var LO=null, HI=null, BAND_STATE="";
+function axis(){
+  var pad=Math.max(12,(HI-LO)*0.75);
+  return [Math.floor((LO-pad)/5)*5, Math.ceil((HI+pad)/5)*5];
+}
 function bandGauge(live,pred){
-  var W=760,L=34,R=726,y=58,h=26;
-  function x(t){return L+(t-AX0)/(AX1-AX0)*(R-L);}
+  var svg=document.getElementById("bandSvg");
+  if(LO===null){ svg.innerHTML='<text x="380" y="70" text-anchor="middle" font-family="IBM Plex Sans,sans-serif" font-size="13" fill="#6D7B85">'+esc(WAIT)+'</text>'; return; }
+  var W=760,L=34,R=726,y=58,h=26, ax=axis(), AX0=ax[0], AX1=ax[1];
+  function x(t){return L+(Math.min(Math.max(t,AX0),AX1)-AX0)/(AX1-AX0)*(R-L);}
   var s='';
   s+='<rect x="'+L+'" y="'+y+'" width="'+(R-L)+'" height="'+h+'" rx="3" fill="#232D34"/>';
   s+='<rect x="'+x(LO)+'" y="'+y+'" width="'+(x(HI)-x(LO))+'" height="'+h+'" rx="3" fill="rgba(79,184,138,.22)"/>';
   s+='<line x1="'+x(LO)+'" y1="'+y+'" x2="'+x(LO)+'" y2="'+(y+h)+'" stroke="#4FB88A" stroke-width="1.5"/>';
   s+='<line x1="'+x(HI)+'" y1="'+y+'" x2="'+x(HI)+'" y2="'+(y+h)+'" stroke="#4FB88A" stroke-width="1.5"/>';
-  [860,870,875,880,885,895].forEach(function(t){
+  var step=(AX1-AX0)>60?10:5;
+  for(var t=Math.ceil(AX0/step)*step;t<=AX1;t+=step){
     s+='<line x1="'+x(t)+'" y1="'+(y+h)+'" x2="'+x(t)+'" y2="'+(y+h+5)+'" stroke="#3A464E" stroke-width="1"/>';
     s+='<text x="'+x(t)+'" y="'+(y+h+20)+'" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="11.5" fill="#6D7B85">'+t+'</text>';
-  });
-  // live marker
-  s+='<line x1="'+x(live)+'" y1="'+(y-9)+'" x2="'+x(live)+'" y2="'+(y+h+2)+'" stroke="#EDF4F8" stroke-width="2"/>';
-  s+='<text x="'+x(live)+'" y="'+(y-15)+'" text-anchor="middle" font-family="IBM Plex Sans,sans-serif" font-size="11.5" fill="#C4D0D9">now '+fmt(live,1)+'</text>';
-  // predicted marker
-  var px=x(pred);
-  s+='<path d="M'+px+' '+(y+h+11)+' l7 11 -14 0 Z" fill="#E9A13B"/>';
-  s+='<line x1="'+px+'" y1="'+y+'" x2="'+px+'" y2="'+(y+h)+'" stroke="#E9A13B" stroke-width="2" stroke-dasharray="3 3"/>';
-  s+='<text x="'+px+'" y="'+(y+h+40)+'" text-anchor="middle" font-family="IBM Plex Sans,sans-serif" font-size="11.5" fill="#E9A13B">+'+document.getElementById("predHorizon").textContent+' min '+fmt(pred,1)+'</text>';
-  document.getElementById("bandSvg").innerHTML=s;
+  }
+  if(live!==null){
+    s+='<line x1="'+x(live)+'" y1="'+(y-9)+'" x2="'+x(live)+'" y2="'+(y+h+2)+'" stroke="#EDF4F8" stroke-width="2"/>';
+    s+='<text x="'+x(live)+'" y="'+(y-15)+'" text-anchor="middle" font-family="IBM Plex Sans,sans-serif" font-size="11.5" fill="#C4D0D9">now '+fmt(live,1)+'</text>';
+  }
+  if(pred!==null){
+    var px=x(pred);
+    s+='<path d="M'+px+' '+(y+h+11)+' l7 11 -14 0 Z" fill="#E9A13B"/>';
+    s+='<line x1="'+px+'" y1="'+y+'" x2="'+px+'" y2="'+(y+h)+'" stroke="#E9A13B" stroke-width="2" stroke-dasharray="3 3"/>';
+    s+='<text x="'+px+'" y="'+(y+h+40)+'" text-anchor="middle" font-family="IBM Plex Sans,sans-serif" font-size="11.5" fill="#E9A13B">+'+document.getElementById("predHorizon").textContent+' min '+fmt(pred,1)+'</text>';
+  }
+  svg.innerHTML=s;
 }
 
 /* ---------------- list render ---------------- */
@@ -606,8 +601,9 @@ function rowHTML(p){
   h+='<div class="row__body">';
   h+= '<div class="why"><div><h3>Why the model is suggesting this</h3><p>'+esc(p.why)+'</p>';
   h+=  '<div class="impact">'+p.impact.map(function(i){return '<div>'+esc(i[0])+'<b>'+esc(i[1])+'</b></div>';}).join("")+'</div></div>';
-  h+=  '<div><h3>Strongest signals behind it</h3><div class="drivers">'+p.drivers.map(function(dr){
-         return '<div class="driver"><span>'+esc(dr[0])+'</span><span class="driver__v">'+dr[1]+'%</span><span class="driver__bar"><i style="width:'+dr[1]+'%"></i></span></div>';}).join("")+'</div></div>';
+  h+=  '<div><h3>Strongest signals behind it</h3><div class="drivers">'+(p.drivers.length?p.drivers.map(function(dr){
+         return '<div class="driver"><span>'+esc(dr[0])+'</span><span class="driver__v">'+esc(dr[1])+'</span><span class="driver__bar"><i style="width:'+dr[2]+'%"></i></span></div>';}).join("")
+         :'<div class="driver"><span>—</span></div>')+'</div></div>';
   h+= '</div>';
 
   if(st.status==="open"){
@@ -657,7 +653,7 @@ document.getElementById("list").addEventListener("click",function(ev){
     busy=true;
     postDecision(p,"accepted").then(function(row){
       st.status="accepted"; st.declining=false; st.open=false;
-      log.push(logEntry(row)); render(); paintDash();
+      log.push(logEntry(row)); render(); loadDecisions();
       toast(p.name+" "+fmt(p.rec,p.dec)+" "+p.unit+" accepted — logged to the twin");
     }).catch(function(e){ toast("Not saved: "+e.message,"dec"); })
       .then(function(){ busy=false; });
@@ -675,7 +671,7 @@ document.getElementById("list").addEventListener("click",function(ev){
     busy=true;
     postDecision(p,"declined",picked.value,note).then(function(r){
       st.status="declined"; st.reason=picked.value; st.note=note; st.declining=false; st.open=false;
-      log.push(logEntry(r)); render(); paintDash();
+      log.push(logEntry(r)); render(); loadDecisions();
       toast("Decline saved to the twin database — "+picked.value,"dec");
     }).catch(function(e){ toast("Not saved: "+e.message,"dec"); })
       .then(function(){ busy=false; });
@@ -687,7 +683,7 @@ document.getElementById("list").addEventListener("click",function(ev){
     postDecision(p,"undone").then(function(){
       st.status="open"; st.reason=null; st.note=""; st.open=true;
       for(var i=log.length-1;i>=0;i--){ if(log[i].id===id){ log.splice(i,1); break; } }
-      render(); paintDash(); toast("Undo logged — "+p.name+" is open again");
+      render(); loadDecisions(); toast("Undo logged — "+p.name+" is open again");
     }).catch(function(e){ toast("Not saved: "+e.message,"dec"); })
       .then(function(){ busy=false; });
     return;
@@ -701,106 +697,144 @@ Array.prototype.forEach.call(document.querySelectorAll(".rail__btn"),function(b)
     Array.prototype.forEach.call(document.querySelectorAll(".rail__btn"),function(x){x.classList.toggle("is-active",x===b);});
     document.getElementById("view-recs").hidden=(view!=="recs");
     document.getElementById("view-dash").hidden=(view!=="dash");
-    if(view==="dash") paintDash();
+    if(view==="dash") loadDash();
     window.scrollTo(0,0);
   });
 });
 
-/* ---------------- 12 h history ---------------- */
-var HIST=(function(){
-  var a=[],t=877;
-  for(var i=0;i<144;i++){ t+=(rnd()-0.5)*3.4+(877-t)*0.07; if(i===46)t-=5.5; if(i===47)t-=3.2; if(i===95)t+=6.1; a.push(t); }
-  return a;
-})();
-var MARKS=[18,39,52,71,88,104,121,133];
+/* ---------------- 12 h history (real) ---------------- */
+// Calciner outlet temp, last 12 h in 5-min means (/api/series = historian +
+// live feed), accepted-decision markers from today's decision log, and the
+// hourly prediction error from the shadow log (matured T+5 predictions).
+var HIST=[], ERR=[], dayRows=[], lastTsr=null, lastTsrEst=false;
+function tsText(d){ return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+" "+pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds()); }
+function loadDash(){
+  var end=parseTs(liveTs)||new Date(), start=new Date(end.getTime()-12*3600000);
+  var q="/api/series?tags="+CV+"&bucket=5min&start="+encodeURIComponent(tsText(start))+"&end="+encodeURIComponent(tsText(end));
+  var a=getJSON(q).then(function(s){
+    HIST=(s.points||[]).filter(function(p){return typeof p[CV]==="number";})
+      .map(function(p){return {t:parseTs(p.ts),v:p[CV]};}).filter(function(p){return p.t;});
+  }).catch(function(){ HIST=[]; });
+  var b=getJSON("/api/shadow?limit=2000").then(function(sh){
+    var by={};
+    (sh.series||[]).forEach(function(r){
+      var t=parseTs(r.ts);
+      if(!t||!r.matured||typeof r.pred_mean!=="number"||typeof r.actual_future!=="number") return;
+      if(t<start) return;
+      var k=t.getFullYear()*1e6+t.getMonth()*1e4+t.getDate()*100+t.getHours();
+      (by[k]=by[k]||{h:t.getHours(),k:k,s:0,a:0,n:0});
+      by[k].s+=r.pred_mean-r.actual_future; by[k].a+=Math.abs(r.pred_mean-r.actual_future); by[k].n++;
+    });
+    ERR=Object.keys(by).map(function(k){return by[k];}).sort(function(x,y){return x.k-y.k;})
+      .map(function(e){return {h:e.h,v:e.s/e.n,mae:e.a/e.n,n:e.n};});
+  }).catch(function(){ ERR=[]; });
+  return Promise.all([a,b]).then(paintDash);
+}
 
 function trendChart(){
-  var W=900,H=250,L=48,R=886,T=16,B=214;
-  var mn=858,mx=896;
-  function x(i){return L+i/(HIST.length-1)*(R-L);}
+  var W=900,H=250,L=48,R=886,T=16,B=214, svg=document.getElementById("trendSvg");
+  document.getElementById("trendBand").textContent=LO===null?"—":fmt(LO,0)+"–"+fmt(HI,0)+" °C"+(BAND_STATE?" ("+BAND_STATE+")":"");
+  if(HIST.length<2){
+    svg.innerHTML='<text x="450" y="120" text-anchor="middle" font-family="IBM Plex Sans,sans-serif" font-size="13" fill="#6D7B85">No calciner temperature history for the last 12 h yet.</text>';
+    document.getElementById("bandPct").textContent="—";
+    return null;
+  }
+  var vs=HIST.map(function(p){return p.v;}).concat(LO===null?[]:[LO,HI]);
+  var mn=Math.floor((Math.min.apply(null,vs)-3)/10)*10, mx=Math.ceil((Math.max.apply(null,vs)+3)/10)*10;
+  var t0=HIST[0].t.getTime(), t1=HIST[HIST.length-1].t.getTime();
+  function x(t){return L+(t-t0)/Math.max(t1-t0,1)*(R-L);}
   function y(v){return B-(v-mn)/(mx-mn)*(B-T);}
   var s='';
-  s+='<rect x="'+L+'" y="'+y(HI)+'" width="'+(R-L)+'" height="'+(y(LO)-y(HI))+'" fill="rgba(79,184,138,.13)"/>';
-  [HI,LO].forEach(function(v){ s+='<line x1="'+L+'" y1="'+y(v)+'" x2="'+R+'" y2="'+y(v)+'" stroke="#4FB88A" stroke-width="1" stroke-dasharray="4 4" opacity=".75"/>'; });
-  [860,870,880,890].forEach(function(v){
+  if(LO!==null){
+    s+='<rect x="'+L+'" y="'+y(HI)+'" width="'+(R-L)+'" height="'+(y(LO)-y(HI))+'" fill="rgba(79,184,138,.13)"/>';
+    [HI,LO].forEach(function(v){ s+='<line x1="'+L+'" y1="'+y(v)+'" x2="'+R+'" y2="'+y(v)+'" stroke="#4FB88A" stroke-width="1" stroke-dasharray="4 4" opacity=".75"/>'; });
+  }
+  var step=(mx-mn)>60?20:10;
+  for(var v=mn;v<=mx;v+=step){
     s+='<line x1="'+L+'" y1="'+y(v)+'" x2="'+R+'" y2="'+y(v)+'" stroke="#273239" stroke-width="1"/>';
     s+='<text x="'+(L-9)+'" y="'+(y(v)+4)+'" text-anchor="end" font-family="IBM Plex Mono,monospace" font-size="11" fill="#6D7B85">'+v+'</text>';
-  });
-  var d="";
-  HIST.forEach(function(v,i){ d+=(i?"L":"M")+x(i).toFixed(1)+" "+y(v).toFixed(1)+" "; });
-  s+='<path d="'+d+'" fill="none" stroke="#E9A13B" stroke-width="1.8" stroke-linejoin="round"/>';
-  MARKS.forEach(function(i){ s+='<circle cx="'+x(i)+'" cy="'+y(HIST[i])+'" r="3.6" fill="#11161A" stroke="#5E9CD3" stroke-width="2"/>'; });
-  for(var k=0;k<=6;k++){
-    var i=Math.round(k*(HIST.length-1)/6);
-    var hr=(new Date().getHours()-12+Math.round(k*2)+24)%24;
-    s+='<text x="'+x(i)+'" y="'+(B+22)+'" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="11" fill="#6D7B85">'+pad(hr)+':00</text>';
   }
-  document.getElementById("trendSvg").innerHTML=s;
-  var inband=HIST.filter(function(v){return v>=LO&&v<=HI;}).length/HIST.length*100;
-  document.getElementById("bandPct").textContent=inband.toFixed(1)+"% of the window inside band";
+  var d="";
+  HIST.forEach(function(p,i){ d+=(i?"L":"M")+x(p.t.getTime()).toFixed(1)+" "+y(p.v).toFixed(1)+" "; });
+  s+='<path d="'+d+'" fill="none" stroke="#E9A13B" stroke-width="1.8" stroke-linejoin="round"/>';
+  // accepted recommendations today, placed on the trend at their decision time
+  dayRows.filter(function(r){return r.action==="accepted";}).forEach(function(r){
+    var t=parseTs(r.decided_at); if(!t) return; t=t.getTime(); if(t<t0||t>t1) return;
+    var near=HIST.reduce(function(b,p){return Math.abs(p.t.getTime()-t)<Math.abs(b.t.getTime()-t)?p:b;});
+    s+='<circle cx="'+x(t)+'" cy="'+y(near.v)+'" r="3.6" fill="#11161A" stroke="#5E9CD3" stroke-width="2"/>';
+  });
+  for(var k=0;k<=6;k++){
+    var tk=t0+k*(t1-t0)/6, dk=new Date(tk);
+    s+='<text x="'+x(tk)+'" y="'+(B+22)+'" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="11" fill="#6D7B85">'+pad(dk.getHours())+':'+pad(dk.getMinutes())+'</text>';
+  }
+  svg.innerHTML=s;
+  if(LO===null){ document.getElementById("bandPct").textContent="band not known yet"; return null; }
+  var inband=HIST.filter(function(p){return p.v>=LO&&p.v<=HI;}).length/HIST.length*100;
+  document.getElementById("bandPct").textContent=inband.toFixed(1)+"% of the last 12 h inside the current band";
   return inband;
 }
 
 function errChart(){
-  var W=440,H=210,L=34,R=426,MID=112;
-  var vals=[]; for(var i=0;i<12;i++) vals.push((rnd()-0.48)*6.4);
-  var bw=(R-L)/vals.length;
+  var W=440,H=210,L=34,R=426,MID=112, svg=document.getElementById("errSvg");
+  if(!ERR.length){
+    svg.innerHTML='<text x="220" y="105" text-anchor="middle" font-family="IBM Plex Sans,sans-serif" font-size="12.5" fill="#6D7B85">No matured predictions yet — the shadow runner logs them.</text>';
+    document.getElementById("errSub").textContent="Predicted minus actual, °C";
+    return null;
+  }
+  var vals=ERR.slice(-12), lim=Math.max(6,Math.ceil(Math.max.apply(null,vals.map(function(e){return Math.abs(e.v);}))));
+  var sc=(MID-16)/lim, bw=(R-L)/vals.length;
   var s='<line x1="'+L+'" y1="'+MID+'" x2="'+R+'" y2="'+MID+'" stroke="#3A464E" stroke-width="1"/>';
-  [3,-3].forEach(function(v){ s+='<line x1="'+L+'" y1="'+(MID-v*13)+'" x2="'+R+'" y2="'+(MID-v*13)+'" stroke="#273239" stroke-dasharray="3 3"/>';
-    s+='<text x="'+(L-6)+'" y="'+(MID-v*13+4)+'" text-anchor="end" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="#6D7B85">'+(v>0?"+":"")+v+'</text>';});
-  vals.forEach(function(v,i){
-    var h=Math.abs(v)*13, top=v>0?MID-h:MID;
-    s+='<rect x="'+(L+i*bw+bw*0.22)+'" y="'+top+'" width="'+(bw*0.56)+'" height="'+Math.max(h,1.5)+'" rx="1.5" fill="'+(Math.abs(v)>3?"#D9604F":"#5E9CD3")+'"/>';
-    var hr=(new Date().getHours()-11+i+24)%24;
-    s+='<text x="'+(L+i*bw+bw/2)+'" y="'+(H-12)+'" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="10" fill="#6D7B85">'+pad(hr)+'</text>';
+  [3,-3].forEach(function(v){ s+='<line x1="'+L+'" y1="'+(MID-v*sc)+'" x2="'+R+'" y2="'+(MID-v*sc)+'" stroke="#273239" stroke-dasharray="3 3"/>';
+    s+='<text x="'+(L-6)+'" y="'+(MID-v*sc+4)+'" text-anchor="end" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="#6D7B85">'+(v>0?"+":"")+v+'</text>';});
+  vals.forEach(function(e,i){
+    var h=Math.abs(e.v)*sc, top=e.v>0?MID-h:MID;
+    s+='<rect x="'+(L+i*bw+bw*0.22)+'" y="'+top+'" width="'+(bw*0.56)+'" height="'+Math.max(h,1.5)+'" rx="1.5" fill="'+(Math.abs(e.v)>3?"#D9604F":"#5E9CD3")+'"><title>'+pad(e.h)+':00 · bias '+fmt(e.v,1)+' °C · MAE '+fmt(e.mae,1)+' °C · '+e.n+' predictions</title></rect>';
+    s+='<text x="'+(L+i*bw+bw/2)+'" y="'+(H-12)+'" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="10" fill="#6D7B85">'+pad(e.h)+'</text>';
   });
-  var mae=vals.reduce(function(a,b){return a+Math.abs(b);},0)/vals.length;
-  document.getElementById("errSvg").innerHTML=s;
-  return mae;
+  svg.innerHTML=s;
+  var n=vals.reduce(function(a,e){return a+e.n;},0);
+  document.getElementById("errSub").textContent="Predicted minus actual, °C · T+5 · "+n+" predictions";
+  return vals.reduce(function(a,e){return a+e.mae*e.n;},0)/n;
 }
 
 /* ---------------- dashboard ---------------- */
-var BASE={issued:42,accepted:28,declined:7};
 function paintDash(){
-  var acc=log.filter(function(e){return e.action==="Accepted";}).length;
-  var dec=log.filter(function(e){return e.action==="Declined";}).length;
-  var A=BASE.accepted+acc, D=BASE.declined+dec, I=BASE.issued+acc+dec;
-  var rate=I?Math.round(A/(A+D)*100):0;
+  var A=dayRows.filter(function(r){return r.action==="accepted";}).length;
+  var D=dayRows.filter(function(r){return r.action==="declined";}).length;
+  var U=dayRows.filter(function(r){return r.action==="undone";}).length;
+  var rate=(A+D)?Math.round(A/(A+D)*100)+"% of those actioned":"no decisions yet";
   var inband=trendChart();
   var mae=errChart();
 
   document.getElementById("stats").innerHTML=[
-    ["Recommendations issued",I,"","since 06:00",""],
-    ["Accepted",A,"",rate+"% of those actioned","up"],
+    ["Decisions logged",A+D+U,"","today, incl. "+U+" undone",""],
+    ["Accepted",A,"",rate,A?"up":""],
     ["Declined",D,"","reasons captured for retraining",""],
-    ["Time inside band",inband.toFixed(1),"%","target 90%",inband>=90?"up":"down"],
-    ["Mean prediction error",mae.toFixed(1),"°C","12-hour rolling",""],
-    ["Thermal substitution",(18.6+acc*0.3).toFixed(1),"%","shift target 20%",acc?"up":""]
+    ["Time inside band",inband===null?"—":inband.toFixed(1),inband===null?"":"%","last 12 h, current state band",""],
+    ["Mean prediction error",mae===null?"—":mae.toFixed(1),mae===null?"":"°C","T+5, last 12 h (shadow log)",""],
+    ["Thermal substitution",lastTsr===null?"—":lastTsr.toFixed(1),lastTsr===null?"":"%",lastTsrEst?"now · estimated calorific values":"now",""]
   ].map(function(s){
     return '<div class="stat"><div class="stat__k">'+s[0]+'</div><div class="stat__v num">'+s[1]+
            (s[2]?'<small> '+s[2]+'</small>':'')+'</div><div class="stat__d '+s[4]+'">'+s[3]+'</div></div>';
   }).join("");
 
-  // per-parameter handling
-  var seedA=[4,6,3,5,7,2,5,3,4];
-  document.getElementById("paramBars").innerHTML=PARAMS.map(function(p,i){
-    var st=state[p.id];
-    var a=seedA[i]+(st.status==="accepted"?1:0);
-    var d=(i%3===0?2:1)+(st.status==="declined"?1:0);
-    var o=st.status==="open"?1:0;
-    var tot=a+d+o;
-    return '<div><div class="hbar__t"><span>'+esc(p.name)+'</span><b>'+a+' / '+tot+'</b></div>'+
+  // per-parameter handling, today, from the decision log
+  document.getElementById("paramBars").innerHTML=PARAMS.map(function(p){
+    var rows=dayRows.filter(function(r){return r.tag===TAGS[p.id];});
+    var a=rows.filter(function(r){return r.action==="accepted";}).length;
+    var d=rows.filter(function(r){return r.action==="declined";}).length;
+    var o=state[p.id].status==="open"?1:0;
+    var tot=a+d+o||1;
+    return '<div><div class="hbar__t"><span>'+esc(p.name)+'</span><b>'+a+' / '+(a+d)+'</b></div>'+
       '<div class="hbar__track">'+
       '<i style="width:'+(a/tot*100)+'%;background:var(--green)"></i>'+
       '<i style="width:'+(d/tot*100)+'%;background:var(--red)"></i>'+
       '<i style="width:'+(o/tot*100)+'%;background:var(--panel-3)"></i></div></div>';
   }).join("");
 
-  // decline reasons
+  // decline reasons, today, from the decision log
   var counts={}; REASONS.forEach(function(r){counts[r]=0;});
-  var seedR=[3,2,1,1,0,0];
-  REASONS.forEach(function(r,i){counts[r]=seedR[i];});
-  log.forEach(function(e){ if(e.action==="Declined"&&counts.hasOwnProperty(e.reason)) counts[e.reason]++; });
+  dayRows.forEach(function(r){ if(r.action==="declined"&&counts.hasOwnProperty(r.reason)) counts[r.reason]++; });
   var maxR=Math.max.apply(null,REASONS.map(function(r){return counts[r];}))||1;
   var totR=REASONS.reduce(function(a,r){return a+counts[r];},0);
   document.getElementById("declTotal").textContent=totR+" declines";
@@ -946,6 +980,64 @@ function paintClinker(g){
   el.innerHTML=txt; el.hidden=false;
 }
 
+// "Why" panel of every row, from the twin optimiser's own output: the move,
+// its fuel/TSR effect, band position, interlocks (paragraph); each lever's
+// pull on the predicted temperature from the twin's SHAP attribution
+// (signals); and the headline numbers (impact).
+var SHORT={"467RL400_TPH":"Calciner coal","LAFR_FT":"LAFR PC","K3V10_F1":"LAFR TAD","261WF080_TPH":"SAFR"};
+function explainRows(a,fresh){
+  if(!fresh){
+    PARAMS.forEach(function(p){ p.why="Waiting for a fresh advisory from the twin optimiser…"; p.drivers=[]; p.impact=[]; });
+    return;
+  }
+  var h=a.horizon_min||5, tb=a.target_band||{}, st=a.operating_state||"current state";
+  var pt=a.predicted&&a.predicted.temp&&a.predicted.temp.mean;
+  var band=tb.low!=null?fmt(tb.low,0)+"–"+fmt(tb.high,0)+" °C":"—";
+  var e=a.economics||{}, tsr0=e.baseline&&e.baseline.tsr_pct, tsr1=e.recommended&&e.recommended.tsr_pct;
+  var tsrTxt=(typeof tsr0==="number"&&typeof tsr1==="number")?fmt(tsr0,1)+" → "+fmt(tsr1,1)+" %":"—";
+  var conf=typeof a.band_confidence==="number"?Math.round(a.band_confidence*100)+"%":"—";
+  var pos=typeof pt!=="number"||tb.low==null?"":a.in_band?"inside the "+st+" band ("+band+")"
+    :pt<tb.low?fmt(tb.low-pt,1)+" °C below the "+st+" band ("+band+")":fmt(pt-tb.high,1)+" °C above the "+st+" band ("+band+")";
+  var bad=(a.interlocks||[]).filter(function(i){return i.pass===false;});
+  var safety=bad.length?"Predicted limit risk: "+bad.map(function(i){return i.name+" "+i.rule;}).join(", ")+".":"All predicted O₂/CO limits are met.";
+  var limits=a.all_limits_met===false?" No setting meets every limit — this is the closest option.":"";
+  // signals: every advisor lever's pull on the predicted temperature (°C)
+  var pulls=Object.keys(SHORT).map(function(t){
+    var s=a.sensitivities&&a.sensitivities[t]; return [SHORT[t],s&&typeof s.temp_pull_c==="number"?s.temp_pull_c:null];
+  }).filter(function(x){return x[1]!==null;}).sort(function(x,y){return Math.abs(y[1])-Math.abs(x[1]);});
+  var mx=Math.max.apply(null,pulls.map(function(x){return Math.abs(x[1]);}).concat([0.1]));
+  var drivers=pulls.slice(0,3).map(function(x){
+    return [x[0]+" effect on temp",(x[1]>=0?"+":"")+fmt(x[1],1)+" °C",Math.round(Math.abs(x[1])/mx*100)];
+  });
+  PARAMS.forEach(function(p){
+    var tag=TAGS[p.id];
+    p.drivers=drivers;
+    if(tag===CV){
+      p.why="The twin predicts "+(typeof pt==="number"?fmt(pt,1)+" °C":"—")+" in "+h+" min with the recommended settings, "+pos+". "
+        +(a.in_band?"It holds the band":"It reaches the band in "+(a.reach_min?"~"+a.reach_min+" min":"more than 30 min"))
+        +"; chance of being in band at T+30: "+conf+". "+safety+limits;
+      p.impact=[["Band · "+st,band],["Reach band",a.in_band?"in band":a.reach_min?"~"+a.reach_min+" min":"> 30 min"],["In band at T+30",conf]];
+      return;
+    }
+    var cur=a.live&&a.live[tag]&&a.live[tag].current, rec=a.recommended&&a.recommended[tag];
+    var u=(a.live&&a.live[tag]&&a.live[tag].uom)||p.unit, dp=DEC[tag]||0;
+    if(typeof cur!=="number"||typeof rec!=="number"){ p.why="No live value or recommendation for this lever."; p.impact=[]; return; }
+    var d=rec-cur, lim=(a.lever_limits||{})[tag], span=lim?lim.max-lim.min:0;
+    var hold=span>0&&Math.abs(d)<0.005*span;
+    var move=hold?"Hold "+SHORT[tag]+" near "+fmt(cur,dp)+" "+u+"."
+      :(d>0?"Raise ":"Lower ")+SHORT[tag]+" from "+fmt(cur,dp)+" to "+fmt(rec,dp)+" "+u+" ("+(d>0?"+":"")+fmt(d,dp)+").";
+    var aim;
+    if(tag==="467RL400_TPH") aim=hold?"Coal is already where the optimiser wants it."
+      :d<0?"Least-coal objective: less calciner coal while the temperature stays on course."
+      :"More heat is needed: the calciner is predicted "+(pos||"off target")+".";
+    else aim=hold?"No change needed on this AFR stream."
+      :d>0?"More AFR in place of coal: TSR "+tsrTxt+" (estimated calorific values)."
+      :"Less AFR on this stream to keep the temperature and limits on course; TSR "+tsrTxt+".";
+    p.why=move+" "+aim+" Predicted "+(typeof pt==="number"?fmt(pt,1)+" °C":"—")+" in "+h+" min, "+pos+". "+safety+limits;
+    p.impact=[["Change",hold?"hold":(d>0?"+":"")+fmt(d,dp)+" "+u],["TSR",tsrTxt],["Temp at T+"+h,typeof pt==="number"?fmt(pt,1)+" °C":"—"]];
+  });
+}
+
 function pollAdvisor(){
   getJSON("/api/twin/advisor").then(function(a){
     var live=a.live||{}, rec=a.recommended||{}, h=a.horizon_min||5;
@@ -965,6 +1057,18 @@ function pollAdvisor(){
       p.recOk=fresh&&typeof r==="number";
       if(p.recOk) p.rec=r;
     });
+    explainRows(a,fresh);
+    // the operating band of the current state (what the optimiser targets)
+    var tb=a.target_band||{};
+    if(typeof tb.low==="number"&&typeof tb.high==="number"){
+      LO=tb.low; HI=tb.high; BAND_STATE=a.operating_state||"";
+      document.getElementById("bandVal").textContent=fmt(LO,0)+" – "+fmt(HI,0);
+      document.getElementById("bandState").textContent=BAND_STATE?" · "+BAND_STATE:"";
+    }
+    document.getElementById("confVal").textContent=fresh&&typeof a.band_confidence==="number"
+      ?Math.round(a.band_confidence*100)+"%":"—";
+    var eb=a.economics&&a.economics.baseline;
+    if(eb&&typeof eb.tsr_pct==="number"){ lastTsr=eb.tsr_pct; lastTsrEst=!!eb.is_estimate; }
     if(fresh){
       advMeta="recommended for "+(clockAt(a.ts,h)||"next "+h+" min")
         +" · computed at "+(clockAt(a.ts,0)||"—")+(a.computing?" · updating…":"")
@@ -977,46 +1081,42 @@ function pollAdvisor(){
         :"optimiser unavailable"+(a.error?" — "+a.error:"");
     }
     paintClinker(a.clinker_guard);
+    renderLive();
     // Don't wipe a half-filled decline form; values refresh on the next poll.
     var declining=PARAMS.some(function(p){return state[p.id].declining;});
     if(!declining) render();
   }).catch(function(){
     advMeta="twin optimiser offline";
-    PARAMS.forEach(function(p){ p.recOk=false; });
+    document.getElementById("confVal").textContent="—";
+    PARAMS.forEach(function(p){ p.recOk=false; p.why="Twin optimiser offline."; p.drivers=[]; p.impact=[]; });
     render();
   }).then(function(){ setTimeout(pollAdvisor,15000); });
 }
 
-/* ---------------- live tick ---------------- */
-var live=874.1, pred=876.4;
-function tickLive(){
-  live+=(rnd()-0.5)*1.5+(877-live)*0.06;
-  pred=live+(rnd()-0.42)*4.2;
-  if(pred<863)pred=863; if(pred>893)pred=893;
-  renderLive();
-}
+/* ---------------- hero: live + predicted vs the current band ---------------- */
+// Only real values: twin forecast + live feed. Missing -> "—", never a number.
 function renderLive(){
-  if(twinPred!==null) pred=twinPred;
-  if(twinActual!==null) live=twinActual;
-
-  document.getElementById("predVal").textContent=fmt(pred,1);
-  document.getElementById("liveVal").textContent=twinActual!==null?fmt(live,1)+" °C":"—";
-  document.getElementById("confVal").textContent=(88+Math.round(rnd()*8))+"%";
+  var pred=twinPred, live=twinActual;
+  document.getElementById("predVal").textContent=pred!==null?fmt(pred,1):"—";
+  document.getElementById("liveVal").textContent=live!==null?fmt(live,1)+" °C":"—";
 
   var chip=document.getElementById("bandChip"), trend=document.getElementById("predTrend");
-  if(pred<LO){ chip.className="chip chip--out"; chip.textContent="Heading below band";
-    trend.textContent="Predicted to fall "+fmt(LO-pred,1)+" °C under the lower limit — act on the calciner firing recommendation."; }
+  if(pred===null||LO===null){
+    chip.className="chip"; chip.textContent="—";
+    trend.textContent=pred===null?"Twin forecast not available.":WAIT;
+  }else if(pred<LO){ chip.className="chip chip--out"; chip.textContent="Heading below band";
+    trend.textContent="Predicted to fall "+fmt(LO-pred,1)+" °C under the "+(BAND_STATE||"band")+" lower limit — act on the calciner firing recommendation."; }
   else if(pred>HI){ chip.className="chip chip--out"; chip.textContent="Heading above band";
-    trend.textContent="Predicted to run "+fmt(pred-HI,1)+" °C over the upper limit — ease calciner fuel or lift feed."; }
+    trend.textContent="Predicted to run "+fmt(pred-HI,1)+" °C over the "+(BAND_STATE||"band")+" upper limit — ease calciner fuel."; }
   else { chip.className="chip chip--in"; chip.textContent="Inside band";
-    trend.textContent="Holding "+fmt(pred-LO,1)+" °C above the lower limit with the changes below applied."; }
+    trend.textContent="Holding "+fmt(pred-LO,1)+" °C above the "+(BAND_STATE||"band")+" lower limit at current settings."; }
 
   bandGauge(live,pred);
 }
 
-render(); bandGauge(live,pred); tickLive(); paintDash();
-setInterval(tickLive,4000);
-pollLive(); pollTwin(); pollAdvisor(); loadDecisions();
+render(); renderLive(); paintDash();
+pollLive(); pollTwin(); pollAdvisor(); loadDecisions(); loadDash();
+setInterval(function(){ if(view==="dash") loadDash(); },60000);
 })();
 </script>
 </body>
