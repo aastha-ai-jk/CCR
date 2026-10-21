@@ -364,9 +364,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
           <div class="hero__trend" id="predTrend">Holding steady inside the operating band</div>
           <div class="hero__foot">
             <div>Live reading<b class="num" id="liveVal">874.1 °C</b></div>
-            <div>Band<span id="bandState"></span><b class="num" id="bandVal">—</b></div>
-            <div>Confidence<b class="num" id="confVal">92%</b></div>
-          </div>
+            <div>Band<span id="bandState"></span><b class="num" id="bandVal">—</b></div>          </div>
         </div>
         <div class="hero__band">
           <div class="hero__bandtop">
@@ -845,7 +843,7 @@ function paintDash(){
 // Live from the twin: the t+5 calciner forecast (hero), the actual calciner
 // temp, and every parameter row's Current (live plant value) + Recommended
 // (twin optimiser setpoint for the next 5 min). The why/driver/impact text,
-// confidence and the shift dashboard stay mock. If the API is unreachable the
+// and the shift dashboard stay mock. If the API is unreachable the
 // page keeps its mock values and says so.
 var CV="423CI400_TT_4";
 var TAGS={calc_out:CV,ph_fan:"423FN010_ST",kiln_spd:"433MD140_ST1",kiln_coal:"467RL300_TPH",
@@ -1028,8 +1026,6 @@ function renderLive(){
 
   document.getElementById("predVal").textContent=fmt(pred,1);
   document.getElementById("liveVal").textContent=twinActual!==null?fmt(live,1)+" °C":"—";
-  document.getElementById("confVal").textContent=(88+Math.round(rnd()*8))+"%";
-
   var chip=document.getElementById("bandChip"), trend=document.getElementById("predTrend");
   var st=BAND_STATE?BAND_STATE+" ":"";
   if(LO===null){ chip.className="chip"; chip.textContent="—";
