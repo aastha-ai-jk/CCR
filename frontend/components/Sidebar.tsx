@@ -1,16 +1,12 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, Map, Database, GitCompare, SlidersHorizontal, Factory, Trophy, ShieldCheck } from "lucide-react";
+import { Activity, SlidersHorizontal, Factory, ShieldCheck } from "lucide-react";
 
 const NAV = [
   { href: "/", label: "Live Overview", icon: Activity },
   { href: "/twin", label: "Digital Twin", icon: Factory },
-  { href: "/roadmap", label: "Roadmap", icon: Map },
-  { href: "/explorer", label: "Data Explorer", icon: Database },
-  { href: "/correlation", label: "Correlation Studio", icon: GitCompare },
   { href: "/simulator", label: "Twin Simulator", icon: SlidersHorizontal },
-  { href: "/bench", label: "Model Bench", icon: Trophy },
   { href: "/admin", label: "Admin Dashboard", icon: ShieldCheck },
 ];
 
