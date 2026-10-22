@@ -456,11 +456,11 @@ function rnd(){seed=(seed*1664525+1013904223)%4294967296;return seed/4294967296;
 
 /* ---------------- parameters ---------------- */
 var PARAMS=[
- {id:"calc_out",name:"Calciner outlet temperature",loc:"Cyclone 5 outlet, TI-5312",unit:"°C",cur:872.6,rec:878.0,dec:1,impact:[]},
- {id:"calc_coal",name:"Calciner coal firing",loc:"Calciner firing 345-CF2",unit:"TPH",cur:18.4,rec:19.1,dec:1,impact:[]},
- {id:"lafr_pc",name:"LAFR feed rate PC",loc:"Liquid AFR, precalciner",unit:"TPH",cur:4.2,rec:5.0,dec:1,impact:[]},
- {id:"lafr_tad",name:"LAFR feed rate TAD",loc:"Liquid AFR, tertiary air duct",unit:"TPH",cur:1.8,rec:1.5,dec:2,impact:[]},
- {id:"safr",name:"SAFR feed rate",loc:"Solid AFR, calciner line",unit:"TPH",cur:6.5,rec:7.2,dec:1,impact:[]}
+ {id:"calc_out",name:"Calciner outlet temperature",loc:"Calciner outlet · 423CI400_TT_4",unit:"°C",cur:872.6,rec:878.0,dec:1,impact:[]},
+ {id:"calc_coal",name:"Calciner coal firing",loc:"Calciner coal feeder · 467RL400_TPH",unit:"TPH",cur:18.4,rec:19.1,dec:1,impact:[]},
+ {id:"lafr_pc",name:"LAFR feed rate PC",loc:"Liquid AFR, precalciner · LAFR_FT",unit:"TPH",cur:4.2,rec:5.0,dec:1,impact:[]},
+ {id:"lafr_tad",name:"LAFR feed rate TAD",loc:"Liquid AFR, tertiary air duct · K3V10_F1",unit:"TPH",cur:1.8,rec:1.5,dec:2,impact:[]},
+ {id:"safr",name:"SAFR feed rate",loc:"Solid AFR, calciner · 261WF080_TPH",unit:"TPH",cur:6.5,rec:7.2,dec:1,impact:[]}
 ];
 
 var WHY_WAIT="Waiting for a fresh advisory from the twin optimiser…";
