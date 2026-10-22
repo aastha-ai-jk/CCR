@@ -185,15 +185,10 @@ main{display:flex;flex-direction:column;min-width:0;}
 /* expanded body */
 .row__body{border-top:1px solid var(--line-soft);padding:16px 18px 16px 15px;display:none;}
 .row.is-open .row__body{display:block;}
-.why{display:grid;grid-template-columns:1fr 250px;gap:26px;}
+.why{display:block;}
 .why h3{margin:0 0 6px;font-size:12.5px;font-weight:600;color:var(--ink-dim);}
 .why p{margin:0;font-size:14px;line-height:1.62;color:var(--ink);max-width:66ch;}
 .whysrc{margin-left:6px;padding:1px 7px;border:1px solid var(--line);border-radius:999px;font-size:11px;font-weight:500;color:var(--ink-dim);}
-.drivers{display:flex;flex-direction:column;gap:7px;}
-.driver{display:grid;grid-template-columns:1fr 62px;align-items:center;gap:10px;font-size:12.5px;color:var(--ink-dim);}
-.driver__bar{height:5px;background:var(--panel-3);border-radius:3px;overflow:hidden;grid-column:1/-1;}
-.driver__bar i{display:block;height:100%;background:var(--violet);border-radius:3px;}
-.driver__v{font-family:var(--mono);text-align:right;color:var(--ink);}
 .impact{display:flex;gap:26px;margin-top:15px;padding-top:13px;border-top:1px solid var(--line-soft);}
 .impact div{font-size:11.5px;color:var(--ink-faint);}
 .impact b{display:block;font-family:var(--mono);font-size:14px;color:var(--ink);font-weight:500;margin-top:2px;}
@@ -462,23 +457,18 @@ function rnd(){seed=(seed*1664525+1013904223)%4294967296;return seed/4294967296;
 /* ---------------- parameters ---------------- */
 var PARAMS=[
  {id:"calc_out",name:"Calciner outlet temperature",loc:"Cyclone 5 outlet, TI-5312",unit:"°C",cur:872.6,rec:878.0,dec:1,
-  drivers:[["AFR heat share, rising",78],["Hotmeal calcination trend",61],["Cyclone 5 outlet gas temp",44]],
   impact:[["Calcination","+0.6 %"],["Free lime","−0.08 %"],["Band risk","Low"]]},
 
  {id:"calc_coal",name:"Calciner coal firing",loc:"Calciner firing 345-CF2",unit:"TPH",cur:18.4,rec:19.1,dec:1,
-  drivers:[["AFR calorific value gap",88],["Calciner outlet setpoint move",67],["Hotmeal calcination",46]],
   impact:[["Calciner outlet","+5.4 °C"],["Heat rate","+7 kcal/kg"],["Recovery","12 min"]]},
 
  {id:"lafr_pc",name:"LAFR feed rate PC",loc:"Liquid AFR, precalciner",unit:"TPH",cur:4.2,rec:5.0,dec:1,
-  drivers:[["PC thermal headroom",73],["Liquid line pressure, stable",55],["TSR target gap",49]],
   impact:[["TSR","18.6 → 20.1 %"],["Petcoke","−0.6 TPH"],["Fuel cost","−₹ 6.4 k/h"]]},
 
  {id:"lafr_tad",name:"LAFR feed rate TAD",loc:"Liquid AFR, tertiary air duct",unit:"TPH",cur:1.8,rec:1.5,dec:2,
-  drivers:[["TAD nozzle backpressure",81],["Riser CO, short-term trend",58],["TAD air temperature",31]],
   impact:[["Riser CO risk","Reduced"],["TSR","−0.5 %"],["Burnout","Improved"]]},
 
  {id:"safr",name:"SAFR feed rate",loc:"Solid AFR, calciner line",unit:"TPH",cur:6.5,rec:7.2,dec:1,
-  drivers:[["AFR lot moisture, 11%",75],["Kiln inlet CO, stable",60],["Calciner residence time",42]],
   impact:[["TSR","+1.2 %"],["Coal","−0.45 TPH"],["CO risk","Low"]]}
 ];
 
@@ -617,8 +607,6 @@ function rowHTML(p){
   h+='<div class="row__body">';
   h+= '<div class="why"><div><h3>Why the model is suggesting this'+(p.whySrc?' <span class="whysrc">'+esc(p.whySrc)+'</span>':'')+'</h3><p>'+esc(p.why||WHY_WAIT)+'</p>';
   h+=  '<div class="impact">'+p.impact.map(function(i){return '<div>'+esc(i[0])+'<b>'+esc(i[1])+'</b></div>';}).join("")+'</div></div>';
-  h+=  '<div><h3>Strongest signals behind it</h3><div class="drivers">'+p.drivers.map(function(dr){
-         return '<div class="driver"><span>'+esc(dr[0])+'</span><span class="driver__v">'+dr[1]+'%</span><span class="driver__bar"><i style="width:'+dr[1]+'%"></i></span></div>';}).join("")+'</div></div>';
   h+= '</div>';
 
   if(st.status==="open"){
@@ -844,7 +832,7 @@ function paintDash(){
 /* ---------------- digital twin (same-origin backend) ---------------- */
 // Live from the twin: the t+5 calciner forecast (hero), the actual calciner
 // temp, and every parameter row's Current (live plant value) + Recommended
-// (twin optimiser setpoint for the next 5 min). The why/driver/impact text,
+// (twin optimiser setpoint for the next 5 min). The why text comes from the backend; the impact text
 // and the shift dashboard stay mock. If the API is unreachable the
 // page keeps its mock values and says so.
 var CV="423CI400_TT_4";
