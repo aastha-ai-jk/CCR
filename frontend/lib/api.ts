@@ -125,6 +125,21 @@ export interface OperatorDecision {
   live_temp: number | null; predicted_temp: number | null;
   operating_state: string | null; band_lo: number | null; band_hi: number | null;
 }
+export interface DeclinedReachedRow {
+  id: number; decided_at: string; operator: string | null; param_id: string | null;
+  tag: string; param_name: string | null; unit: string | null;
+  reason: string | null; note: string | null; operating_state: string | null;
+  current_value: number | null; recommended_value: number;
+  status: "reached" | "not_reached" | "pending" | "no_data";
+  tolerance: number; reached_at?: string; reached_value?: number;
+  minutes_after?: number; closest_value?: number | null;
+}
+export interface DeclinedReachedResult {
+  day: string; tolerance_pct: number; window_min: number; declines: number;
+  counts: { reached: number; not_reached: number; pending: number; no_data: number };
+  rows: DeclinedReachedRow[];
+}
+
 export interface DecisionsResult {
   day: string; n: number;
   counts: { accepted: number; declined: number; undone: number };
@@ -188,6 +203,9 @@ export const api = {
   shadow: (limit = 240) => get<ShadowResult>(`/api/shadow?limit=${limit}`),
   bench: () => get<BenchResult>("/api/bench"),
   twinFuture: () => get<TwinFuture>("/api/twin/future"),
+  declinedReached: (day?: string) =>
+    get<DeclinedReachedResult>(`/api/admin/declined-reached${day ? `?day=${encodeURIComponent(day)}` : ""}`),
+  decisionDays: () => get<{ day: string; n: number; accepted: number; declined: number }[]>("/api/decisions/days"),
   decisions: (day?: string) =>
     get<DecisionsResult>(`/api/decisions${day ? `?day=${encodeURIComponent(day)}` : ""}`),
   twinBacktest: (p: { start?: string; end?: string; max_points?: number } = {}) => {

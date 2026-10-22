@@ -258,6 +258,87 @@ def advisory_summary(day: str | None = None) -> dict:
         return {"day": day, "computed": 0, "issued": 0}
 
 
+# Admin view: a DECLINED recommendation the plant reached anyway — the lever's
+# actual value came within MATCH_TOL_PCT % of the recommended value within
+# MATCH_WINDOW_MIN minutes after the decline (advice was right, not followed).
+MATCH_TOL_PCT = 5.0
+MATCH_WINDOW_MIN = 30.0
+
+
+def _lever_series(tag: str, start: dt.datetime, end: dt.datetime) -> pd.Series:
+    """Actual values of one tag in [start, end]: live feed (process_live,
+    'YYYY-MM-DDTHH:MM:SS') first, historian (process_1min) for anything missing."""
+    parts = []
+    for table, fmt in (("process_live", "%Y-%m-%dT%H:%M:%S"),
+                       ("process_1min", "%Y-%m-%d %H:%M:%S")):
+        try:
+            d = db.q(f'SELECT ts, "{tag}" AS v FROM {table} WHERE ts >= :a AND ts <= :b',
+                     {"a": start.strftime(fmt), "b": end.strftime(fmt)})
+        except Exception:
+            continue                                  # table or column absent here
+        if len(d):
+            d["ts"] = pd.to_datetime(d["ts"], format="mixed", errors="coerce")
+            d["v"] = pd.to_numeric(d["v"], errors="coerce")
+            parts.append(d.dropna())
+    if not parts:
+        return pd.Series(dtype=float)
+    s = pd.concat(parts).drop_duplicates("ts").set_index("ts")["v"].sort_index()
+    return s[(s.index >= start) & (s.index <= end)]
+
+
+def match_decline(rec: float, decided_at: dt.datetime, series: pd.Series,
+                  now: dt.datetime, tol_pct: float = MATCH_TOL_PCT,
+                  window_min: float = MATCH_WINDOW_MIN) -> dict:
+    """Did the plant reach rec (± tol_pct %) within window_min after decided_at?
+    status: reached | not_reached | pending (window still open) | no_data."""
+    tol = abs(rec) * tol_pct / 100.0
+    end = decided_at + dt.timedelta(minutes=window_min)
+    inside = series[(series - rec).abs() <= tol] if len(series) else series
+    if len(inside):
+        t, v = inside.index[0], float(inside.iloc[0])
+        return {"status": "reached", "reached_at": t.isoformat(timespec="seconds"),
+                "reached_value": v, "minutes_after": round((t - decided_at).total_seconds() / 60, 1),
+                "tolerance": tol}
+    if now < end:
+        return {"status": "pending", "tolerance": tol}
+    return {"status": "not_reached" if len(series) else "no_data", "tolerance": tol,
+            "closest_value": None if not len(series) else
+            float(series.iloc[(series - rec).abs().argmin()])}
+
+
+def declined_but_reached(day: str | None = None) -> dict:
+    """Every lever decline on one date, each checked against what the plant did
+    afterwards. Declines later undone are left out (the decision was withdrawn)."""
+    import config
+    from twin.optimize import ADVISOR_LEVERS
+    _ensure()
+    day = day or dt.date.today().isoformat()
+    dt.date.fromisoformat(day)
+    adv = config.plant_settings().get("advisor") or {}
+    tol_pct = float(adv.get("decline_match_tol_pct") or MATCH_TOL_PCT)
+    window = float(adv.get("decline_match_window_min") or MATCH_WINDOW_MIN)
+    rows = db.q("SELECT id, decided_at, operator, param_id, tag, param_name, unit, action, "
+                "reason, note, current_value, recommended_value, operating_state "
+                "FROM operator_decisions WHERE day = :d ORDER BY id", {"d": day})
+    now = dt.datetime.now()
+    recs = rows.where(pd.notna(rows), None).to_dict("records") if len(rows) else []
+    out = []
+    for i, r in enumerate(recs):
+        if (r["action"] != "declined" or r["tag"] not in ADVISOR_LEVERS
+                or r["recommended_value"] is None):
+            continue
+        nxt = next((x for x in recs[i + 1:] if x["tag"] == r["tag"]), None)
+        if nxt and nxt["action"] == "undone":
+            continue
+        t0 = dt.datetime.fromisoformat(r["decided_at"])
+        s = _lever_series(r["tag"], t0, t0 + dt.timedelta(minutes=window))
+        out.append({**r, **match_decline(float(r["recommended_value"]), t0, s, now, tol_pct, window)})
+    n = {k: sum(1 for x in out if x["status"] == k)
+         for k in ("reached", "not_reached", "pending", "no_data")}
+    return {"day": day, "tolerance_pct": tol_pct, "window_min": window,
+            "declines": len(out), "counts": n, "rows": out}
+
+
 def days() -> list[dict]:
     """Every date that has decisions, with counts — the date-wise index."""
     _ensure()

@@ -790,6 +790,18 @@ def get_advisor_summary(day: str | None = None):
         raise HTTPException(status_code=422, detail=str(e))
 
 
+@app.get("/api/admin/declined-reached")
+def get_declined_reached(day: str | None = None):
+    """Admin: declined lever recommendations on one date, each checked for whether
+    the plant reached the recommended value (± tolerance) within the window anyway."""
+    from fastapi import HTTPException
+    from backend import decisions
+    try:
+        return _json_safe(decisions.declined_but_reached(day))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
 @app.get("/api/decisions/days")
 def get_decision_days():
     """Date-wise index: every day with decisions and its counts."""
