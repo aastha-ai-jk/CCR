@@ -403,27 +403,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
           </div>
         </div>
 
-        <div class="card">
-          <div class="card__h"><h3>How recommendations were handled</h3><span>Today</span></div>
-          <div class="hbars" id="paramBars"></div>
-          <div class="legend">
-            <span><i style="background:var(--green)"></i>Accepted</span>
-            <span><i style="background:var(--red)"></i>Declined</span>
-            <span><i style="background:var(--panel-3)"></i>Open</span>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card__h"><h3>Why operators declined</h3><span id="declTotal">—</span></div>
-          <div class="hbars" id="declBars"></div>
-        </div>
-
-        <div class="card">
-          <div class="card__h"><h3>Prediction error by hour</h3><span>Predicted minus actual, °C</span></div>
-          <svg viewBox="0 0 440 210" id="errSvg" role="img" aria-label="Model prediction error by hour"></svg>
-        </div>
-
-        <div class="card">
+        <div class="card" style="grid-column:1/-1">
           <div class="card__h"><h3>Decisions this session</h3><span id="logCount">0</span></div>
           <div id="logWrap"><div class="empty">No decisions logged yet. Accept or decline a recommendation to start the trail.</div></div>
         </div>
@@ -450,9 +430,6 @@ function tickClock(){
 }
 tickClock(); setInterval(tickClock,1000);
 
-/* ---------------- seeded noise ---------------- */
-var seed=20260918;
-function rnd(){seed=(seed*1664525+1013904223)%4294967296;return seed/4294967296;}
 
 /* ---------------- parameters ---------------- */
 var PARAMS=[
@@ -764,24 +741,6 @@ function trendChart(){
   return inband;
 }
 
-function errChart(){
-  var W=440,H=210,L=34,R=426,MID=112;
-  var vals=[]; for(var i=0;i<12;i++) vals.push((rnd()-0.48)*6.4);
-  var bw=(R-L)/vals.length;
-  var s='<line x1="'+L+'" y1="'+MID+'" x2="'+R+'" y2="'+MID+'" stroke="#3A464E" stroke-width="1"/>';
-  [3,-3].forEach(function(v){ s+='<line x1="'+L+'" y1="'+(MID-v*13)+'" x2="'+R+'" y2="'+(MID-v*13)+'" stroke="#273239" stroke-dasharray="3 3"/>';
-    s+='<text x="'+(L-6)+'" y="'+(MID-v*13+4)+'" text-anchor="end" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="#6D7B85">'+(v>0?"+":"")+v+'</text>';});
-  vals.forEach(function(v,i){
-    var h=Math.abs(v)*13, top=v>0?MID-h:MID;
-    s+='<rect x="'+(L+i*bw+bw*0.22)+'" y="'+top+'" width="'+(bw*0.56)+'" height="'+Math.max(h,1.5)+'" rx="1.5" fill="'+(Math.abs(v)>3?"#D9604F":"#5E9CD3")+'"/>';
-    var hr=(new Date().getHours()-11+i+24)%24;
-    s+='<text x="'+(L+i*bw+bw/2)+'" y="'+(H-12)+'" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="10" fill="#6D7B85">'+pad(hr)+'</text>';
-  });
-  var mae=vals.reduce(function(a,b){return a+Math.abs(b);},0)/vals.length;
-  document.getElementById("errSvg").innerHTML=s;
-  return mae;
-}
-
 /* ---------------- dashboard ---------------- */
 // Today's totals: new recommendations from advisor_log (/api/advisor/summary),
 // accepts / declines from the decision log (dayRows).
@@ -792,52 +751,20 @@ function loadAdvSummary(){
     .then(function(){ if(view==="dash") paintDash(); });
 }
 function paintDash(){
-  var acc=log.filter(function(e){return e.action==="Accepted";}).length;
   var A=dayRows.filter(function(r){return r.action==="accepted";}).length;
   var D=dayRows.filter(function(r){return r.action==="declined";}).length;
   var U=dayRows.filter(function(r){return r.action==="undone";}).length;
   var rate=(A+D)?Math.round(A/(A+D)*100)+"% of decisions":"no decisions yet";
   var inband=trendChart();
-  var mae=errChart();
 
   document.getElementById("stats").innerHTML=[
     ["Recommendations issued",ADV.issued===null?"—":ADV.issued,"",ADV.issued===null?"today":"today · new advice ("+ADV.computed+" refreshes)",""],
     ["Accepted",A,"",rate,A?"up":""],
     ["Declined",D,"","today"+(U?" · "+U+" undone":"")+" · reasons kept for retraining",""],
-    ["Time inside band",inband===null?"—":inband.toFixed(1),inband===null?"":"%","last 12 h · target 90%",inband===null?"":inband>=90?"up":"down"],
-    ["Mean prediction error",mae.toFixed(1),"°C","12-hour rolling",""],
-    ["Thermal substitution",(18.6+acc*0.3).toFixed(1),"%","shift target 20%",acc?"up":""]
+    ["Time inside band",inband===null?"—":inband.toFixed(1),inband===null?"":"%","last 12 h · target 90%",inband===null?"":inband>=90?"up":"down"]
   ].map(function(s){
     return '<div class="stat"><div class="stat__k">'+s[0]+'</div><div class="stat__v num">'+s[1]+
            (s[2]?'<small> '+s[2]+'</small>':'')+'</div><div class="stat__d '+s[4]+'">'+s[3]+'</div></div>';
-  }).join("");
-
-  // per-parameter handling
-  var seedA=[4,6,3,5,7,2,5,3,4];
-  document.getElementById("paramBars").innerHTML=PARAMS.map(function(p,i){
-    var st=state[p.id];
-    var a=seedA[i]+(st.status==="accepted"?1:0);
-    var d=(i%3===0?2:1)+(st.status==="declined"?1:0);
-    var o=st.status==="open"?1:0;
-    var tot=a+d+o;
-    return '<div><div class="hbar__t"><span>'+esc(p.name)+'</span><b>'+a+' / '+tot+'</b></div>'+
-      '<div class="hbar__track">'+
-      '<i style="width:'+(a/tot*100)+'%;background:var(--green)"></i>'+
-      '<i style="width:'+(d/tot*100)+'%;background:var(--red)"></i>'+
-      '<i style="width:'+(o/tot*100)+'%;background:var(--panel-3)"></i></div></div>';
-  }).join("");
-
-  // decline reasons
-  var counts={}; REASONS.forEach(function(r){counts[r]=0;});
-  var seedR=[3,2,1,1,0,0];
-  REASONS.forEach(function(r,i){counts[r]=seedR[i];});
-  log.forEach(function(e){ if(e.action==="Declined"&&counts.hasOwnProperty(e.reason)) counts[e.reason]++; });
-  var maxR=Math.max.apply(null,REASONS.map(function(r){return counts[r];}))||1;
-  var totR=REASONS.reduce(function(a,r){return a+counts[r];},0);
-  document.getElementById("declTotal").textContent=totR+" declines";
-  document.getElementById("declBars").innerHTML=REASONS.map(function(r){
-    return '<div><div class="hbar__t"><span>'+esc(r)+'</span><b>'+counts[r]+'</b></div>'+
-      '<div class="hbar__track"><i style="width:'+(counts[r]/maxR*100)+'%;background:'+(counts[r]===maxR&&maxR>0?"var(--red)":"#6E4A44")+'"></i></div></div>';
   }).join("");
 
   // decision log
@@ -858,9 +785,8 @@ function paintDash(){
 /* ---------------- digital twin (same-origin backend) ---------------- */
 // Live from the twin: the t+5 calciner forecast (hero), the actual calciner
 // temp, and every parameter row's Current (live plant value) + Recommended
-// (twin optimiser setpoint for the next 5 min). The why text comes from the backend; the impact text
-// and the shift dashboard stay mock. If the API is unreachable the
-// page keeps its mock values and says so.
+// (twin optimiser setpoint for the next 5 min), the why text and impact
+// figures. If the API is unreachable the page shows "—", never a made-up value.
 var CV="423CI400_TT_4";
 var TAGS={calc_out:CV,ph_fan:"423FN010_ST",kiln_spd:"433MD140_ST1",kiln_coal:"467RL300_TPH",
   calc_coal:"467RL400_TPH",kiln_feed:"353RL130_TPH",lafr_pc:"LAFR_FT",lafr_tad:"K3V10_F1",safr:"261WF080_TPH"};
