@@ -192,6 +192,72 @@ def setpoints(values: dict, now: dt.datetime | None = None) -> dict:
     return out
 
 
+# Every advisory the optimiser computes is logged in ``advisor_log``. ``issued``
+# marks a NEW recommendation: some lever moved by more than ISSUE_TOL_FRAC of
+# its range versus the previous one (the screen refreshes every minute, mostly
+# with the same advice — those are not counted as new).
+ISSUE_TOL_FRAC = 0.005
+_ADV_DDL = """
+CREATE TABLE IF NOT EXISTS advisor_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  day TEXT NOT NULL,              -- YYYY-MM-DD, plant-local date of the advisory
+  ts TEXT,                        -- plant snapshot time the advisory was computed from
+  data_source TEXT,               -- opc | edge | replay | historical
+  operating_state TEXT, band_lo REAL, band_hi REAL,
+  predicted_temp REAL,
+  recommended_json TEXT,          -- {tag: value} for the advisor levers
+  issued INTEGER NOT NULL         -- 1 = new recommendation, 0 = same as previous
+)
+"""
+_last_rec: dict = {}
+
+
+def log_advisory(r: dict) -> None:
+    """Record one optimiser result; never raises (logging must not break the advisor)."""
+    global _last_rec
+    try:
+        rec = r.get("recommended") or {}
+        if not rec:
+            return
+        lim = r.get("lever_limits") or {}
+        with db.engine().begin() as con:
+            con.execute(text(_ADV_DDL))
+            con.execute(text("CREATE INDEX IF NOT EXISTS ix_advisor_log_day ON advisor_log(day)"))
+            if not _last_rec:                        # after a restart: compare with the last row
+                last = con.execute(text("SELECT recommended_json FROM advisor_log "
+                                        "ORDER BY id DESC LIMIT 1")).fetchone()
+                _last_rec = json.loads(last[0]) if last and last[0] else {}
+            issued = not _last_rec or any(
+                t not in _last_rec or abs(float(v) - float(_last_rec[t]))
+                > ISSUE_TOL_FRAC * max(float((lim.get(t) or {}).get("max", 0))
+                                       - float((lim.get(t) or {}).get("min", 0)), 1e-9)
+                for t, v in rec.items())
+            tb = r.get("target_band") or {}
+            pt = ((r.get("predicted") or {}).get("temp") or {}).get("mean")
+            con.execute(text(
+                "INSERT INTO advisor_log (day, ts, data_source, operating_state, band_lo, "
+                "band_hi, predicted_temp, recommended_json, issued) VALUES "
+                "(:day, :ts, :src, :st, :lo, :hi, :pt, :rec, :iss)"),
+                {"day": dt.date.today().isoformat(), "ts": r.get("ts"), "src": r.get("source"),
+                 "st": r.get("operating_state"), "lo": tb.get("low"), "hi": tb.get("high"),
+                 "pt": pt, "rec": json.dumps(rec), "iss": int(issued)})
+        _last_rec = dict(rec)
+    except Exception:
+        pass
+
+
+def advisory_summary(day: str | None = None) -> dict:
+    """Advisories computed and NEW recommendations issued on one date (live data only)."""
+    day = day or dt.date.today().isoformat()
+    dt.date.fromisoformat(day)
+    try:
+        d = db.q("SELECT COUNT(*) AS computed, COALESCE(SUM(issued), 0) AS issued "
+                 "FROM advisor_log WHERE day = :d AND data_source != 'historical'", {"d": day})
+        return {"day": day, "computed": int(d["computed"][0]), "issued": int(d["issued"][0])}
+    except Exception:                                # table not created yet
+        return {"day": day, "computed": 0, "issued": 0}
+
+
 def days() -> list[dict]:
     """Every date that has decisions, with counts — the date-wise index."""
     _ensure()

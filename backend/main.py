@@ -395,6 +395,8 @@ def _advisor_run() -> None:
         r["ts"], r["source"] = s["ts"], s["source"]
         from twin import reasoning                # "why" text: template, + LLM when enabled
         reasoning.attach(r)
+        from backend import decisions               # advisor_log: computed / new-recommendation count
+        decisions.log_advisory(r)
         _advisor.update(result=r, computed_at=time.time())
     except Exception as e:                       # never kill the thread silently
         _advisor.update(result={"available": False, "error": repr(e)},
@@ -773,6 +775,17 @@ def get_decisions(day: str | None = None, limit: int = Query(500, ge=1, le=5000)
     from backend import decisions
     try:
         return _json_safe(decisions.list_day(day, limit))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get("/api/advisor/summary")
+def get_advisor_summary(day: str | None = None):
+    """Advisories computed and new recommendations issued on one date (default today)."""
+    from fastapi import HTTPException
+    from backend import decisions
+    try:
+        return _json_safe(decisions.advisory_summary(day))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 

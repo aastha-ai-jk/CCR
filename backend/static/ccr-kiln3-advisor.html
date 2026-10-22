@@ -692,7 +692,7 @@ Array.prototype.forEach.call(document.querySelectorAll(".rail__btn"),function(b)
     Array.prototype.forEach.call(document.querySelectorAll(".rail__btn"),function(x){x.classList.toggle("is-active",x===b);});
     document.getElementById("view-recs").hidden=(view!=="recs");
     document.getElementById("view-dash").hidden=(view!=="dash");
-    if(view==="dash"){ paintDash(); loadTrend(); }
+    if(view==="dash"){ paintDash(); loadTrend(); loadAdvSummary(); }
     window.scrollTo(0,0);
   });
 });
@@ -781,19 +781,27 @@ function errChart(){
 }
 
 /* ---------------- dashboard ---------------- */
-var BASE={issued:42,accepted:28,declined:7};
+// Today's totals: new recommendations from advisor_log (/api/advisor/summary),
+// accepts / declines from the decision log (dayRows).
+var ADV={issued:null,computed:null};
+function loadAdvSummary(){
+  return getJSON("/api/advisor/summary").then(function(s){ ADV=s; })
+    .catch(function(){ ADV={issued:null,computed:null}; })
+    .then(function(){ if(view==="dash") paintDash(); });
+}
 function paintDash(){
   var acc=log.filter(function(e){return e.action==="Accepted";}).length;
-  var dec=log.filter(function(e){return e.action==="Declined";}).length;
-  var A=BASE.accepted+acc, D=BASE.declined+dec, I=BASE.issued+acc+dec;
-  var rate=I?Math.round(A/(A+D)*100):0;
+  var A=dayRows.filter(function(r){return r.action==="accepted";}).length;
+  var D=dayRows.filter(function(r){return r.action==="declined";}).length;
+  var U=dayRows.filter(function(r){return r.action==="undone";}).length;
+  var rate=(A+D)?Math.round(A/(A+D)*100)+"% of decisions":"no decisions yet";
   var inband=trendChart();
   var mae=errChart();
 
   document.getElementById("stats").innerHTML=[
-    ["Recommendations issued",I,"","since 06:00",""],
-    ["Accepted",A,"",rate+"% of those actioned","up"],
-    ["Declined",D,"","reasons captured for retraining",""],
+    ["Recommendations issued",ADV.issued===null?"—":ADV.issued,"",ADV.issued===null?"today":"today · new advice ("+ADV.computed+" refreshes)",""],
+    ["Accepted",A,"",rate,A?"up":""],
+    ["Declined",D,"","today"+(U?" · "+U+" undone":"")+" · reasons kept for retraining",""],
     ["Time inside band",inband===null?"—":inband.toFixed(1),inband===null?"":"%","last 12 h · target 90%",inband===null?"":inband>=90?"up":"down"],
     ["Mean prediction error",mae.toFixed(1),"°C","12-hour rolling",""],
     ["Thermal substitution",(18.6+acc*0.3).toFixed(1),"%","shift target 20%",acc?"up":""]
@@ -1073,6 +1081,7 @@ function renderLive(){
 render(); renderLive(); paintDash();
 pollLive(); pollTwin(); pollAdvisor(); loadDecisions();
 setInterval(function(){ if(view==="dash") loadTrend(); },300000);
+setInterval(function(){ if(view==="dash") loadAdvSummary(); },60000);
 })();
 </script>
 </body>
