@@ -456,20 +456,11 @@ function rnd(){seed=(seed*1664525+1013904223)%4294967296;return seed/4294967296;
 
 /* ---------------- parameters ---------------- */
 var PARAMS=[
- {id:"calc_out",name:"Calciner outlet temperature",loc:"Cyclone 5 outlet, TI-5312",unit:"°C",cur:872.6,rec:878.0,dec:1,
-  impact:[["Calcination","+0.6 %"],["Free lime","−0.08 %"],["Band risk","Low"]]},
-
- {id:"calc_coal",name:"Calciner coal firing",loc:"Calciner firing 345-CF2",unit:"TPH",cur:18.4,rec:19.1,dec:1,
-  impact:[["Calciner outlet","+5.4 °C"],["Heat rate","+7 kcal/kg"],["Recovery","12 min"]]},
-
- {id:"lafr_pc",name:"LAFR feed rate PC",loc:"Liquid AFR, precalciner",unit:"TPH",cur:4.2,rec:5.0,dec:1,
-  impact:[["TSR","18.6 → 20.1 %"],["Petcoke","−0.6 TPH"],["Fuel cost","−₹ 6.4 k/h"]]},
-
- {id:"lafr_tad",name:"LAFR feed rate TAD",loc:"Liquid AFR, tertiary air duct",unit:"TPH",cur:1.8,rec:1.5,dec:2,
-  impact:[["Riser CO risk","Reduced"],["TSR","−0.5 %"],["Burnout","Improved"]]},
-
- {id:"safr",name:"SAFR feed rate",loc:"Solid AFR, calciner line",unit:"TPH",cur:6.5,rec:7.2,dec:1,
-  impact:[["TSR","+1.2 %"],["Coal","−0.45 TPH"],["CO risk","Low"]]}
+ {id:"calc_out",name:"Calciner outlet temperature",loc:"Cyclone 5 outlet, TI-5312",unit:"°C",cur:872.6,rec:878.0,dec:1,impact:[]},
+ {id:"calc_coal",name:"Calciner coal firing",loc:"Calciner firing 345-CF2",unit:"TPH",cur:18.4,rec:19.1,dec:1,impact:[]},
+ {id:"lafr_pc",name:"LAFR feed rate PC",loc:"Liquid AFR, precalciner",unit:"TPH",cur:4.2,rec:5.0,dec:1,impact:[]},
+ {id:"lafr_tad",name:"LAFR feed rate TAD",loc:"Liquid AFR, tertiary air duct",unit:"TPH",cur:1.8,rec:1.5,dec:2,impact:[]},
+ {id:"safr",name:"SAFR feed rate",loc:"Solid AFR, calciner line",unit:"TPH",cur:6.5,rec:7.2,dec:1,impact:[]}
 ];
 
 var WHY_WAIT="Waiting for a fresh advisory from the twin optimiser…";
@@ -952,6 +943,29 @@ function paintClinker(g){
   el.innerHTML=txt; el.hidden=false;
 }
 
+// Impact figures under the "why" text, from the optimiser output (same numbers
+// as the why text: change vs the optimiser's current lever values).
+function impactOf(a,tag){
+  var h=a.horizon_min||5, tb=a.target_band||{};
+  var pt=a.predicted&&a.predicted.temp&&a.predicted.temp.mean;
+  var temp=typeof pt==="number"?fmt(pt,1)+" °C":"—";
+  if(tag===CV){
+    var t30=(a.trajectory||[]).filter(function(t){return t.min===30;})[0];
+    return [["Band"+(a.operating_state?" · "+a.operating_state:""),typeof tb.low==="number"?fmt(tb.low,0)+"–"+fmt(tb.high,0)+" °C":"—"],
+            ["Reaches band",a.in_band?"in band":a.reach_min?"~"+a.reach_min+" min":"> 30 min"],
+            ["T+30 forecast",t30&&typeof t30.mean==="number"?fmt(t30.mean,1)+" °C":"—"]];
+  }
+  var cur=((a.baseline||{}).levers||{})[tag], rec=(a.recommended||{})[tag];
+  var u=(a.live&&a.live[tag]&&a.live[tag].uom)||"", dp=DEC[tag]||0, ch="—";
+  if(typeof cur==="number"&&typeof rec==="number"){
+    var d=rec-cur, lim=(a.lever_limits||{})[tag], span=lim?lim.max-lim.min:0;
+    ch=(span>0&&Math.abs(d)<0.005*span)?"hold":(d>0?"+":"")+fmt(d,dp)+" "+u;
+  }
+  var e=a.economics||{}, t0=e.baseline&&e.baseline.tsr_pct, t1=e.recommended&&e.recommended.tsr_pct;
+  var tsr=typeof t0==="number"&&typeof t1==="number"?fmt(t0,1)+" → "+fmt(t1,1)+" %":"—";
+  return [["Change",ch],["TSR"+(e.recommended&&e.recommended.is_estimate?" (est.)":""),tsr],["Temp at T+"+h,temp]];
+}
+
 function pollAdvisor(){
   getJSON("/api/twin/advisor").then(function(a){
     var live=a.live||{}, rec=a.recommended||{}, h=a.horizon_min||5;
@@ -974,6 +988,7 @@ function pollAdvisor(){
       var rs=a.reasoning, txt=fresh&&rs&&rs.rows?rs.rows[p.id]:null;
       p.why=txt||WHY_WAIT;
       p.whySrc=txt?(rs.source==="ai"?"AI · "+(rs.model||""):"standard"):"";
+      p.impact=fresh?impactOf(a,tag):[];
       if(p.recOk) p.rec=r;
     });
     if(fresh){
@@ -1003,7 +1018,7 @@ function pollAdvisor(){
     if(!declining) render();
   }).catch(function(){
     advMeta="twin optimiser offline";
-    PARAMS.forEach(function(p){ p.recOk=false; p.why=WHY_WAIT; p.whySrc=""; });
+    PARAMS.forEach(function(p){ p.recOk=false; p.why=WHY_WAIT; p.whySrc=""; p.impact=[]; });
     render();
   }).then(function(){ setTimeout(pollAdvisor,15000); });
 }
