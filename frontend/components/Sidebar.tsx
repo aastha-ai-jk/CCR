@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, Map, Database, GitCompare, SlidersHorizontal, Factory, Trophy } from "lucide-react";
+import { Activity, Map, Database, GitCompare, SlidersHorizontal, Factory, Trophy, ShieldCheck } from "lucide-react";
 
 const NAV = [
   { href: "/", label: "Live Overview", icon: Activity },
@@ -11,6 +11,7 @@ const NAV = [
   { href: "/correlation", label: "Correlation Studio", icon: GitCompare },
   { href: "/simulator", label: "Twin Simulator", icon: SlidersHorizontal },
   { href: "/bench", label: "Model Bench", icon: Trophy },
+  { href: "/admin", label: "Admin Dashboard", icon: ShieldCheck },
 ];
 
 export default function Sidebar() {
