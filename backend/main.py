@@ -393,6 +393,8 @@ def _advisor_run() -> None:
                               clinker=_latest_clinker() or {},
                               objective_mode="least_coal")   # plant aim; settings can override
         r["ts"], r["source"] = s["ts"], s["source"]
+        from twin import reasoning                # "why" text: template, + LLM when enabled
+        reasoning.attach(r)
         _advisor.update(result=r, computed_at=time.time())
     except Exception as e:                       # never kill the thread silently
         _advisor.update(result={"available": False, "error": repr(e)},

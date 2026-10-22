@@ -17,5 +17,8 @@ numpy>=1.26
 scipy>=1.13
 scikit-learn>=1.4
 
+# --- Advisor "why" text via LLM (optional; REASONING_PROVIDER=openai) ---
+openai>=3.0
+
 # NOTE: heavy twin-training libs (lightgbm, shap, optuna, torch) live in
 # requirements-ml.txt so the app environment stays light.
