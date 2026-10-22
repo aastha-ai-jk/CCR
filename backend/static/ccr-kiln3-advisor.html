@@ -506,6 +506,7 @@ function logEntry(row){
 function loadDecisions(){
   return fetch("/api/decisions",{cache:"no-store"}).then(function(r){return r.json();}).then(function(d){
     var byTag=d.status||{};
+    dayRows=d.rows||[];
     PARAMS.forEach(function(p){
       var s=byTag[TAGS[p.id]], st=state[p.id];
       st.status=s?s.status:"open"; st.reason=s?s.reason:null; st.note=s&&s.note||"";
@@ -691,49 +692,73 @@ Array.prototype.forEach.call(document.querySelectorAll(".rail__btn"),function(b)
     Array.prototype.forEach.call(document.querySelectorAll(".rail__btn"),function(x){x.classList.toggle("is-active",x===b);});
     document.getElementById("view-recs").hidden=(view!=="recs");
     document.getElementById("view-dash").hidden=(view!=="dash");
-    if(view==="dash") paintDash();
+    if(view==="dash"){ paintDash(); loadTrend(); }
     window.scrollTo(0,0);
   });
 });
 
-/* ---------------- 12 h history ---------------- */
-var HIST=(function(){
-  var a=[],t=877;
-  for(var i=0;i<144;i++){ t+=(rnd()-0.5)*3.4+(877-t)*0.07; if(i===46)t-=5.5; if(i===47)t-=3.2; if(i===95)t+=6.1; a.push(t); }
-  return a;
-})();
-var MARKS=[18,39,52,71,88,104,121,133];
+/* ---------------- 12 h history (real) ---------------- */
+// Calciner outlet temp over the last 12 h in 5-min means from /api/series
+// (historian + live feed). Gaps > 15 min break the line. Blue markers = the
+// times operators accepted a recommendation today (decision log).
+var HIST=[], TREND_T0=null, TREND_T1=null, dayRows=[];
+function tsText(d){ return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+" "+pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds()); }
+function loadTrend(){
+  var end=new Date(), start=new Date(end.getTime()-12*3600000);
+  var q="/api/series?tags="+CV+"&bucket=5min&start="+encodeURIComponent(tsText(start))+"&end="+encodeURIComponent(tsText(end));
+  return getJSON(q).then(function(s){
+    HIST=(s.points||[]).filter(function(p){return typeof p[CV]==="number";})
+      .map(function(p){return {t:parseTs(p.ts),v:p[CV]};}).filter(function(p){return p.t;});
+    TREND_T0=start; TREND_T1=end;
+  }).catch(function(){ HIST=[]; TREND_T0=start; TREND_T1=end; })
+    .then(function(){ if(view==="dash") paintDash(); });
+}
 
 function trendChart(){
-  var W=900,H=250,L=48,R=886,T=16,B=214;
+  var W=900,H=250,L=48,R=886,T=16,B=214, svg=document.getElementById("trendSvg");
   document.getElementById("trendBand").textContent=bandText();
-  var vs=HIST.concat(LO===null?[]:[LO,HI]);
+  if(HIST.length<2){
+    svg.innerHTML='<text x="'+(W/2)+'" y="'+(H/2)+'" text-anchor="middle" font-family="IBM Plex Sans,sans-serif" font-size="13" fill="#6D7B85">'
+      +(TREND_T0?"No calciner temperature data for the last 12 h.":"Loading the last 12 h…")+'</text>';
+    document.getElementById("bandPct").textContent="—";
+    return null;
+  }
+  var vs=HIST.map(function(p){return p.v;}).concat(LO===null?[]:[LO,HI]);
   var mn=Math.floor((Math.min.apply(null,vs)-3)/10)*10, mx=Math.ceil((Math.max.apply(null,vs)+3)/10)*10;
-  function x(i){return L+i/(HIST.length-1)*(R-L);}
+  var t0=TREND_T0.getTime(), t1=TREND_T1.getTime();
+  function x(t){return L+(t-t0)/(t1-t0)*(R-L);}
   function y(v){return B-(v-mn)/(mx-mn)*(B-T);}
   var s='';
   if(LO!==null){
     s+='<rect x="'+L+'" y="'+y(HI)+'" width="'+(R-L)+'" height="'+(y(LO)-y(HI))+'" fill="rgba(79,184,138,.13)"/>';
     [HI,LO].forEach(function(v){ s+='<line x1="'+L+'" y1="'+y(v)+'" x2="'+R+'" y2="'+y(v)+'" stroke="#4FB88A" stroke-width="1" stroke-dasharray="4 4" opacity=".75"/>'; });
   }
-  var gl=[]; for(var g=mn;g<=mx;g+=10) gl.push(g);
-  gl.forEach(function(v){
-    s+='<line x1="'+L+'" y1="'+y(v)+'" x2="'+R+'" y2="'+y(v)+'" stroke="#273239" stroke-width="1"/>';
-    s+='<text x="'+(L-9)+'" y="'+(y(v)+4)+'" text-anchor="end" font-family="IBM Plex Mono,monospace" font-size="11" fill="#6D7B85">'+v+'</text>';
-  });
-  var d="";
-  HIST.forEach(function(v,i){ d+=(i?"L":"M")+x(i).toFixed(1)+" "+y(v).toFixed(1)+" "; });
-  s+='<path d="'+d+'" fill="none" stroke="#E9A13B" stroke-width="1.8" stroke-linejoin="round"/>';
-  MARKS.forEach(function(i){ s+='<circle cx="'+x(i)+'" cy="'+y(HIST[i])+'" r="3.6" fill="#11161A" stroke="#5E9CD3" stroke-width="2"/>'; });
-  for(var k=0;k<=6;k++){
-    var i=Math.round(k*(HIST.length-1)/6);
-    var hr=(new Date().getHours()-12+Math.round(k*2)+24)%24;
-    s+='<text x="'+x(i)+'" y="'+(B+22)+'" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="11" fill="#6D7B85">'+pad(hr)+':00</text>';
+  var step=(mx-mn)>60?20:10;
+  for(var g=mn;g<=mx;g+=step){
+    s+='<line x1="'+L+'" y1="'+y(g)+'" x2="'+R+'" y2="'+y(g)+'" stroke="#273239" stroke-width="1"/>';
+    s+='<text x="'+(L-9)+'" y="'+(y(g)+4)+'" text-anchor="end" font-family="IBM Plex Mono,monospace" font-size="11" fill="#6D7B85">'+g+'</text>';
   }
-  document.getElementById("trendSvg").innerHTML=s;
-  if(LO===null){ document.getElementById("bandPct").textContent="band not known yet"; return 0; }
-  var inband=HIST.filter(function(v){return v>=LO&&v<=HI;}).length/HIST.length*100;
-  document.getElementById("bandPct").textContent=inband.toFixed(1)+"% of the window inside band";
+  var d="", prev=null;
+  HIST.forEach(function(p){
+    var tt=p.t.getTime(), gap=prev===null||tt-prev>15*60000;
+    d+=(gap?"M":"L")+x(tt).toFixed(1)+" "+y(p.v).toFixed(1)+" "; prev=tt;
+  });
+  s+='<path d="'+d+'" fill="none" stroke="#E9A13B" stroke-width="1.8" stroke-linejoin="round"/>';
+  dayRows.filter(function(r){return r.action==="accepted";}).forEach(function(r){
+    var t=parseTs(r.decided_at); if(!t) return; t=t.getTime(); if(t<t0||t>t1) return;
+    var near=HIST.reduce(function(b,p){return Math.abs(p.t.getTime()-t)<Math.abs(b.t.getTime()-t)?p:b;});
+    if(Math.abs(near.t.getTime()-t)>15*60000) return;
+    s+='<circle cx="'+x(t)+'" cy="'+y(near.v)+'" r="3.6" fill="#11161A" stroke="#5E9CD3" stroke-width="2"><title>Accepted '+esc(r.param_name||"")+' at '+String(r.decided_at||"").slice(11,16)+'</title></circle>';
+  });
+  for(var k=0;k<=6;k++){
+    var tk=t0+k*(t1-t0)/6, dk=new Date(tk);
+    s+='<text x="'+x(tk)+'" y="'+(B+22)+'" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="11" fill="#6D7B85">'+pad(dk.getHours())+':'+pad(dk.getMinutes())+'</text>';
+  }
+  svg.innerHTML=s;
+  if(LO===null){ document.getElementById("bandPct").textContent="band not known yet"; return null; }
+  var inband=HIST.filter(function(p){return p.v>=LO&&p.v<=HI;}).length/HIST.length*100;
+  var cover=HIST.length*5/60;
+  document.getElementById("bandPct").textContent=inband.toFixed(1)+"% inside the current band"+(cover<11.5?" · data for "+cover.toFixed(1)+" of 12 h":"");
   return inband;
 }
 
@@ -769,7 +794,7 @@ function paintDash(){
     ["Recommendations issued",I,"","since 06:00",""],
     ["Accepted",A,"",rate+"% of those actioned","up"],
     ["Declined",D,"","reasons captured for retraining",""],
-    ["Time inside band",LO===null?"—":inband.toFixed(1),LO===null?"":"%","target 90%",LO===null?"":inband>=90?"up":"down"],
+    ["Time inside band",inband===null?"—":inband.toFixed(1),inband===null?"":"%","last 12 h · target 90%",inband===null?"":inband>=90?"up":"down"],
     ["Mean prediction error",mae.toFixed(1),"°C","12-hour rolling",""],
     ["Thermal substitution",(18.6+acc*0.3).toFixed(1),"%","shift target 20%",acc?"up":""]
   ].map(function(s){
@@ -1047,6 +1072,7 @@ function renderLive(){
 
 render(); renderLive(); paintDash();
 pollLive(); pollTwin(); pollAdvisor(); loadDecisions();
+setInterval(function(){ if(view==="dash") loadTrend(); },300000);
 })();
 </script>
 </body>
