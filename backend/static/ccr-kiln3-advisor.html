@@ -383,8 +383,8 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
     <!-- ============ VIEW: DASHBOARD ============ -->
     <section class="view" id="view-dash" hidden>
       <div class="sec" style="margin-top:0">
-        <h2>Shift summary</h2>
-        <p>Shift A, 06:00 onward — Kiln 3</p>
+        <h2>Today's summary</h2>
+        <p id="dashSub">Kiln 3 — today, from 00:00</p>
       </div>
 
       <div class="stats" id="stats"></div>
@@ -507,6 +507,8 @@ function loadDecisions(){
   return fetch("/api/decisions",{cache:"no-store"}).then(function(r){return r.json();}).then(function(d){
     var byTag=d.status||{};
     dayRows=d.rows||[];
+    var dd=d.day?new Date(d.day+"T00:00:00"):null;
+    document.getElementById("dashSub").textContent="Kiln 3 — "+(dd&&!isNaN(dd)?dd.getDate()+" "+MON[dd.getMonth()].slice(0,3)+" "+dd.getFullYear():"today")+", from 00:00";
     PARAMS.forEach(function(p){
       var s=byTag[TAGS[p.id]], st=state[p.id];
       st.status=s?s.status:"open"; st.reason=s?s.reason:null; st.note=s&&s.note||"";
