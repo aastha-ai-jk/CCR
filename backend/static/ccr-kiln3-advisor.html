@@ -520,6 +520,7 @@ function loadDecisions(){
     PARAMS.forEach(function(p){
       var s=byTag[TAGS[p.id]], st=state[p.id];
       st.status=s?s.status:"open"; st.reason=s?s.reason:null; st.note=s&&s.note||"";
+      st.validUntil=s&&s.status!=="open"?parseTs(s.valid_until):null;   // decision covers its own advice only
     });
     // trail = accepted/declined rows whose effect has not been undone since
     var undone={}, trail=[];
@@ -631,9 +632,10 @@ function rowHTML(p){
     h+='</div>';
   }else{
     var e=logFor(p.id);
+    var reopen=st.validUntil?' Fresh recommendation at <b>'+pad(st.validUntil.getHours())+':'+pad(st.validUntil.getMinutes())+'</b>.':'';
     h+='<div class="logged"><span>'+(st.status==="accepted"
         ? 'Accepted at <b>'+esc(e?e.time:"—")+'</b> — logged to the twin (not written to the DCS).'
-        : 'Declined at <b>'+esc(e?e.time:"—")+'</b> — <b>'+esc(st.reason||"")+'</b>'+(st.note?'. Note: '+esc(st.note):'.'))+
+        : 'Declined at <b>'+esc(e?e.time:"—")+'</b> — <b>'+esc(st.reason||"")+'</b>'+(st.note?'. Note: '+esc(st.note):'.'))+reopen+
        '</span><button class="btn btn--ghost" data-act="undo">Undo</button></div>';
   }
   h+='</div></div>';
@@ -1074,6 +1076,14 @@ render(); renderLive(); paintDash();
 pollLive(); pollTwin(); pollAdvisor(); loadDecisions();
 setInterval(function(){ if(view==="dash") loadTrend(); },300000);
 setInterval(function(){ if(view==="dash") loadAdvSummary(); },60000);
+// A decision covers its own recommendation until that recommendation's target
+// time (advice + 10 min); then the row reopens with the fresh recommendation.
+setInterval(function(){
+  var now=new Date(), expired=PARAMS.some(function(p){
+    var st=state[p.id]; return st.status!=="open"&&st.validUntil&&now>=st.validUntil; });
+  var declining=PARAMS.some(function(p){return state[p.id].declining;});
+  if(expired&&!declining&&!busy) loadDecisions();
+},5000);
 })();
 </script>
 </body>
