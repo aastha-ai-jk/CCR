@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { guardItems, validationBlocks } from "@/components/GuardrailAlarm";
 
 /**
  * Mimics the visual design of ccr-kiln3-advisor.html (uploaded reference
@@ -208,8 +209,9 @@ export default function Advisor({ latest, adv }: { latest: any; adv: any }) {
         decision === "accepted" ? "ok" : "dec"
       );
       if (view === "dash") loadDash();
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
+      showToast("Not saved: " + (e?.message || "error"), "dec");
     } finally {
       setSubmitting(false);
     }
@@ -227,6 +229,14 @@ export default function Advisor({ latest, adv }: { latest: any; adv: any }) {
     : `Holding ${fmt(Math.min(predTemp - band.low, band.high - predTemp), 1)} °C inside the band.`;
 
   const openCount = adv.feasible && decisionState === "pending" ? 1 : 0;
+
+  // Roof / floor guardrails, evaluated by the backend (live AND recommended
+  // values). One Accept covers the whole move, so any breach blocks it; the
+  // backend refuses the Accept as well. The alarm banner + beep live on the
+  // page (twin/page.tsx), so they sound even while this panel is closed.
+  const gParams: Record<string, any> = adv.guardrails?.params || {};
+  const gItems = guardItems(adv, latest);
+  const blocked = gItems.length > 0;
 
   return (
     <div className="advisor">
@@ -289,9 +299,15 @@ export default function Advisor({ latest, adv }: { latest: any; adv: any }) {
                 {adv.moves.map((mv: any) => {
                   const dir = dirOf(mv.delta);
                   const open = !!openRows[mv.tag];
+                  const gb = gParams[mv.tag]?.breach;
+                  const vb = validationBlocks(adv, mv.tag);
                   const cls = `row row--${dir}${open ? " is-open" : ""}` +
-                    (decisionState === "accepted" ? " row--accepted" : decisionState === "declined" ? " row--declined" : "");
-                  const tag = decisionState === "accepted" ? <span className="tag tag--acc">Accepted</span>
+                    (decisionState === "accepted" ? " row--accepted" : decisionState === "declined" ? " row--declined" : "") +
+                    (gb || vb ? " row--breach" : "");
+                  const tag = gb ? <span className="tag tag--breach">
+                      {(gParams[mv.tag].live_breach || gParams[mv.tag].recommended_breach) === "below_floor" ? "BELOW FLOOR" : "ABOVE ROOF"}</span>
+                    : vb ? <span className="tag tag--breach">DATA CHECK</span>
+                    : decisionState === "accepted" ? <span className="tag tag--acc">Accepted</span>
                     : decisionState === "declined" ? <span className="tag tag--dec">Declined</span>
                     : <span className="tag">{dir === "up" ? "Raise" : dir === "down" ? "Lower" : "Hold"}</span>;
                   const drivers = buildDrivers(adv, mv);
@@ -353,9 +369,12 @@ export default function Advisor({ latest, adv }: { latest: any; adv: any }) {
                     </div>
                   ) : !declining ? (
                     <div className="actions">
-                      <button className="btn btn--accept" disabled={submitting} onClick={() => submit("accepted")}>Accept this move</button>
+                      <button className="btn btn--accept" disabled={submitting || blocked}
+                        title={blocked ? "Blocked by guardrail" : undefined}
+                        onClick={() => { if (!blocked) submit("accepted"); }}>Accept this move</button>
                       <button className="btn btn--decline" disabled={submitting} onClick={() => setDeclining(true)}>Decline</button>
                       <span className="actions__note">This applies to all {adv.moves.length} levers above as one coordinated move. Advisory only — nothing is written to any control system.</span>
+                      {blocked && <span className="roofnote">Accept blocked — {gItems.map((i) => i.text).join("; ")}.</span>}
                     </div>
                   ) : (
                     <div className={`decl${declineErr ? " has-err" : ""}`} style={{ display: "block" }}>
@@ -543,6 +562,9 @@ export default function Advisor({ latest, adv }: { latest: any; adv: any }) {
         .row--hold{border-left-color:var(--ink-faint);}
         .row--accepted{border-left-color:var(--green);background:#161E1B;}
         .row--declined{border-left-color:var(--red);background:#1D1817;}
+        .row--breach{border-left-color:var(--red)!important;background:#231716;}
+        .tag--breach{background:var(--red);color:#fff;font-weight:600;}
+        .roofnote{flex:1 1 100%;font-size:12.5px;color:var(--red);font-weight:500;}
         .row__head{width:100%;display:grid;grid-template-columns:minmax(140px,1fr) 84px 20px 84px 64px 74px 16px;align-items:center;gap:8px;padding:12px 14px 12px 15px;text-align:left;}
         .row__head:hover{background:rgba(255,255,255,.022);}
         .row__name{min-width:0;}

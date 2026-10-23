@@ -5,6 +5,7 @@ Fill values from the plant questionnaire (`CCR_Kiln3_Advisor_Plant_Inputs.docx`)
 
 | Q | Key | Unit / format | Current default |
 |---|---|---|---|
+| new | `guardrails.<tag>.max` / `.min` | parameter's own unit | **set 2026-10-21** (floor / roof): 423CI400_TT_4 850 / 951 °C · 467RL400_TPH 15 / 34.90 t/h · LAFR_FT 0 / 3,928 l/h · K3V10_F1 0 / 3,517 l/h · 261WF080_TPH 0 / 26.50 t/h. A value exactly at a limit is allowed. If the **live or recommended** value is outside, both dashboards sound an alarm and Accept is refused (UI and `/api/decisions`, `/api/advisory/decision` return 409); Decline stays allowed. Re-read on every request — no restart. These roofs equal the plant's P99, not yet an operator-confirmed physical limit |
 | 1.1 | `optimizer.levers.LAFR_FT.min` / `.max` | l/h | 0 / 9,000 (PLC range) |
 | 1.2 | `optimizer.levers.K3V10_F1.min` / `.max` | l/h | 0 / 4,000 |
 | 1.3 | `optimizer.levers.261WF080_TPH.min` / `.max` | t/h | 0 / 30 |

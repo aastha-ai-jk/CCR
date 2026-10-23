@@ -82,6 +82,10 @@ def build_tag_dictionary() -> pd.DataFrame:
     meta.columns = [str(c).strip() for c in meta.columns]
 
     mapping = _read_tag_mapping().set_index("fls_tag")
+    # Addresses in the tags file that do not exist on the OPC server. Verified
+    # 2026-10-22: "L3.L3_NEW.Root.K3V10F1.Value" -> BadNodeIdUnknown, so the live
+    # feed silently dropped the TAD flow; the server's point is K3V10_F1.
+    OPC_ADDRESS_FIX = {"K3V10_F1": "L3.L3_NEW.Root.K3V10_F1.Value"}
 
     rows = []
     for code in meta.index:
@@ -91,6 +95,7 @@ def build_tag_dictionary() -> pd.DataFrame:
         map_key = "K3V10F1" if code == "K3V10_F1" else code
         name = mapping.loc[map_key, "parameter"] if map_key in mapping.index else code
         ai_tag = mapping.loc[map_key, "ai_tag"] if map_key in mapping.index else None
+        ai_tag = OPC_ADDRESS_FIX.get(code, ai_tag)
         rows.append({
             "tag": code,
             "name": str(name).rstrip(": ").strip() if pd.notna(name) else code,

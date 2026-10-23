@@ -5,6 +5,7 @@ import { api, TwinMetrics, TwinBacktest, ShadowResult, DecisionsResult, TwinFutu
 import Mimic from "@/components/Mimic";
 import SavingsPanel from "@/components/SavingsPanel";
 import Advisor from "@/components/Advisor";
+import GuardrailAlarm, { guardItems } from "@/components/GuardrailAlarm";
 import { Panel, Stat, Badge, Loading } from "@/components/ui";
 import { Lightbulb, X } from "lucide-react";
 
@@ -109,9 +110,13 @@ export default function DigitalTwin() {
   const allOk = ahead ? future!.all_interlocks_ok : ov.interlocks.every((i: any) => i.pass !== false);
   const active = (future?.setpoints ?? []).filter((s) => s.status === "active");
   const hhmmss = (ts?: string | null) => (ts ? String(ts).replace(" ", "T").slice(11, 19) : "—");
+  // Guardrail alarm sits on the page, not inside the advisor drawer, so it
+  // sounds whether or not the operator has the recommendation panel open.
+  const gItems = guardItems(adv, latest);
 
   return (
     <div className="space-y-4">
+      <GuardrailAlarm items={gItems} />
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold flex items-center gap-2">
@@ -178,8 +183,8 @@ export default function DigitalTwin() {
             </div>
           </div>
         </div>
-        <Badge tone={!adv ? "muted" : adv.feasible ? (adv.mode === "hold" ? "ok" : "warn") : "bad"}>
-          {!adv ? "…" : adv.feasible ? (showAdvisor ? "Close" : "Open") : "Blocked"}
+        <Badge tone={gItems.length ? "bad" : !adv ? "muted" : adv.feasible ? (adv.mode === "hold" ? "ok" : "warn") : "bad"}>
+          {gItems.length ? "Accept blocked — see alarm" : !adv ? "…" : adv.feasible ? (showAdvisor ? "Close" : "Open") : "Blocked"}
         </Badge>
       </button>
 

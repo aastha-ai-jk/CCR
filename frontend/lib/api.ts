@@ -20,7 +20,12 @@ async function post<T = any>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
     cache: "no-store",
   });
-  if (!r.ok) throw new Error(`${path} -> ${r.status}`);
+  if (!r.ok) {
+    // Surface the server's reason (e.g. a guardrail refusal) instead of a bare status.
+    let detail = "";
+    try { detail = (await r.json())?.detail ?? ""; } catch { /* non-JSON body */ }
+    throw new Error(detail ? String(detail) : `${path} -> ${r.status}`);
+  }
   return r.json();
 }
 

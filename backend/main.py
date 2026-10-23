@@ -430,7 +430,132 @@ def twin_advisor():
         out.update(r)
         out.setdefault("available", "recommended" in r)
         out["age_sec"] = round(time.time() - _advisor["computed_at"], 1)
+    # Roof / floor guardrails. Evaluated even with no recommendation, so a live
+    # value above its roof still raises the alarm.
+    from backend import guardrails
+    out["guardrails"] = guardrails.evaluate(_fresh_values(s), _advisor_recommended(r))
+    out["validation"] = _current_validation()["report"]
     return _json_safe(out)
+
+
+# ---------------------------------------------------------------------------
+# Data validation (backend/validation.py): every input reading and every
+# recommendation is checked continuously. A background thread re-evaluates
+# every VALIDATION_INTERVAL_S and logs problems to validation_events; request
+# handlers use the latest result (recomputed if older than VALIDATION_MAX_AGE_S).
+VALIDATION_INTERVAL_S = 10
+VALIDATION_MAX_AGE_S = 15
+_validation = {"inputs": [], "rec": [], "report": None, "at": 0.0}
+_validation_lock = threading.Lock()
+
+
+def _recent_live(minutes: int = 30) -> pd.DataFrame | None:
+    """The live feed's last `minutes` of 2-s rows, oldest first (None if unavailable)."""
+    try:
+        df = db.q("SELECT * FROM process_live ORDER BY ts DESC LIMIT :n", {"n": int(minutes * 33)})
+    except Exception:
+        return None
+    if df is None or not len(df):
+        return None
+    t = pd.to_datetime(df["ts"], format="mixed", errors="coerce")
+    df = df[t >= t.max() - pd.Timedelta(minutes=minutes)]
+    return df.iloc[::-1].reset_index(drop=True)
+
+
+def _plc_ranges() -> dict:
+    cat = db.tag_catalog().set_index("tag")
+    out = {}
+    for t in ("467RL400_TPH", "LAFR_FT", "K3V10_F1", "261WF080_TPH"):
+        if t in cat.index and pd.notna(cat.loc[t, "y_min"]) and pd.notna(cat.loc[t, "y_max"]):
+            out[t] = (float(cat.loc[t, "y_min"]), float(cat.loc[t, "y_max"]))
+    return out
+
+
+def _current_validation(max_age: float = VALIDATION_MAX_AGE_S) -> dict:
+    """Latest validation of the live inputs and the twin advisor's recommendation."""
+    from backend import validation
+    with _validation_lock:
+        if _validation["report"] is not None and time.time() - _validation["at"] <= max_age:
+            return _validation
+    s = _snapshot()
+    inputs = validation.check_inputs(s, _recent_live() if s.get("source") != "historical" else None)
+    r = _advisor["result"]
+    rec_issues = []
+    rec = _advisor_recommended(r)                     # {} unless current and live-based
+    if rec:
+        rec_issues = validation.check_recommendation(
+            {k: v for k, v in rec.items() if k != analysis.CV}, s.get("values", {}),
+            rec.get(analysis.CV), r.get("interlocks"), _plc_ranges())
+    rep = validation.report(inputs, rec_issues)
+    with _validation_lock:
+        _validation.update(inputs=inputs, rec=rec_issues, report=rep, at=time.time())
+        return dict(_validation)
+
+
+def _validation_loop() -> None:
+    from backend import validation
+    while True:
+        try:
+            v = _current_validation(max_age=0)
+            validation.log_events(db.engine(), v["report"])
+        except Exception as e:                       # never let the monitor die
+            print(f"[validation] check failed: {e!r}")
+        time.sleep(VALIDATION_INTERVAL_S)
+
+
+@app.on_event("startup")
+def _start_validation_monitor() -> None:
+    threading.Thread(target=_validation_loop, name="validation-monitor", daemon=True).start()
+
+
+@app.get("/api/validation")
+def get_validation():
+    """Current validation of every live input and of the twin advisor's
+    recommendation: status, which levers are blocked, and every issue."""
+    import json as _json
+    from backend import validation
+    v = _current_validation()
+    meta = {}
+    try:
+        raw = _json.loads(validation.LIMITS_PATH.read_text(encoding="utf-8"))
+        meta = {"limits_generated": raw.get("_generated"), "limits_rows": raw.get("_rows"),
+                "tags_with_limits": len(raw.get("tags", {}))}
+    except Exception:
+        pass
+    return _json_safe({**v["report"], "age_sec": round(time.time() - v["at"], 1), "limits": meta})
+
+
+@app.get("/api/validation/events")
+def get_validation_events(limit: int = Query(100, ge=1, le=2000), open_only: bool = False):
+    """Validation problems over time: when each started, was last seen, and cleared."""
+    from backend import validation
+    from sqlalchemy import text
+    with db.engine().begin() as con:
+        con.execute(text(validation._EVENTS_DDL))
+    where = "WHERE cleared_at IS NULL" if open_only else ""
+    df = db.q(f"SELECT * FROM validation_events {where} ORDER BY id DESC LIMIT :n", {"n": limit})
+    return _json_safe({"n": int(len(df)), "events": _clean_records(df)})
+
+
+def _fresh_values(s: dict) -> dict:
+    """Live values for the guardrails ONLY when the snapshot is current. When
+    the feed is down _snapshot() falls back to the newest historical row, and
+    judging months-old data would sound the alarm (or block an Accept) over a
+    value that is not the plant's now. No live data = nothing to judge, the
+    same rule the /advisor page applies on screen."""
+    return s.get("values", {}) if s.get("source") not in (None, "historical") else {}
+
+
+def _advisor_recommended(r: dict | None) -> dict:
+    """The twin advisor's recommended value per tag; for the calciner outlet
+    temperature that is the twin's predicted temperature."""
+    if not r or "recommended" not in r or r.get("source") == "historical":
+        return {}            # computed from stale data: not a current recommendation
+    rec = dict(r.get("recommended") or {})
+    temp = ((r.get("predicted") or {}).get("temp") or {}).get("mean")
+    if temp is not None:
+        rec[analysis.CV] = temp
+    return rec
 
 
 @app.get("/api/latest")
@@ -513,6 +638,19 @@ def advisory():
         "horizon_min": now["horizon_min"],
     }
     adv["live_actual_temp"] = snap.get("423CI400_TT_4")
+    from backend import guardrails
+    rec = {m["tag"]: m.get("to") for m in adv.get("moves", [])}
+    if adv.get("predicted_temp") is not None:
+        rec[analysis.CV] = adv["predicted_temp"]
+    if s.get("source") == "historical":
+        rec = {}             # advice computed from stale data is not judged
+    adv["guardrails"] = guardrails.evaluate(_fresh_values(s), rec)
+    # same input checks as the twin advisor; recommendation checks on THIS optimizer's move
+    from backend import validation
+    rec_issues = validation.check_recommendation(
+        {k: v for k, v in rec.items() if k != analysis.CV}, snap, rec.get(analysis.CV),
+        adv.get("interlocks"), _plc_ranges()) if rec else []
+    adv["validation"] = validation.report(_current_validation()["inputs"], rec_issues)
     if config.COAL_PRICE_PER_T and adv.get("feasible"):
         sv = adv["saving"]
         adv["saving"]["cost_per_year"] = round(
@@ -581,6 +719,34 @@ def advisory_decision(req: AdvisoryDecision):
         raise HTTPException(400, "decision must be 'accepted' or 'declined'")
     if req.decision == "declined" and not req.reason_category:
         raise HTTPException(400, "reason_category is required when declining")
+    if req.decision == "accepted":
+        # One Accept covers the whole move: refuse it if ANY lever in it, or
+        # the calciner temperature, is outside its guardrail.
+        from backend import guardrails
+        live = _fresh_values(_snapshot())
+        if not live:     # fail safe: nothing current to check the move against
+            raise HTTPException(409, "Refused by guardrail: no current live plant data to check this "
+                                     "move against its limits (is the live feed down?). Accept is "
+                                     "blocked until live data returns; Decline is still allowed.")
+        checks = {analysis.CV: {"live value": live.get(analysis.CV),
+                                "submitted live value": req.live_actual_temp,
+                                "predicted value": req.predicted_temp}}
+        for m in req.moves or []:
+            if isinstance(m, dict) and m.get("tag"):
+                checks[m["tag"]] = {"live value": live.get(m["tag"]),
+                                    "submitted current value": m.get("from"),
+                                    "recommended value": m.get("to")}
+        refusals = [x for x in (guardrails.refuse_accept(t, v) for t, v in checks.items()) if x]
+        if refusals:
+            raise HTTPException(409, " | ".join(refusals))
+        # data validation: live inputs + this move's own recommendation checks
+        from backend import validation
+        moves = {m["tag"]: m.get("to") for m in (req.moves or []) if isinstance(m, dict) and m.get("tag")}
+        rep = validation.report(_current_validation(max_age=0)["inputs"], validation.check_recommendation(
+            moves, live, req.predicted_temp, None, _plc_ranges()))
+        refusals = [x for x in (validation.refuse_accept(t, rep) for t in [analysis.CV, *moves]) if x]
+        if refusals:
+            raise HTTPException(409, refusals[0])
     db.log_advisory_decision({
         "ts": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "decision": req.decision,
@@ -931,9 +1097,37 @@ def post_decision(req: DecisionReq):
     """Record an operator Accept / Decline / Undo on a twin recommendation,
     with the twin's advisory context at that moment. Never writes to the plant."""
     from fastapi import HTTPException
-    from backend import decisions
+    from backend import decisions, guardrails
+    snap = _snapshot()
+    if req.action == "accepted":
+        # Judge on the server's own live value and recommendation as well as
+        # what the page sent, so a stale or tampered page cannot slip past.
+        live_v = _fresh_values(snap).get(req.tag)
+        rec_v = _advisor_recommended(_advisor["result"]).get(req.tag)
+        # Fail safe: with no current live value AND no current recommendation
+        # the guardrail cannot check anything, so the Accept is refused rather
+        # than waved through. Values submitted by the page do not count as
+        # verification -- they are only checked for breaches below.
+        if req.tag in guardrails.limits() and live_v is None and rec_v is None:
+            raise HTTPException(status_code=409, detail=(
+                f"Refused by guardrail: there is no current live value or recommendation for "
+                f"{req.tag} to check against its limits (is the live feed down?). Accept is blocked "
+                f"until live data returns; Decline is still allowed."))
+        refusal = guardrails.refuse_accept(req.tag, {
+            "live value": live_v,
+            "recommended value": rec_v,
+            "submitted current value": req.current_value,
+            "submitted recommended value": req.recommended_value,
+        })
+        if refusal:
+            raise HTTPException(status_code=409, detail=refusal)
+        from backend import validation
+        # never judge an Accept on a cached result: re-check the data now
+        refusal = validation.refuse_accept(req.tag, _current_validation(max_age=0)["report"])
+        if refusal:
+            raise HTTPException(status_code=409, detail=refusal)
     try:
-        return _json_safe(decisions.record(req.model_dump(), _advisor["result"], _snapshot()))
+        return _json_safe(decisions.record(req.model_dump(), _advisor["result"], snap))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 

@@ -272,6 +272,29 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
 .toast--dec{border-left-color:var(--red);}
 
+/* ---- guardrail alarm (roof / floor breach) ---- */
+.galarm{position:sticky;top:0;z-index:30;display:flex;gap:16px;align-items:flex-start;
+  margin:0;padding:14px 28px;background:#3A1512;border-bottom:2px solid var(--red);
+  color:#FFE3DE;animation:galarmPulse 1.2s ease-in-out infinite;}
+.galarm[hidden]{display:none;}
+.galarm.is-silenced{animation:none;background:#2A1715;}
+@keyframes galarmPulse{0%,100%{box-shadow:inset 0 0 0 0 rgba(217,96,79,0);}50%{box-shadow:inset 0 0 0 3px rgba(217,96,79,.85);}}
+.galarm__icon{flex:0 0 auto;width:30px;height:30px;border-radius:50%;background:var(--red);color:#fff;
+  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;}
+.galarm__body{flex:1 1 auto;min-width:0;}
+.galarm__title{font-weight:700;font-size:15px;letter-spacing:.02em;color:#fff;}
+.galarm__list{margin:5px 0 0;padding-left:18px;font-size:13.5px;line-height:1.55;}
+.galarm__hint{margin-top:6px;font-size:12.5px;color:#F5B7AD;}
+.galarm__btn{flex:0 0 auto;background:transparent;border:1px solid #F5B7AD;color:#FFE3DE;
+  padding:7px 14px;border-radius:var(--r);font:inherit;font-size:13px;cursor:pointer;}
+.galarm__btn:hover{background:rgba(255,255,255,.08);}
+.rochip{margin-left:12px;padding:3px 10px;border-radius:3px;font-size:12px;font-weight:600;
+  background:rgba(233,161,59,.15);color:var(--amber);letter-spacing:.02em;}
+.rochip[hidden]{display:none;}
+.row--breach{border-left-color:var(--red)!important;background:#231716;}
+.tag--breach{background:var(--red);color:#fff;font-weight:600;}
+.roofnote{flex:1 1 100%;font-size:12.5px;color:var(--red);font-weight:500;}
+
 @media (max-width:1100px){
   .hero{grid-template-columns:1fr;}
   .hero__read{border-right:none;border-bottom:1px solid var(--line);}
@@ -341,6 +364,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
         <h1>Kiln 3 — Calcination combustion control</h1>
         <span class="rule"></span>
         <span class="live"><i></i>Live from DCS</span>
+        <span class="rochip" id="roChip" hidden>VIEW ONLY — no Accept / Decline</span>
       </div>
       <div class="top__when">
         <div>
@@ -351,6 +375,17 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
         <div class="top__clock num" id="clock">00:00:00</div>
       </div>
     </header>
+
+    <!-- ============ GUARDRAIL ALARM (both views) ============ -->
+    <div class="galarm" id="gAlarm" role="alert" aria-live="assertive" hidden>
+      <span class="galarm__icon" aria-hidden="true">!</span>
+      <div class="galarm__body">
+        <div class="galarm__title">ALARM — Accept is blocked: guardrail or data check failed</div>
+        <ul class="galarm__list" id="gAlarmList"></ul>
+        <div class="galarm__hint" id="gAlarmHint" hidden>Click anywhere on this page to enable the alarm sound.</div>
+      </div>
+      <button class="galarm__btn" id="gSilence" type="button">Silence alarm</button>
+    </div>
 
     <!-- ============ VIEW: RECOMMENDATIONS ============ -->
     <section class="view" id="view-recs">
@@ -505,6 +540,12 @@ PARAMS.forEach(function(p){ state[p.id]={status:"open",reason:null,note:"",open:
 // operator_decisions, date-wise) — the same record the Digital Twin shows and
 // future training reads. UI state only changes once the database confirms.
 var OPERATOR="Shift A";   // mock until operator login exists
+// View-only mode for display screens (e.g. an OT / SCADA-side PC): open the page
+// as /advisor?readonly=1. No Accept / Decline / Undo controls are rendered and
+// action clicks are ignored, so the screen can show the advisory but never
+// record a decision. (The decision API itself has no login yet -- read-only is
+// a property of this screen, not of the server.)
+var READONLY=new URLSearchParams(location.search).get("readonly")==="1";
 var busy=false;
 function postDecision(p,action,reason,note){
   var st=state[p.id];
@@ -595,7 +636,9 @@ function rowHTML(p){
 
   var h='<div class="'+cls+'" data-id="'+p.id+'">';
   h+='<button class="row__head" data-act="toggle" aria-expanded="'+(st.open?"true":"false")+'">';
-  h+= '<span class="row__name"><b>'+esc(p.name)+'</b><span>'+esc(p.loc)+'</span></span>';
+  var gb=guardOf(p);
+  if(gb) h=h.replace('class="'+cls+'"','class="'+cls+' row--breach"');
+  h+= '<span class="row__name"><b>'+esc(p.name)+(gb?' <span class="tag tag--breach">'+gText(gb[0],p,true)+'</span>':'')+'</b><span>'+esc(p.loc)+'</span></span>';
   h+= '<span class="cell"><span class="cell__k">Current</span><span class="cell__v num">'+(p.liveOk?fmt(p.cur,p.dec):"—")+'</span><span class="cell__u">'+p.unit+'</span></span>';
   h+= '<span class="arrow"><svg width="16" height="10" viewBox="0 0 16 10" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1 5h13M10.5 1.5 14 5l-3.5 3.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>';
   h+= '<span class="cell"><span class="cell__k">Recommended</span><span class="cell__v cell__v--rec num">'+recTxt+'</span><span class="cell__u">'+p.unit+'</span></span>';
@@ -610,11 +653,17 @@ function rowHTML(p){
          return '<div class="driver"><span>'+esc(dr[0])+'</span><span class="driver__v">'+dr[1]+'%</span><span class="driver__bar"><i style="width:'+dr[1]+'%"></i></span></div>';}).join("")+'</div></div>';
   h+= '</div>';
 
-  if(st.status==="open"){
+  if(READONLY){
+    h+='<div class="actions"><span class="actions__note">View only — decisions are made at the advisor station.</span>';
+    h+= '<span class="roofnote"'+(gb?'':' hidden')+'>'+(gb?'Accept blocked — '+gb.map(function(b){return gText(b,p);}).join("; ")+'.':'')+'</span>';
+    h+='</div>';
+  }else if(st.status==="open"){
     h+='<div class="actions">';
-    h+= '<button class="btn btn--accept" data-act="accept"'+(!actionable(p)?' disabled':'')+'>Accept</button>';
+    h+= '<button class="btn btn--accept" data-act="accept"'+(!actionable(p)||gb?' disabled':'')
+      +(gb?' title="Blocked by guardrail"':'')+'>Accept</button>';
     h+= '<button class="btn btn--decline" data-act="declineStart"'+(!actionable(p)?' disabled':'')+'>Decline</button>';
     h+= '<span class="actions__note">Advisory only — your decision is logged to the twin; nothing is written to the DCS.</span>';
+    h+= '<span class="roofnote"'+(gb?'':' hidden')+'>'+(gb?'Accept blocked — '+gb.map(function(b){return gText(b,p);}).join("; ")+'.':'')+'</span>';
     h+='</div>';
     h+='<div class="decl">';
     h+= '<h3>What is stopping this change?</h3>';
@@ -642,7 +691,115 @@ function render(){
   var open=PARAMS.filter(function(p){return state[p.id].status==="open";}).length;
   document.getElementById("railCount").textContent=open;
   document.getElementById("recMeta").textContent=open+" open · "+(PARAMS.length-open)+" actioned · "+advMeta;
+  paintGuard();
 }
+
+/* ---------------- guardrails: roof / floor alarm ---------------- */
+// Limits come from the backend (data/plant_settings.json "guardrails"); the
+// live value (every 2 s) and the recommendation are checked here so the alarm
+// reacts at once. The backend refuses the Accept as well -- the disabled
+// button is a convenience, not the guard.
+var GUARD={};                      // tag -> {min,max}
+var VAL=null;                      // backend data-validation report (/api/twin/advisor .validation)
+var alarmKey="", silencedKey="", AC=null;
+function valErrors(){ return VAL ? (VAL.issues||[]).filter(function(i){ return i.severity==="error"; }) : []; }
+function guardOf(p){
+  var out=[], tag=TAGS[p.id], l=GUARD[tag];
+  function chk(v,what){
+    if(!l||typeof v!=="number"||!isFinite(v)) return;
+    if(l.max!=null&&v>l.max) out.push({what:what,v:v,edge:"roof",lim:l.max});
+    else if(l.min!=null&&v<l.min) out.push({what:what,v:v,edge:"floor",lim:l.min});
+  }
+  if(p.liveOk===true) chk(p.cur,"live");
+  if(p.recOk===true) chk(p.rec,"recommended");
+  // data validation: an error on this lever, or one that affects every lever
+  valErrors().forEach(function(i){
+    if(i.scope===tag) out.push({edge:"check",detail:i.tag+" "+i.check+": "+i.detail});
+  });
+  if(VAL&&VAL.global_block) out.push({edge:"check",global:true,detail:"data check failed (see the alarm banner)"});
+  return out.length?out:null;
+}
+function gText(b,p,short){
+  if(b.edge==="check") return short?"DATA CHECK":b.detail;
+  if(short) return b.edge==="roof"?"ABOVE ROOF":"BELOW FLOOR";
+  return b.what+" "+fmt(b.v,p.dec)+" "+p.unit+" is "+(b.edge==="roof"?"above the roof ":"below the floor ")
+    +fmt(b.lim,p.dec)+" "+p.unit;
+}
+function audioOn(){ return !!(AC&&AC.state==="running"); }
+function paintGuard(){
+  var items=[], keys=[];
+  PARAMS.forEach(function(p){
+    var g=guardOf(p), row=document.querySelector('.row[data-id="'+p.id+'"]');
+    if(row){
+      row.classList.toggle("row--breach",!!g);
+      var acc=row.querySelector('[data-act="accept"]');
+      if(acc){ acc.disabled=!actionable(p)||!!g; acc.title=g?"Blocked by guardrail":""; }
+      var note=row.querySelector(".roofnote");
+      if(note){ note.hidden=!g;
+        note.textContent=g?"Accept blocked — "+g.map(function(b){return gText(b,p);}).join("; ")+".":""; }
+      var nm=row.querySelector(".row__name b");
+      if(nm){ var f=nm.querySelector(".tag--breach");
+        if(g&&!f){ nm.insertAdjacentHTML("beforeend",' <span class="tag tag--breach">'+gText(g[0],p,true)+'</span>'); }
+        else if(g&&f){ f.textContent=gText(g[0],p,true); }
+        else if(!g&&f){ f.remove(); } }
+    }
+    if(g) g.forEach(function(b){
+      if(b.global) return;                       // listed once below, not per row
+      keys.push(p.id+":"+(b.what||"data")+":"+b.edge+":"+(b.detail||""));
+      items.push("<b>"+esc(p.name)+"</b> — "+esc(gText(b,p)));
+    });
+  });
+  // data-validation errors that block every lever: one line each
+  valErrors().filter(function(i){ return i.scope==="all"; }).forEach(function(i){
+    keys.push("val:"+i.tag+":"+i.check);
+    items.push("<b>Data check — "+esc(i.tag)+"</b> "+esc(i.check)+": "+esc(i.detail));
+  });
+  alarmKey=keys.sort().join("|");
+  if(!alarmKey) silencedKey="";
+  var el=document.getElementById("gAlarm");
+  el.hidden=!alarmKey;
+  document.getElementById("gAlarmList").innerHTML=items.map(function(t){return "<li>"+t+"</li>";}).join("");
+  var silenced=!!alarmKey&&alarmKey===silencedKey;
+  el.classList.toggle("is-silenced",silenced);
+  var sb=document.getElementById("gSilence");
+  sb.textContent=silenced?"Silenced":"Silence alarm"; sb.disabled=silenced;
+  document.getElementById("gAlarmHint").hidden=!alarmKey||silenced||audioOn();
+}
+// Browsers only allow sound after the user has interacted with the page, so
+// the audio context is created on the first click / key press.
+function audioCtx(){
+  if(!AC){ var C=window.AudioContext||window.webkitAudioContext; if(!C) return null;
+    try{ AC=new C(); }catch(e){ return null; } }
+  if(AC.state==="suspended"){ try{ AC.resume(); }catch(e){} }
+  return AC;
+}
+["pointerdown","keydown","touchstart"].forEach(function(evn){
+  document.addEventListener(evn,function(){ audioCtx(); setTimeout(paintGuard,50); },{capture:true,passive:true});
+});
+function beep(){
+  if(!audioOn()) return false;
+  var t=AC.currentTime;
+  [0,0.28].forEach(function(off){          // two short 880 Hz pulses
+    var o=AC.createOscillator(), g=AC.createGain();
+    o.type="square"; o.frequency.value=880;
+    g.gain.setValueAtTime(0.0001,t+off);
+    g.gain.exponentialRampToValueAtTime(0.25,t+off+0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+off+0.2);
+    o.connect(g); g.connect(AC.destination); o.start(t+off); o.stop(t+off+0.22);
+  });
+  var el=document.getElementById("gAlarm");
+  el.setAttribute("data-beeps",String((+el.getAttribute("data-beeps")||0)+1));
+  return true;
+}
+// "Silence" stops the sound for the breaches present now; the banner stays
+// until every value is back inside its limit, and a NEW breach sounds again.
+document.getElementById("gSilence").addEventListener("click",function(){
+  silencedKey=alarmKey; paintGuard();
+});
+setInterval(function(){
+  if(alarmKey&&alarmKey!==silencedKey) beep();
+  paintGuard();
+},2000);
 
 /* ---------------- interactions ---------------- */
 document.getElementById("list").addEventListener("click",function(ev){
@@ -652,8 +809,10 @@ document.getElementById("list").addEventListener("click",function(ev){
   var act=btn.getAttribute("data-act");
 
   if(act==="toggle"){ st.open=!st.open; if(!st.open) st.declining=false; render(); return; }
+  if(READONLY) return;                       // view-only screen: no decisions
   if(act==="accept"){
     if(!actionable(p)||busy) return;
+    if(guardOf(p)){ toast("Accept blocked — "+p.name+": guardrail or data check failed (see the alarm banner)","dec"); return; }
     busy=true;
     postDecision(p,"accepted").then(function(row){
       st.status="accepted"; st.declining=false; st.open=false;
@@ -895,7 +1054,7 @@ function pollLive(){
     document.getElementById("liveAt").textContent=fresh?(clockAt(l.ts,0,true)||"--:--:--"):"no live feed";
     var declining=PARAMS.some(function(p){return state[p.id].declining;});
     if(unitChanged&&!declining) render();       // first load: real units
-    paintLiveCells(); renderLive();
+    paintLiveCells(); renderLive(); paintGuard();
   }).catch(function(){
     PARAMS.forEach(function(p){ p.liveOk=false; });
     twinActual=null;
@@ -976,9 +1135,11 @@ function pollAdvisor(){
         :"optimiser unavailable"+(a.error?" — "+a.error:"");
     }
     paintClinker(a.clinker_guard);
+    if(a.guardrails&&a.guardrails.limits) GUARD=a.guardrails.limits;
+    VAL=a.validation||null;
     // Don't wipe a half-filled decline form; values refresh on the next poll.
     var declining=PARAMS.some(function(p){return state[p.id].declining;});
-    if(!declining) render();
+    if(!declining) render(); else paintGuard();
   }).catch(function(){
     advMeta="twin optimiser offline";
     PARAMS.forEach(function(p){ p.recOk=false; });
@@ -1013,6 +1174,11 @@ function renderLive(){
   bandGauge(live,pred);
 }
 
+if(READONLY){
+  document.getElementById("roChip").hidden=false;
+  document.getElementById("modeTag").textContent="View only";
+  document.title="View only — "+document.title;
+}
 render(); bandGauge(live,pred); tickLive(); paintDash();
 setInterval(tickLive,4000);
 pollLive(); pollTwin(); pollAdvisor(); loadDecisions();
