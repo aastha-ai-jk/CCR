@@ -105,7 +105,7 @@ def record(body: dict, advisory: dict | None, snapshot: dict) -> dict:
         "recommended_value": _num(body.get("recommended_value")),
         "advisory_ts": adv.get("ts"),
         "data_source": adv.get("source") or snapshot.get("source"),
-        "horizon_min": analysis.DELTA,
+        "horizon_min": adv.get("horizon_min") or analysis.DELTA,
         "live_temp": _num(vals.get(analysis.CV)),
         "predicted_temp": _num(temp.get("mean")),
         "operating_state": adv.get("operating_state"),

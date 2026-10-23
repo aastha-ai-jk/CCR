@@ -33,10 +33,8 @@ TIMEOUT = float(os.getenv("REASONING_TIMEOUT_SEC", "20"))
 
 CV = config.CALCINER_TEMP_TAG
 # advisor screen row id -> optimiser tag, display name
-LEVERS = {
+LEVERS = {                               # the advisor's recommended levers (2026-10-23)
     "calc_coal": ("467RL400_TPH", "calciner coal"),
-    "lafr_pc": ("LAFR_FT", "LAFR PC"),
-    "lafr_tad": ("K3V10_F1", "LAFR TAD"),
     "safr": ("261WF080_TPH", "SAFR"),
 }
 UNITS = {"467RL400_TPH": ("t/h", 2), "LAFR_FT": ("l/h", 0), "K3V10_F1": ("l/h", 0),
@@ -192,7 +190,7 @@ numbers that appear in the facts (you may round them). Units as given.
 Advisory only - never tell the operator the system changed anything.
 
 Rows: "calc_out" explains the predicted calciner outlet temperature versus the
-band; each lever row ("calc_coal", "lafr_pc", "lafr_tad", "safr") explains why
+band; each lever row ("calc_coal", "safr") explains why
 that lever is raised, lowered or held, linking it to the objective, the
 temperature and the O2/CO limits where relevant.
 

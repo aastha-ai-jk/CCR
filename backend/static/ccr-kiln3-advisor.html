@@ -353,7 +353,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
 
       <div class="hero">
         <div class="hero__read">
-          <div class="hero__label">Calciner temperature predicted for <span id="predFor">--:--</span> (next <span id="predHorizon">5</span> min) · <span id="twinSrc">connecting to digital twin…</span></div>
+          <div class="hero__label">Calciner temperature predicted for <span id="predFor">--:--</span> (next <span id="predHorizon">10</span> min) · <span id="twinSrc">connecting to digital twin…</span></div>
           <div class="hero__val"><b class="num" id="predVal">—</b><em>°C</em></div>
           <div class="hero__times num">Live at <b id="liveAt">--:--:--</b> <span aria-hidden="true">→</span> prediction for <b id="predAt">--:--:--</b></div>
           <div class="hero__traj num" id="predTraj" aria-label="Calciner forecast by horizon"></div>
@@ -375,7 +375,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
         <h2>Setpoint recommendations</h2>
         <p id="recMeta">9 open · refreshed every 60 s</p>
       </div>
-      <p class="advnote" id="advNote">Goal: least calciner coal, then as much AFR as the limits allow, keeping temperature in band. Kiln coal, kiln feed, preheater fan speed and kiln speed are held fixed (plant decision). Advisory only.</p>
+      <p class="advnote" id="advNote">Goal: least calciner coal, then as much SAFR as the limits allow, keeping the calciner in band at T+10 min. Apply now — effect at T+10. Only calciner coal and SAFR are recommended; LAFR PC/TAD, kiln coal, kiln feed, preheater fan speed and kiln speed are held at their live values (plant decision). Advisory only.</p>
       <p class="clknote" id="clkNote" hidden></p>
       <div class="list" id="list"></div>
     </section>
@@ -435,8 +435,6 @@ tickClock(); setInterval(tickClock,1000);
 var PARAMS=[
  {id:"calc_out",name:"Calciner outlet temperature",loc:"Calciner outlet · 423CI400_TT_4",unit:"°C",cur:872.6,rec:878.0,dec:1,impact:[]},
  {id:"calc_coal",name:"Calciner coal firing",loc:"Calciner coal feeder · 467RL400_TPH",unit:"TPH",cur:18.4,rec:19.1,dec:1,impact:[]},
- {id:"lafr_pc",name:"LAFR feed rate PC",loc:"Liquid AFR, precalciner · LAFR_FT",unit:"TPH",cur:4.2,rec:5.0,dec:1,impact:[]},
- {id:"lafr_tad",name:"LAFR feed rate TAD",loc:"Liquid AFR, tertiary air duct · K3V10_F1",unit:"TPH",cur:1.8,rec:1.5,dec:2,impact:[]},
  {id:"safr",name:"SAFR feed rate",loc:"Solid AFR, calciner · 261WF080_TPH",unit:"TPH",cur:6.5,rec:7.2,dec:1,impact:[]}
 ];
 
@@ -788,6 +786,7 @@ function paintDash(){
 // (twin optimiser setpoint for the next 5 min), the why text and impact
 // figures. If the API is unreachable the page shows "—", never a made-up value.
 var CV="423CI400_TT_4";
+var ADV_H=10;   // advisor prediction horizon (min); the backend's twin_opt.ADVISOR_HORIZON
 var TAGS={calc_out:CV,ph_fan:"423FN010_ST",kiln_spd:"433MD140_ST1",kiln_coal:"467RL300_TPH",
   calc_coal:"467RL400_TPH",kiln_feed:"353RL130_TPH",lafr_pc:"LAFR_FT",lafr_tad:"K3V10_F1",safr:"261WF080_TPH"};
 var DEC={"423CI400_TT_4":1,"423FN010_ST":0,"433MD140_ST1":2,"467RL300_TPH":2,"467RL400_TPH":2,
@@ -810,12 +809,14 @@ function getJSON(url){
 
 function pollTwin(){
   getJSON("/api/twin/forecast").then(function(f){
-    var p=f.prediction||{};
+    // headline = the advisor's horizon (T+10) from the twin trajectory
+    var p=(f.trajectory||[]).filter(function(t){return t.min===ADV_H;})[0]||f.prediction||{};
+    var hm=p.min||f.horizon_min;
     if(typeof p.mean!=="number") throw new Error("no prediction");
     twinPred=p.mean;
-    document.getElementById("predHorizon").textContent=f.horizon_min;
-    document.getElementById("predFor").textContent=clockAt(f.ts,f.horizon_min)||"--:--";
-    document.getElementById("predAt").textContent=clockAt(f.ts,f.horizon_min,true)||"--:--:--";
+    document.getElementById("predHorizon").textContent=hm;
+    document.getElementById("predFor").textContent=clockAt(f.ts,hm)||"--:--";
+    document.getElementById("predAt").textContent=clockAt(f.ts,hm,true)||"--:--:--";
     // every trained horizon (t+5/10/15/30): value, target clock time, P10–P90
     document.getElementById("predTraj").innerHTML=(f.trajectory||[]).map(function(t){
       return '<span>+'+t.min+' min · '+(clockAt(f.ts,t.min)||"--:--")+'</span><b>'+fmt(t.mean,1)
@@ -981,7 +982,7 @@ function pollAdvisor(){
     advMeta="twin optimiser offline";
     PARAMS.forEach(function(p){ p.recOk=false; p.why=WHY_WAIT; p.whySrc=""; p.impact=[]; });
     render();
-  }).then(function(){ setTimeout(pollAdvisor,15000); });
+  }).then(function(){ setTimeout(pollAdvisor,5000); });   // backend recomputes as soon as the plant moves
 }
 
 /* ---------------- hero: live + predicted ---------------- */

@@ -28,10 +28,14 @@ KILN_COAL = "467RL300_TPH"
 KILN_FEED = config.KILN_FEED_TAG
 KILN_SIDE = [KILN_COAL, KILN_FEED, "423FN010_ST", "433MD140_ST1"]
 # Plant team (2026-10-08): kiln coal, kiln feed, PH fan speed and kiln speed
-# stay FIXED — never recommended. They remain model inputs at their live values,
-# so the advisor searches the same 4 calciner fuel levers as the plant loops.
-FIXED_LEVERS = [KILN_COAL, KILN_FEED, "423FN010_ST", "433MD140_ST1"]
-ADVISOR_LEVERS = list(OPT_LEVERS)
+# stay FIXED — never recommended. 2026-10-23: the advisor recommends only
+# calciner coal and SAFR; LAFR PC / TAD are held at their live values too.
+# Fixed levers remain model inputs (and LAFR stays in heat / TSR) at live values.
+ADVISOR_LEVERS = [COAL, "261WF080_TPH"]
+FIXED_LEVERS = [KILN_COAL, KILN_FEED, "423FN010_ST", "433MD140_ST1", "LAFR_FT", "K3V10_F1"]
+# The advisor's prediction horizon (min): the recommendation must put the
+# calciner in band at T+ADVISOR_HORIZON (and keep it there at T+30).
+ADVISOR_HORIZON = 10
 
 # Penalty added to the objective for an infeasible trial so the study still
 # converges toward the feasible region even when early trials violate.
@@ -222,7 +226,7 @@ def _f(v, nd: int = 2):
 
 def optimize(conditions: dict, n_trials: int = 200,
              levers: list[str] | None = None, clinker: dict | None = None,
-             objective_mode: str | None = None) -> dict:
+             objective_mode: str | None = None, horizon: int | None = None) -> dict:
     """Run the Optuna search and return the contract's advisory dict.
 
     ``levers`` picks which MVs to search (default: the four calciner fuel
@@ -230,6 +234,10 @@ def optimize(conditions: dict, n_trials: int = 200,
     ``clinker`` (the latest clinker lab result: ts, free_lime, liter_weight)
     switches the quality check from the predicted-quality models to the
     lab-based clinker_guard. The plant loops pass none and are unchanged.
+    ``horizon`` (min, a trajectory head e.g. 10): the reported prediction and
+    the band check use T+horizon; None keeps the model's own T+5 point.
+    Calciner fuel levers not searched stay at their live values but still
+    count in heat, TSR and cost.
     """
     import optuna
 
@@ -245,6 +253,21 @@ def optimize(conditions: dict, n_trials: int = 200,
     state, blo, bhi, votes = _band(conditions)
     defaults = analysis.feature_defaults()
     base_vals = {t: float(conditions.get(t, defaults.get(t, 0.0))) for t in opt_levers}
+    # calciner fuel levers held at live values (e.g. LAFR for the advisor)
+    fixed_fuel = {t: float(conditions.get(t, defaults.get(t, 0.0)))
+                  for t in OPT_LEVERS if t not in opt_levers}
+
+    def full(lv: dict) -> dict:
+        """Searched levers + held calciner fuels: the complete fuel set for economics."""
+        return {**fixed_fuel, **lv}
+
+    def at_h(point: dict, traj: list | None) -> dict:
+        """The T+horizon point of a trajectory (falls back to the T+5 point)."""
+        if horizon:
+            for p in traj or []:
+                if p.get("min") == horizon:
+                    return p
+        return point
 
     # Economics over the searched levers. Kiln coal is the same coal as the
     # calciner's, so price it identically — otherwise it would look like free
@@ -283,12 +306,12 @@ def optimize(conditions: dict, n_trials: int = 200,
     # Lab-based clinker guard (advisor): compares each trial's total calciner
     # heat with the current heat input of the same levers.
     guard = clinker_guard(clinker) if clinker is not None else None
-    base_heat = economics._heat_per_h(base_vals, econ)[1]
+    base_heat = economics._heat_per_h(full(base_vals), econ)[1]
 
     def heat_ok(lv: dict) -> bool:
         if not guard or not guard["active"]:
             return True
-        h = economics._heat_per_h(lv, econ)[1]
+        h = economics._heat_per_h(full(lv), econ)[1]
         tol = 0.002 * max(base_heat, 1.0)            # rounding slack (0.2%)
         if guard["direction"] == "no_heat_cut":
             return h >= base_heat - tol
@@ -308,9 +331,9 @@ def optimize(conditions: dict, n_trials: int = 200,
         heat cut/raised against it). 0 = every limit met. Graded, so when no
         option meets them all the search still moves toward the least breach."""
         ex = 0.0
-        h = economics._heat_per_h(lv, econ)[1]
+        h = economics._heat_per_h(full(lv), econ)[1]
         if max_tsr is not None:
-            ex += max(0.0, economics.kpis(lv, econ_cond(lv), econ)["tsr_pct"] - float(max_tsr))
+            ex += max(0.0, economics.kpis(full(lv), econ_cond(lv), econ)["tsr_pct"] - float(max_tsr))
         if max_heat_pct is not None and base_heat > 0:
             ex += max(0.0, abs(h - base_heat) / base_heat * 100.0 - float(max_heat_pct))
         if guard and guard["active"] and not heat_ok(lv) and base_heat > 0:
@@ -334,6 +357,8 @@ def optimize(conditions: dict, n_trials: int = 200,
         settled = traj[-1]
         stays = blo <= settled["mean"] <= bhi
         in_band = reach is not None and stays
+        if horizon:                                     # advisor: in band AT T+horizon too
+            in_band = in_band and blo <= at_h(pred[CV], traj)["mean"] <= bhi
         conf = _band_confidence(settled, blo, bhi)      # chance constraint (P10/P90)
 
         # HARD quality constraint. Advisor (clinker given): the lab-based guard
@@ -346,7 +371,7 @@ def optimize(conditions: dict, n_trials: int = 200,
         # Economic objective (config.OPTIMIZER_MODE): min ₹/ton | max TSR | min
         # coal. Replaces the old abstract coal_norm - afr_norm. Move + band-
         # confidence terms keep the advice calm and chance-constrained.
-        econ_score = economics.objective_score(levers, econ_cond(levers), mode=mode, econ=econ)
+        econ_score = economics.objective_score(full(levers), econ_cond(levers), mode=mode, econ=econ)
         move_pen = float(np.mean([abs(levers[t] - base_vals[t])
                                   / max(bounds[t][1] - bounds[t][0], 1e-6)
                                   for t in opt_levers]))
@@ -366,6 +391,8 @@ def optimize(conditions: dict, n_trials: int = 200,
         penalty = 0.0
         if not in_band:
             penalty += _INFEASIBLE_PENALTY + abs(settled["mean"] - (blo + bhi) / 2.0)
+            if horizon:
+                penalty += abs(at_h(pred[CV], traj)["mean"] - (blo + bhi) / 2.0)
         if not ok_inter:
             penalty += _INFEASIBLE_PENALTY
         if not q_ok:
@@ -400,14 +427,17 @@ def optimize(conditions: dict, n_trials: int = 200,
         best = min(pool, key=lambda t: t.value if t.value is not None else float("inf"))
     rec = best.user_attrs["levers"]
     pred = best.user_attrs["pred"]
-    rec_temp = pred[CV]["mean"]
     rec_traj = best.user_attrs.get("traj")
+    rec_pt = at_h(pred[CV], rec_traj)                 # T+horizon (advisor) or T+5
+    rec_temp = rec_pt["mean"]
     rec_reach = best.user_attrs.get("reach")
     rec_conf = best.user_attrs.get("conf")
+    rec_all, base_all = full(rec), full(base_vals)
 
     # Baseline (current levers) was predicted BEFORE the search, from the same
     # live history the trials used (see above).
-    base_temp = base_core["prediction"][CV]["mean"] if base_core else None
+    base_temp = (at_h(base_core["prediction"][CV], base_core.get("trajectory"))["mean"]
+                 if base_core else None)
 
     interlocks = _interlocks(pred)
     in_band = blo <= rec_temp <= bhi
@@ -416,8 +446,8 @@ def optimize(conditions: dict, n_trials: int = 200,
     # ₹/ton and specific-heat need the kiln feed (clinker rate); if the caller
     # didn't pass it, fall back to the recent-median feed so cost never explodes.
     # Each side uses its own feed when kiln feed is a searched lever.
-    rec_kpis = economics.kpis(rec, econ_cond(rec), econ)
-    base_kpis = economics.kpis(base_vals, econ_cond(base_vals), econ)
+    rec_kpis = economics.kpis(rec_all, econ_cond(rec), econ)
+    base_kpis = economics.kpis(base_all, econ_cond(base_vals), econ)
     fuel_savings = {
         "coal_tph": round(base_kpis["coal_tph"] - rec_kpis["coal_tph"], 2),
         "cost_per_ton": round(base_kpis["cost_per_ton"] - rec_kpis["cost_per_ton"], 1),
@@ -432,7 +462,7 @@ def optimize(conditions: dict, n_trials: int = 200,
     temp_pull = best.user_attrs.get("contributions") or {}
     sensitivities = {}
     for t in opt_levers:
-        bump = dict(rec)
+        bump = dict(rec_all)
         bump[t] = rec[t] + 1.0                          # per-unit marginal effect
         dk = economics.kpis(bump, econ_cond(bump), econ)
         sensitivities[t] = {
@@ -445,8 +475,8 @@ def optimize(conditions: dict, n_trials: int = 200,
         f"Operating state {state}: target band {int(blo)}-{int(bhi)} °C.",
         f"Recommended coal {COAL} = {rec[COAL]:.1f} tph "
         f"({rec[COAL] - base_vals[COAL]:+.1f} vs current).",
-        f"Recommended AFR total = {sum(rec[t] for t in AFR):.1f} tph "
-        f"({sum(rec[t] for t in AFR) - sum(base_vals[t] for t in AFR):+.1f} vs current).",
+        f"Recommended AFR total = {sum(rec_all[t] for t in AFR):.1f} tph "
+        f"({sum(rec_all[t] for t in AFR) - sum(base_all[t] for t in AFR):+.1f} vs current).",
         # deltas read "recommended minus current" (savings dict keeps its own
         # positive-is-better convention for the KPI cards)
         (f"Fuel: {rec_kpis['cost_per_ton']:.0f} ₹/t clinker "
@@ -483,9 +513,10 @@ def optimize(conditions: dict, n_trials: int = 200,
 
     return {
         "recommended": {t: _f(rec[t]) for t in opt_levers},
+        "horizon_min": int(horizon or analysis.DELTA),
         "predicted": {
-            "temp": {"mean": _f(rec_temp, 1), "p10": _f(pred[CV]["p10"], 1),
-                     "p90": _f(pred[CV]["p90"], 1)},
+            "temp": {"mean": _f(rec_temp, 1), "p10": _f(rec_pt.get("p10"), 1),
+                     "p90": _f(rec_pt.get("p90"), 1)},
             "safety": {tag: _f(pred[tag]["mean"], 1)
                        for tag in analysis.SAFETY if tag in pred},
         },
@@ -494,12 +525,12 @@ def optimize(conditions: dict, n_trials: int = 200,
         "in_band": bool(in_band),
         "state_votes": votes,
         "interlocks": [{**i, "predicted": _f(i["predicted"], 1)} for i in interlocks],
-        "objective": {"coal": _f(rec[COAL]), "afr_total": _f(sum(rec[t] for t in AFR))},
+        "objective": {"coal": _f(rec[COAL]), "afr_total": _f(sum(rec_all[t] for t in AFR))},
         "baseline": {"levers": {t: _f(base_vals[t]) for t in opt_levers},
                      "temp": _f(base_temp, 1)},
         "delta": {
             "coal": _f(rec[COAL] - base_vals[COAL]),
-            "afr": _f(sum(rec[t] for t in AFR) - sum(base_vals[t] for t in AFR)),
+            "afr": _f(sum(rec_all[t] for t in AFR) - sum(base_all[t] for t in AFR)),
             "temp": _f(None if base_temp is None else rec_temp - base_temp, 1),
         },
         "explanation": explanation,
@@ -522,6 +553,6 @@ def optimize(conditions: dict, n_trials: int = 200,
         "all_limits_met": bool(feasible),
         "limits_excess": _f(best.user_attrs.get("limits_excess"), 2),
         "heat": {"current_kcal_h": _f(base_heat, 0),
-                 "recommended_kcal_h": _f(economics._heat_per_h(rec, econ)[1], 0)},
+                 "recommended_kcal_h": _f(economics._heat_per_h(rec_all, econ)[1], 0)},
         "sensitivities": sensitivities,
     }

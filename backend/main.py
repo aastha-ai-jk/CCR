@@ -379,19 +379,42 @@ def _adv_setting(key: str, default):
     """data/plant_settings.json "advisor" value (re-read each call), else default."""
     v = (config.plant_settings().get("advisor") or {}).get(key)
     return default if v is None else v
-_advisor = {"result": None, "computed_at": 0.0, "busy": False}
+_advisor = {"result": None, "computed_at": 0.0, "busy": False, "inputs": {}}
 _advisor_lock = threading.Lock()
+
+# "Instant" advice: recompute as soon as the plant moves noticeably since the
+# inputs of the last advisory (any of these by more than its threshold), at
+# most every ADVISOR_MIN_GAP_SEC, and at least every refresh_sec regardless.
+ADVISOR_MIN_GAP_SEC = 15
+ADVISOR_TRIGGER = {analysis.CV: 2.0,              # calciner outlet temp, degC
+                   "467RL400_TPH": 0.3,           # calciner coal, t/h
+                   "261WF080_TPH": 0.5,           # SAFR, t/h
+                   "LAFR_FT": 50.0, "K3V10_F1": 50.0,   # LAFR (held, still a model input), l/h
+                   config.KILN_FEED_TAG: 5.0}     # kiln feed, t/h
+
+
+def _advisor_inputs_moved(values: dict) -> bool:
+    last = _advisor.get("inputs") or {}
+    if not last:
+        return True
+    for tag, thr in ADVISOR_TRIGGER.items():
+        a, b = values.get(tag), last.get(tag)
+        if a is not None and b is not None and abs(float(a) - float(b)) > thr:
+            return True
+    return False
 
 
 def _advisor_run() -> None:
     try:
         from twin import optimize as twin_opt
         s, snap, conditions, levers = _live_inputs()
+        _advisor["inputs"] = {t: s["values"].get(t) for t in ADVISOR_TRIGGER}
         r = twin_opt.optimize({**conditions, **levers},
                               n_trials=int(_adv_setting("trials", ADVISOR_TRIALS)),
                               levers=twin_opt.ADVISOR_LEVERS,
                               clinker=_latest_clinker() or {},
-                              objective_mode="least_coal")   # plant aim; settings can override
+                              objective_mode="least_coal",   # plant aim; settings can override
+                              horizon=int(_adv_setting("horizon_min", twin_opt.ADVISOR_HORIZON)))
         r["ts"], r["source"] = s["ts"], s["source"]
         from twin import reasoning                # "why" text: template, + LLM when enabled
         reasoning.attach(r)
@@ -409,15 +432,20 @@ def _advisor_run() -> None:
 def twin_advisor():
     """Latest advisory setpoints for the advisor levers (ADVISORY ONLY), plus
     the live current value of each lever. Kicks off a background
-    re-optimisation when the cached result is older than ADVISOR_REFRESH_SEC."""
+    re-optimisation at once when there is no advice yet, when the plant has moved
+    noticeably since the last one (ADVISOR_TRIGGER, at most every
+    ADVISOR_MIN_GAP_SEC), or when it is older than refresh_sec."""
     from twin.optimize import ADVISOR_LEVERS, FIXED_LEVERS
+    s = _snapshot()
     with _advisor_lock:
-        stale = (time.time() - _advisor["computed_at"]
-                 > float(_adv_setting("refresh_sec", ADVISOR_REFRESH_SEC)))
-        if stale and not _advisor["busy"]:
+        age = time.time() - _advisor["computed_at"]
+        due = (_advisor["result"] is None
+               or age > float(_adv_setting("refresh_sec", ADVISOR_REFRESH_SEC))
+               or (age > float(_adv_setting("min_gap_sec", ADVISOR_MIN_GAP_SEC))
+                   and _advisor_inputs_moved(s["values"])))
+        if due and not _advisor["busy"]:
             _advisor["busy"] = True
             threading.Thread(target=_advisor_run, daemon=True).start()
-    s = _snapshot()
     cat = db.tag_catalog().set_index("tag")
     live = {t: {"name": str(cat.loc[t, "name"]),
                 "uom": None if pd.isna(cat.loc[t, "uom"]) else str(cat.loc[t, "uom"]),
