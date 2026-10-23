@@ -259,10 +259,11 @@ def advisory_summary(day: str | None = None) -> dict:
 
 
 # Admin view: a DECLINED recommendation the plant reached anyway — the lever's
-# actual value came within MATCH_TOL_PCT % of the recommended value within
+# 1-minute mean came within MATCH_TOL_PCT % of the recommended value within
 # MATCH_WINDOW_MIN minutes after the decline (advice was right, not followed).
 MATCH_TOL_PCT = 5.0
 MATCH_WINDOW_MIN = 30.0
+PROOF_BEFORE_MIN = 10                 # evidence chart starts this long before the decline
 
 
 def _lever_series(tag: str, start: dt.datetime, end: dt.datetime) -> pd.Series:
@@ -331,8 +332,23 @@ def declined_but_reached(day: str | None = None) -> dict:
         if nxt and nxt["action"] == "undone":
             continue
         t0 = dt.datetime.fromisoformat(r["decided_at"])
-        s = _lever_series(r["tag"], t0, t0 + dt.timedelta(minutes=window))
-        out.append({**r, **match_decline(float(r["recommended_value"]), t0, s, now, tol_pct, window)})
+        # Match on 1-minute means, not raw 2-s samples: a single noisy reading
+        # (weigh-feeder spikes) is not the plant running at the recommended value.
+        raw = _lever_series(r["tag"], t0, t0 + dt.timedelta(minutes=window))
+        s = raw.resample("1min").mean().dropna() if len(raw) else raw
+        row = {**r, **match_decline(float(r["recommended_value"]), t0, s, now, tol_pct, window)}
+        if row.get("minutes_after") is not None:
+            row["minutes_after"] = max(0.0, row["minutes_after"])   # minute bucket may start before t0
+        # evidence chart: the lever's actual run, 10 min before -> window after, 1-min means
+        ctx = _lever_series(r["tag"], t0 - dt.timedelta(minutes=PROOF_BEFORE_MIN),
+                            t0 + dt.timedelta(minutes=window))
+        if len(ctx):
+            m = ctx.resample("1min").mean().dropna()
+            row["series"] = [{"t": t.isoformat(timespec="seconds"), "v": round(float(v), 3)}
+                             for t, v in m.items()]
+        else:
+            row["series"] = []
+        out.append(row)
     n = {k: sum(1 for x in out if x["status"] == k)
          for k in ("reached", "not_reached", "pending", "no_data")}
     return {"day": day, "tolerance_pct": tol_pct, "window_min": window,

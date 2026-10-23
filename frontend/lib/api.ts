@@ -133,6 +133,7 @@ export interface DeclinedReachedRow {
   status: "reached" | "not_reached" | "pending" | "no_data";
   tolerance: number; reached_at?: string; reached_value?: number;
   minutes_after?: number; closest_value?: number | null;
+  series?: { t: string; v: number }[];      // actual lever run, 10 min before -> window after
 }
 export interface DeclinedReachedResult {
   day: string; tolerance_pct: number; window_min: number; declines: number;
