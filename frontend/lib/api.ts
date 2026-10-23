@@ -130,13 +130,13 @@ export interface DeclinedReachedRow {
   tag: string; param_name: string | null; unit: string | null;
   reason: string | null; note: string | null; operating_state: string | null;
   current_value: number | null; recommended_value: number;
-  status: "reached" | "not_reached" | "pending" | "no_data";
-  tolerance: number; reached_at?: string; reached_value?: number;
-  minutes_after?: number; closest_value?: number | null;
-  series?: { t: string; v: number }[];      // actual lever run, 10 min before -> window after
+  recommended_at: string; target_at: string; horizon_min: number;   // advice made at, for (made + horizon)
+  status: "reached" | "not_reached" | "pending" | "no_data";       // reached = decline not correct
+  tolerance: number; actual_at?: string; actual_value?: number; diff?: number;
+  series?: { t: string; v: number }[];      // actual run, 30-s means, 10 min before advice -> 10 min after target
 }
 export interface DeclinedReachedResult {
-  day: string; tolerance_pct: number; window_min: number; declines: number;
+  day: string; horizon_min: number; tolerances: Record<string, number>; declines: number;
   counts: { reached: number; not_reached: number; pending: number; no_data: number };
   rows: DeclinedReachedRow[];
 }

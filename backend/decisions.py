@@ -258,12 +258,17 @@ def advisory_summary(day: str | None = None) -> dict:
         return {"day": day, "computed": 0, "issued": 0}
 
 
-# Admin view: a DECLINED recommendation the plant reached anyway — the lever's
-# 1-minute mean came within MATCH_TOL_PCT % of the recommended value within
-# MATCH_WINDOW_MIN minutes after the decline (advice was right, not followed).
-MATCH_TOL_PCT = 5.0
-MATCH_WINDOW_MIN = 30.0
-PROOF_BEFORE_MIN = 10                 # evidence chart starts this long before the decline
+# Admin view: was a DECLINE wrong? A recommendation made at time R is for
+# R + horizon (the advisor's T+10). At that target time the system takes the
+# single plant reading nearest to it; if it is within the parameter's
+# tolerance of the recommended value, the plant ended up where the advice
+# said — the decline was not correct.
+#   calciner coal ±2.5 t/h · SAFR ±1.5 t/h · calciner outlet temp ±5 °C
+# (plant_settings.json advisor.decline_check_tol overrides per tag).
+CHECK_TOL = {"467RL400_TPH": 2.5, "261WF080_TPH": 1.5, analysis.CV: 5.0}
+READING_MAX_GAP_S = 120                # the nearest reading must be this close to the target time
+PROOF_BEFORE_MIN = 10                  # evidence chart: 10 min before the recommendation ...
+PROOF_AFTER_MIN = 10                   # ... to 10 min after the target time
 
 
 def _lever_series(tag: str, start: dt.datetime, end: dt.datetime) -> pd.Series:
@@ -287,71 +292,69 @@ def _lever_series(tag: str, start: dt.datetime, end: dt.datetime) -> pd.Series:
     return s[(s.index >= start) & (s.index <= end)]
 
 
-def match_decline(rec: float, decided_at: dt.datetime, series: pd.Series,
-                  now: dt.datetime, tol_pct: float = MATCH_TOL_PCT,
-                  window_min: float = MATCH_WINDOW_MIN) -> dict:
-    """Did the plant reach rec (± tol_pct %) within window_min after decided_at?
-    status: reached | not_reached | pending (window still open) | no_data."""
-    tol = abs(rec) * tol_pct / 100.0
-    end = decided_at + dt.timedelta(minutes=window_min)
-    inside = series[(series - rec).abs() <= tol] if len(series) else series
-    if len(inside):
-        t, v = inside.index[0], float(inside.iloc[0])
-        return {"status": "reached", "reached_at": t.isoformat(timespec="seconds"),
-                "reached_value": v, "minutes_after": round((t - decided_at).total_seconds() / 60, 1),
-                "tolerance": tol}
-    if now < end:
+def check_decline(rec: float, target: dt.datetime, series: pd.Series, now: dt.datetime,
+                  tol: float, max_gap_s: float = READING_MAX_GAP_S) -> dict:
+    """The single reading nearest to the target time vs rec ± tol.
+    status: reached (decline not correct) | not_reached | pending (target time
+    not yet passed) | no_data (no reading within max_gap_s of the target)."""
+    if now < target:
         return {"status": "pending", "tolerance": tol}
-    return {"status": "not_reached" if len(series) else "no_data", "tolerance": tol,
-            "closest_value": None if not len(series) else
-            float(series.iloc[(series - rec).abs().argmin()])}
+    if not len(series):
+        return {"status": "no_data", "tolerance": tol}
+    gaps = abs((series.index - target).total_seconds())
+    i = int(gaps.argmin())
+    if gaps[i] > max_gap_s:
+        return {"status": "no_data", "tolerance": tol}
+    t, v = series.index[i], float(series.iloc[i])
+    return {"status": "reached" if abs(v - rec) <= tol else "not_reached", "tolerance": tol,
+            "actual_at": t.isoformat(timespec="seconds"), "actual_value": v,
+            "diff": v - rec}
 
 
 def declined_but_reached(day: str | None = None) -> dict:
-    """Every lever decline on one date, each checked against what the plant did
-    afterwards. Declines later undone are left out (the decision was withdrawn)."""
+    """Every decline on one date (calciner coal, SAFR, calciner outlet temp),
+    each checked at its recommendation's target time. Declines later undone are
+    left out (the decision was withdrawn)."""
     import config
-    from twin.optimize import ADVISOR_LEVERS
+    from twin.optimize import ADVISOR_HORIZON, ADVISOR_LEVERS
     _ensure()
     day = day or dt.date.today().isoformat()
     dt.date.fromisoformat(day)
     adv = config.plant_settings().get("advisor") or {}
-    tol_pct = float(adv.get("decline_match_tol_pct") or MATCH_TOL_PCT)
-    window = float(adv.get("decline_match_window_min") or MATCH_WINDOW_MIN)
+    tols = {**CHECK_TOL, **{k: float(v) for k, v in (adv.get("decline_check_tol") or {}).items()}}
     rows = db.q("SELECT id, decided_at, operator, param_id, tag, param_name, unit, action, "
-                "reason, note, current_value, recommended_value, operating_state "
-                "FROM operator_decisions WHERE day = :d ORDER BY id", {"d": day})
+                "reason, note, current_value, recommended_value, operating_state, "
+                "advisory_ts, horizon_min FROM operator_decisions WHERE day = :d ORDER BY id",
+                {"d": day})
     now = dt.datetime.now()
     recs = rows.where(pd.notna(rows), None).to_dict("records") if len(rows) else []
     out = []
     for i, r in enumerate(recs):
-        if (r["action"] != "declined" or r["tag"] not in ADVISOR_LEVERS
+        if (r["action"] != "declined" or r["tag"] not in (*ADVISOR_LEVERS, analysis.CV)
                 or r["recommended_value"] is None):
             continue
         nxt = next((x for x in recs[i + 1:] if x["tag"] == r["tag"]), None)
         if nxt and nxt["action"] == "undone":
             continue
-        t0 = dt.datetime.fromisoformat(r["decided_at"])
-        # Match on 1-minute means, not raw 2-s samples: a single noisy reading
-        # (weigh-feeder spikes) is not the plant running at the recommended value.
-        raw = _lever_series(r["tag"], t0, t0 + dt.timedelta(minutes=window))
-        s = raw.resample("1min").mean().dropna() if len(raw) else raw
-        row = {**r, **match_decline(float(r["recommended_value"]), t0, s, now, tol_pct, window)}
-        if row.get("minutes_after") is not None:
-            row["minutes_after"] = max(0.0, row["minutes_after"])   # minute bucket may start before t0
-        # evidence chart: the lever's actual run, 10 min before -> window after, 1-min means
-        ctx = _lever_series(r["tag"], t0 - dt.timedelta(minutes=PROOF_BEFORE_MIN),
-                            t0 + dt.timedelta(minutes=window))
-        if len(ctx):
-            m = ctx.resample("1min").mean().dropna()
-            row["series"] = [{"t": t.isoformat(timespec="seconds"), "v": round(float(v), 3)}
-                             for t, v in m.items()]
-        else:
-            row["series"] = []
+        decided = dt.datetime.fromisoformat(r["decided_at"])
+        made = pd.to_datetime(r["advisory_ts"], errors="coerce") if r["advisory_ts"] else None
+        made = made.to_pydatetime() if made is not None and not pd.isna(made) else decided
+        h = int(r["horizon_min"] or ADVISOR_HORIZON)
+        target = made + dt.timedelta(minutes=h)
+        tol = float(tols.get(r["tag"], 0.05 * abs(float(r["recommended_value"]))))
+        raw = _lever_series(r["tag"], made - dt.timedelta(minutes=PROOF_BEFORE_MIN),
+                            target + dt.timedelta(minutes=PROOF_AFTER_MIN))
+        row = {**r, "recommended_at": made.isoformat(timespec="seconds"), "horizon_min": h,
+               "target_at": target.isoformat(timespec="seconds"),
+               **check_decline(float(r["recommended_value"]), target, raw, now, tol)}
+        # evidence chart: 30-s means (the verdict itself uses the single reading)
+        m = raw.resample("30s").mean().dropna() if len(raw) else raw
+        row["series"] = [{"t": t.isoformat(timespec="seconds"), "v": round(float(v), 3)}
+                         for t, v in m.items()]
         out.append(row)
     n = {k: sum(1 for x in out if x["status"] == k)
          for k in ("reached", "not_reached", "pending", "no_data")}
-    return {"day": day, "tolerance_pct": tol_pct, "window_min": window,
+    return {"day": day, "horizon_min": ADVISOR_HORIZON, "tolerances": tols,
             "declines": len(out), "counts": n, "rows": out}
 
 
