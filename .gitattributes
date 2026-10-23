@@ -4,3 +4,7 @@
 # on a Windows checkout corrupts it (breaks the "[Fatal] Model format error"
 # way). Force no line-ending conversion, ever.
 backend/models/*.txt -text
+
+# PDFs and Office files are byte-offset sensitive; never convert line endings.
+*.pdf binary
+*.xlsx binary
