@@ -16,6 +16,8 @@ models/*.pkl
 models/*.pt
 # NOTE: .env and data/*.sqlite ARE committed at the user's request.
 #   .env currently holds only a placeholder DB password.
+# Secrets (OpenAI API key etc.) go in .env.secrets — NEVER committed.
+.env.secrets
 #   The 106 MB sqlite is tracked via Git LFS (see .gitattributes).
 .gstack/
 # live runtime state (regenerated continuously by shadow/monitor/retrain)

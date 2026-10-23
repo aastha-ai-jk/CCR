@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
+# Secrets (API keys) live in .env.secrets, which git ignores — .env itself is
+# committed. See .env.secrets.example.
+load_dotenv(ROOT / ".env.secrets", override=True)
 
 # --- Database -------------------------------------------------------------
 USE_SQLITE = os.getenv("USE_SQLITE", "0") == "1"
