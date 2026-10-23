@@ -83,10 +83,14 @@ def _classify_state(key: str, value: float | None) -> int | None:
     for i, (lo, hi) in enumerate(bands, start=1):
         if lo <= value < hi:
             return i
-    # out of listed bands: clamp to nearest end
-    if value < bands[0][0]:
-        return 1
-    return 3
+    # Off the listed bands: clamp by DIRECTION, not position. Rising bands
+    # (torque, NOx, liter weight...): below State 1 -> 1, above State 3 -> 3.
+    # Falling bands (free lime: State 1 = 1.4-1.8 ... State 3 = < 1.0): ABOVE
+    # State 1 (e.g. 1.99 %, under-burnt) -> 1, below State 3 -> 3.
+    rising = bands[0][0] < bands[-1][0]
+    if rising:
+        return 1 if value < bands[0][0] else 3
+    return 1 if value >= bands[0][1] else 3
 
 
 @lru_cache(maxsize=1)

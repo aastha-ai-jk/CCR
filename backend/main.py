@@ -409,6 +409,14 @@ def _advisor_run() -> None:
         from twin import optimize as twin_opt
         s, snap, conditions, levers = _live_inputs()
         _advisor["inputs"] = {t: s["values"].get(t) for t in ADVISOR_TRIGGER}
+        # Kiln stopped / not in load: no fuel advice (control actions only apply
+        # above KILN_FEED_MIN_TPH, per the combustion control logic).
+        feed = s["values"].get(config.KILN_FEED_TAG)
+        if feed is None or float(feed) < config.KILN_FEED_MIN_TPH:
+            _advisor.update(result={"available": False, "kiln_running": False,
+                                    "kiln_feed": feed, "ts": s["ts"], "source": s["source"]},
+                            computed_at=time.time())
+            return
         r = twin_opt.optimize({**conditions, **levers},
                               n_trials=int(_adv_setting("trials", ADVISOR_TRIALS)),
                               levers=twin_opt.ADVISOR_LEVERS,

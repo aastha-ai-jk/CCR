@@ -51,7 +51,11 @@ export default function Admin() {
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold">Admin Dashboard</h1>
-          <div className="text-sm text-[var(--muted)]">Kiln-3 digital twin · administration</div>
+          <div className="text-sm text-[var(--muted)]">
+            Kiln-3 digital twin · administration · decisions come from the{" "}
+            <a className="text-[var(--accent)] hover:underline" target="_blank" rel="noopener"
+              href={`${process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000"}/advisor`}>CCR Advisor ↗</a>
+          </div>
         </div>
         <label className="text-sm text-[var(--muted)] flex items-center gap-2">
           Day

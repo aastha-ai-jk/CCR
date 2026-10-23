@@ -331,6 +331,11 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 13.5h12"/><path d="M4 13.5V8M7.3 13.5V4.2M10.6 13.5v-3.6M13.9 13.5V6.4" stroke-linecap="round"/></svg>
         Shift dashboard
       </button>
+      <!-- same plant, other app: the twin's Admin Dashboard (port 3000 / 3010) -->
+      <a class="rail__btn" id="adminLink" href="#" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5 2.5 3.7v4c0 3.3 2.4 5.9 5.5 6.8 3.1-.9 5.5-3.5 5.5-6.8v-4L8 1.5Z"/><path d="m5.6 8 1.7 1.7 3.2-3.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Admin dashboard ↗
+      </a>
     </div>
 
     <div class="rail__foot">
@@ -550,14 +555,17 @@ function bandGauge(live,pred){
   }
   var W=760,L=34,R=726,y=58,h=26;
   var pad=Math.max(12,(HI-LO)*0.75);
-  var AX0=Math.floor((LO-pad)/5)*5, AX1=Math.ceil((HI+pad)/5)*5;
+  // the scale always covers the band AND the live / predicted values (A3)
+  var lo=LO-pad, hi=HI+pad;
+  [live,pred].forEach(function(v){ if(v!==null){ lo=Math.min(lo,v-4); hi=Math.max(hi,v+4); } });
+  var AX0=Math.floor(lo/5)*5, AX1=Math.ceil(hi/5)*5;
   function x(t){return L+(Math.min(Math.max(t,AX0),AX1)-AX0)/(AX1-AX0)*(R-L);}
   var s='';
   s+='<rect x="'+L+'" y="'+y+'" width="'+(R-L)+'" height="'+h+'" rx="3" fill="#232D34"/>';
   s+='<rect x="'+x(LO)+'" y="'+y+'" width="'+(x(HI)-x(LO))+'" height="'+h+'" rx="3" fill="rgba(79,184,138,.22)"/>';
   s+='<line x1="'+x(LO)+'" y1="'+y+'" x2="'+x(LO)+'" y2="'+(y+h)+'" stroke="#4FB88A" stroke-width="1.5"/>';
   s+='<line x1="'+x(HI)+'" y1="'+y+'" x2="'+x(HI)+'" y2="'+(y+h)+'" stroke="#4FB88A" stroke-width="1.5"/>';
-  var step=(AX1-AX0)>60?10:5;
+  var step=(AX1-AX0)>150?20:(AX1-AX0)>60?10:5;
   for(var t=Math.ceil(AX0/step)*step;t<=AX1;t+=step){
     s+='<line x1="'+x(t)+'" y1="'+(y+h)+'" x2="'+x(t)+'" y2="'+(y+h+5)+'" stroke="#3A464E" stroke-width="1"/>';
     s+='<text x="'+x(t)+'" y="'+(y+h+20)+'" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="11.5" fill="#6D7B85">'+t+'</text>';
@@ -691,10 +699,16 @@ document.getElementById("list").addEventListener("click",function(ev){
 });
 
 /* ---------------- view switch ---------------- */
-Array.prototype.forEach.call(document.querySelectorAll(".rail__btn"),function(b){
+// Admin Dashboard lives in the twin frontend: same host, API port 8000 -> 3000
+// (local) or 8010 -> 3010 (GPU / edge).
+(function(){
+  var p=location.port, fp={"8000":"3000","8010":"3010"}[p]||"3000";
+  document.getElementById("adminLink").href=location.protocol+"//"+location.hostname+":"+fp+"/admin";
+})();
+Array.prototype.forEach.call(document.querySelectorAll(".rail__btn[data-view]"),function(b){
   b.addEventListener("click",function(){
     view=b.getAttribute("data-view");
-    Array.prototype.forEach.call(document.querySelectorAll(".rail__btn"),function(x){x.classList.toggle("is-active",x===b);});
+    Array.prototype.forEach.call(document.querySelectorAll(".rail__btn[data-view]"),function(x){x.classList.toggle("is-active",x===b);});
     document.getElementById("view-recs").hidden=(view!=="recs");
     document.getElementById("view-dash").hidden=(view!=="dash");
     if(view==="dash"){ paintDash(); loadTrend(); loadAdvSummary(); }
@@ -998,6 +1012,9 @@ function pollAdvisor(){
     }else if(a.available){
       advMeta="last advisory is stale (from "+(clockAt(a.ts,0)||"—")+", "+a.source
         +") — twin optimiser recomputing…";
+    }else if(a.kiln_running===false){
+      advMeta="kiln not running (feed "+(typeof a.kiln_feed==="number"?fmt(a.kiln_feed,0):"—")
+        +" t/h, below 461) — no fuel recommendation";
     }else{
       advMeta=a.pending?"twin optimiser computing first advisory (~1 min)…"
         :"optimiser unavailable"+(a.error?" — "+a.error:"");
