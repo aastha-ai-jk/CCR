@@ -57,7 +57,7 @@ echo "=== 3/6 compile + import smoke test ==="
 PYS=$(cut -f1 "$HERE/MANIFEST.tsv" | grep '\.py$' | tr '\n' ' ')
 .venv/bin/python -m py_compile $PYS
 find backend twin etl -name "*.pyc" -delete 2>/dev/null || true
-.venv/bin/python -c "import config, json; json.load(open('data/plant_settings.json')); import backend.analysis, backend.decisions, backend._fuel_dashboard, backend.main, twin.features, twin.model, twin.economics, twin.optimize, twin.optimizer_loop, twin.monitor, twin.retrain, twin.train_gbt, etl.clean, etl.load, etl.live_feed; print('  IMPORT_OK')"
+.venv/bin/python -c "import config, json; json.load(open('data/plant_settings.json')); import backend.analysis, backend.decisions, backend._fuel_dashboard, backend.main, twin.features, twin.model, twin.economics, twin.optimize, twin.reasoning, twin.optimizer_loop, twin.monitor, twin.retrain, twin.train_gbt, etl.clean, etl.load, etl.live_feed; print('  IMPORT_OK')"
 
 echo "=== 4/6 frontend production build ==="
 (cd frontend && npm run build 2>&1 | tail -15)   # pipefail: a failed build trips the ERR trap
@@ -67,14 +67,16 @@ pm2 restart ccr-backend ccr-frontend --update-env >/dev/null
 sleep 10
 
 echo "=== 6/6 health checks ==="
-for u in /api/health /api/decisions /api/decisions/days /advisor; do
+for u in /api/health /api/decisions /api/decisions/days /api/advisor/summary /api/admin/declined-reached /advisor; do
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 "http://localhost:8010$u")
   echo "  backend $u -> $code"
   [ "$code" = "200" ]
 done
-code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 http://localhost:3010/twin)
-echo "  frontend /twin -> $code"
-[ "$code" = "200" ]
+for u in /twin /admin; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 "http://localhost:3010$u")
+  echo "  frontend $u -> $code"
+  [ "$code" = "200" ]
+done
 trap - ERR
 echo "  twin forecast (first call loads the model, can take a minute):"
 curl -s --max-time 240 http://localhost:8010/api/twin/forecast | head -c 400 || true

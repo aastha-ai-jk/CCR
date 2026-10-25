@@ -88,11 +88,13 @@ def main() -> None:
     out.parent.mkdir(exist_ok=True)
     bases = server_bases() if SERVER_HASHES else {}
     files = sorted(set(FILES) | set(bases))
+    skipped = []
     with tarfile.open(out, "w:gz") as tar:
         for f in files:
             new = blob(NEW, f)
-            if new is None:
-                sys.exit(f"{f} not found at {NEW}")
+            if new is None:                             # deleted since BASE: leave the
+                skipped.append(f)                       # server's copy (it is no longer linked)
+                continue
             if f in bases:
                 base = bases[f]
             elif SERVER_HASHES and f.endswith(HASHED_EXT) and not f.startswith(PRUNED):
@@ -107,6 +109,8 @@ def main() -> None:
             add(tar, s, lf(HERE / s), 0o755)
         add(tar, "README.md", lf(HERE / "README.md"))
     print("\n".join(rows))
+    if skipped:
+        print("deleted in the repo, left untouched on the server:", ", ".join(skipped))
     src = f"server hashes {SERVER_HASHES.name}" if SERVER_HASHES else f"base {BASE}"
     print(f"wrote {out} ({out.stat().st_size / 1024:.0f} KiB, {len(rows)} files) from {NEW} ({src})")
 
