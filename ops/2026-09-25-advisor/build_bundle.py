@@ -34,7 +34,7 @@ ROOT = HERE.parent.parent
 # every app file changed since BASE (the ops scripts themselves are not deployed)
 FILES = [f for f in subprocess.run(["git", "diff", "--name-only", BASE, NEW], cwd=ROOT,
                                    capture_output=True, text=True, check=True).stdout.splitlines()
-         if not f.startswith("ops/")]
+         if not f.startswith("ops/") and f != ".gitignore"]   # git housekeeping, not app code
 NAME = "ccr-advisor-" + datetime.date.today().strftime("%Y%m%d")
 # server-hash mode: what the server's find covered, and what is never deployed
 HASHED_EXT = (".py", ".ts", ".tsx", ".js", ".json", ".html", ".txt", ".css")
