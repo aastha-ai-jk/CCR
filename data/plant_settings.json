@@ -10,6 +10,10 @@
       "_about": "GR1: LIVE CO / O2 (2-min average, analyser purge excluded) against the interlock limits; while one is outside, no Accept may add fuel. 'limits' overrides an interlock for GR1 only. Kiln inlet CO 1500 = PLACEHOLDER (2026-10-26) until the CCR confirms the real limit (default 800 is below its normal ~690-1230 ppm).",
       "avg_sec": 120,
       "limits": {"423AM822_CO_PPM": 1500}
+    },
+    "direction": {
+      "_about": "GR2: live temp above the band and the move adds total calciner heat (or below and it cuts heat) by more than min_heat_change_pct -> Accept blocked. Smaller changes are noise / grid rounding.",
+      "min_heat_change_pct": 1.0
     }
   },
 

@@ -520,6 +520,7 @@ def twin_advisor():
     from backend import guardrails
     out["guardrails"] = guardrails.evaluate(_fresh_values(s), _advisor_recommended(r))
     out["guardrails"]["combustion"] = _combustion(s)          # GR1: actual CO / O2
+    out["guardrails"]["direction"] = _direction(s, r)         # GR2: heat vs band
     out["validation"] = _current_validation()["report"]
     return _json_safe(out)
 
@@ -657,6 +658,15 @@ def _combustion(s: dict) -> dict:
             else:                                  # whole window purging: no judgement
                 vals.pop(tag, None)
     return guardrails.combustion(vals, names)
+
+
+def _direction(s: dict, r: dict | None) -> dict:
+    """GR2: does the current advice move total calciner heat the right way for
+    where the live temperature is against the band? Current data only."""
+    from backend import guardrails
+    ok = bool(_advisor_recommended(r))
+    return guardrails.direction(_fresh_values(s).get(analysis.CV) if ok else None,
+                                (r or {}).get("target_band"), (r or {}).get("heat"))
 
 
 def _fresh_values(s: dict) -> dict:
@@ -1064,6 +1074,11 @@ def _accept_refusal(req: DecisionReq, snap: dict) -> str | None:
             rec if rec is not None else req.recommended_value, _combustion(snap))
         if why:
             return why
+        # GR2: the whole move goes the wrong way for the band
+        d = _direction(snap, _advisor["result"])
+        if d["flag"]:
+            return (f"Refused by direction check: {d['reason']}. Accept is blocked for this "
+                    "recommendation; Decline is still allowed.")
         # never judge an Accept on a cached result: re-check the data now
         return validation.refuse_accept(req.tag, _current_validation(max_age=0)["report"])
     except Exception as e:
