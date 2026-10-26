@@ -168,6 +168,16 @@ main{display:flex;flex-direction:column;min-width:0;}
 .row--hold{border-left-color:var(--ink-faint);}
 .row--accepted{border-left-color:var(--green);background:#161E1B;}
 .row--declined{border-left-color:var(--red);background:#1D1817;}
+.row.row--breach{border-color:var(--red);border-left:3px solid var(--red);background:#241A18;}
+.grnote{margin:0 0 10px;font-size:12.5px;color:var(--red);font-weight:600;}
+.gralarm{display:flex;align-items:center;gap:12px;margin:0 0 12px;padding:11px 14px;
+  border:1px solid var(--red);border-left:4px solid var(--red);border-radius:var(--r);
+  background:#2A1A17;color:var(--ink-bright);font-size:13px;}
+.gralarm[hidden]{display:none;}
+.gralarm b{color:var(--red);}
+.gralarm__txt{flex:1;}
+.gralarm.is-on{animation:grpulse 1.2s ease-in-out infinite;}
+@keyframes grpulse{50%{background:#3A1E19;}}
 .row__head{
   width:100%;display:grid;
   grid-template-columns:1fr 128px 26px 140px 96px 30px;
@@ -413,6 +423,10 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
       </div>
       <p class="advnote" id="advNote">Goal: least calciner coal, then as much SAFR as the limits allow, keeping the calciner in band at T+10 min. Apply now — effect at T+10. Only calciner coal and SAFR are recommended; LAFR PC/TAD, kiln coal, kiln feed, preheater fan speed and kiln speed are held at their live values (plant decision). Advisory only.</p>
       <p class="clknote" id="clkNote" hidden></p>
+      <div class="gralarm" id="grAlarm" role="alert" hidden>
+        <span class="gralarm__txt" id="grAlarmTxt"></span>
+        <button class="btn btn--ghost btn--sm" id="grSilence">Silence</button>
+      </div>
       <div class="list" id="list"></div>
     </section>
 
@@ -591,12 +605,23 @@ function bandGauge(live,pred){
 
 /* ---------------- list render ---------------- */
 function actionable(p){ return p.recOk!==false&&!!p.liveOk; }
+function guardOf(p){ var g=GUARD[TAGS[p.id]]; return g&&g.breach?g:null; }
+function guardText(p,g){
+  var bits=[];
+  [["live","live_breach","Live"],["recommended","recommended_breach",TAGS[p.id]===CV?"Predicted T+10":"Recommended"]].forEach(function(k){
+    var b=g[k[1]]; if(!b) return;
+    bits.push(k[2]+" "+fmt(g[k[0]],p.dec)+" "+p.unit+(b==="above_roof"?" is above the roof "+fmt(g.max,p.dec):" is below the floor "+fmt(g.min,p.dec)));
+  });
+  return bits.join("; ");
+}
 function dirOf(p){ if(!actionable(p)) return "hold"; var d=p.rec-p.cur; if(Math.abs(d)<1e-9) return "hold"; return d>0?"up":"down"; }
 function rowHTML(p){
   var st=state[p.id], dir=dirOf(p), d=p.rec-p.cur;
   var cls="row row--"+dir+(st.open?" is-open":"")+(st.declining?" is-declining":"");
   if(st.status==="accepted")cls+=" row--accepted";
   if(st.status==="declined")cls+=" row--declined";
+  var gb=guardOf(p);
+  if(gb)cls+=" row--breach";
   var deltaTxt=!actionable(p)?"—":(d>0?"+":"")+fmt(d,p.dec);
   var recTxt=p.recOk===false?"—":fmt(p.rec,p.dec);
   var tag = st.status==="accepted" ? '<span class="tag tag--acc">Accepted</span>'
@@ -619,8 +644,9 @@ function rowHTML(p){
   h+= '</div>';
 
   if(st.status==="open"){
+    if(gb) h+='<p class="grnote">Guardrail: '+esc(guardText(p,gb))+'. Accept is blocked; Decline is still allowed.</p>';
     h+='<div class="actions">';
-    h+= '<button class="btn btn--accept" data-act="accept"'+(!actionable(p)?' disabled':'')+'>Accept</button>';
+    h+= '<button class="btn btn--accept" data-act="accept"'+(!actionable(p)||gb?' disabled':'')+'>Accept</button>';
     h+= '<button class="btn btn--decline" data-act="declineStart"'+(!actionable(p)?' disabled':'')+'>Decline</button>';
     h+= '<span class="actions__note">Advisory only — your decision is logged to the twin; nothing is written to the DCS.</span>';
     h+='</div>';
@@ -662,7 +688,7 @@ document.getElementById("list").addEventListener("click",function(ev){
 
   if(act==="toggle"){ st.open=!st.open; if(!st.open) st.declining=false; render(); return; }
   if(act==="accept"){
-    if(!actionable(p)||busy) return;
+    if(!actionable(p)||guardOf(p)||busy) return;
     busy=true;
     postDecision(p,"accepted").then(function(row){
       st.status="accepted"; st.declining=false; st.open=false;
@@ -1003,6 +1029,43 @@ function paintLab(li){
   }).join(" · ");
 }
 
+/* ---------------- guardrail alarm ---------------- */
+// Roof / floor breaches from /api/twin/advisor -> guardrails (backend/guardrails.py).
+// Banner + beep every 2 s until Silenced; a NEW breached parameter re-arms it.
+// The server refuses an Accept on its own anyway (HTTP 409).
+var GUARD={}, grKey="", grSilenced=false, grCtx=null;
+function grBeep(){
+  try{
+    grCtx=grCtx||new (window.AudioContext||window.webkitAudioContext)();
+    if(grCtx.state==="suspended") grCtx.resume();
+    var o=grCtx.createOscillator(), g=grCtx.createGain();
+    o.type="square"; o.frequency.value=880; g.gain.value=0.08;
+    o.connect(g); g.connect(grCtx.destination);
+    o.start(); o.stop(grCtx.currentTime+0.25);
+  }catch(e){}
+}
+function paintGuard(gr){
+  GUARD=(gr&&gr.params)||{};
+  var tags=(gr&&gr.breached)||[], key=tags.slice().sort().join(",");
+  if(key!==grKey){ if(tags.some(function(t){return (","+grKey+",").indexOf(","+t+",")<0;})) grSilenced=false; grKey=key; }
+  var el=document.getElementById("grAlarm");
+  if(!tags.length){ el.hidden=true; el.classList.remove("is-on"); return; }
+  var names=tags.map(function(t){
+    var p=PARAMS.filter(function(x){return TAGS[x.id]===t;})[0];
+    return p?p.name+" — "+guardText(p,GUARD[t]):t;
+  });
+  document.getElementById("grAlarmTxt").innerHTML="<b>Guardrail breach</b> — "+esc(names.join(" · "))
+    +". Accept is blocked for "+(tags.length>1?"these parameters":"this parameter")+"; Decline is still allowed.";
+  el.hidden=false;
+  el.classList.toggle("is-on",!grSilenced);
+  document.getElementById("grSilence").textContent=grSilenced?"Silenced":"Silence";
+  document.getElementById("grSilence").disabled=grSilenced;
+}
+document.getElementById("grSilence").addEventListener("click",function(){
+  grSilenced=true; paintGuard({params:GUARD,breached:grKey?grKey.split(","):[]});
+});
+setInterval(function(){ if(grKey&&!grSilenced) grBeep(); },2000);
+
 function pollAdvisor(){
   getJSON("/api/twin/advisor").then(function(a){
     var live=a.live||{}, rec=a.recommended||{}, h=a.horizon_min||5;
@@ -1056,6 +1119,7 @@ function pollAdvisor(){
     }
     paintClinker(a.clinker_guard);
     paintLab(a.lab_inputs);
+    paintGuard(a.guardrails);
     // Don't wipe a half-filled decline form; values refresh on the next poll.
     var declining=PARAMS.some(function(p){return state[p.id].declining;});
     if(!declining) render();
