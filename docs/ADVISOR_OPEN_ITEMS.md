@@ -46,6 +46,19 @@ Status as of 16 Oct 2026. To be closed once the plant team's answers arrive
 | # | Item | Plan / needs |
 |---|---|---|
 | P1 | **Live quality data (eLIMS) into the advisor.** Today the state vote reads Excel lab tables last loaded 8 Aug 2026; live clinker data (`etl/freelime_feed.py` -> `lab_freelime_live`: free lime, LIQ, LSF, SM, C3S, SO3...) runs only on the edge (`ccr-freelime`), not on the GPU; there is **no live hot-meal DOC feed**; liter weight is not among the eLIMS clinker fields read. `QC_LIVE.py` / `fetch_hotmeal_history.py` write Excel only. | 1) run `freelime_feed.py` on laptop + GPU; 2) new `etl/hotmeal_feed.py` (section "Hot Mill-3", Hot Meal Side- A/B: DOC, SO3, Cl) -> `lab_hotmeal_live`; 3) state vote + clinker guard use live values only when fresh (< 8 h, closes A5) and the screen says when lab data is stale; 4) later fold into training labels (A2). Needs `.env.elims` (user creates; never committed). **Security:** eLIMS login is in plain text in `QC_LIVE.py` and `fetch_hotmeal_history.py` on all GitHub branches — move to `.env.elims`, IT to change the password. |
+| P2 | **Real plant limits and fuel values:** O₂/CO alarm-trip limits, AFR limits, coal/SAFR/LAFR calorific values and prices. Today the assumed kiln-inlet CO 800 ppm often leaves "no setting meets every limit", and the coal-vs-SAFR trade-off uses guessed calorific values. | Plant questionnaire §1–§4. |
+| P3 | **Band from the DCS calciner-temperature setpoint** (setpoint ± X) instead of the State vote, so the advisor aims at the band the operators actually run to (A6). | Setpoint OPC tag and ± X from the plant / DCS team. |
+| P4 | **Fuel quality as model inputs:** coal calorific value, ash, moisture; SAFR / AFR moisture per lot — the largest unexplained cause of temperature swings (e.g. a wet SAFR lot drops the temperature). | eLIMS coal / AFR sections (same API as P1); retrain. |
+| P5 | **Raw-meal chemistry as model inputs:** kiln-feed LSF, SM, fineness (residue) — changes the heat calcination needs; invisible to the model today. | eLIMS raw-meal section; retrain. |
+| P6 | **Measure each lever's real effect** with short plant step tests (e.g. calciner coal +1 t/h for 20 min, SAFR +2 t/h) to confirm the estimated fuel response (coal ≈ 4 °C per t/h at T+15). | Plant trial with the process engineer. |
+| P7 | **Learn from operator decisions:** what really happened after accepted moves, and the "declines not correct" cases, as a feedback loop showing where the model is wrong. | Builds up as operators use the advisor (operator_decisions, advisor_log). |
+| P8 | **Track T+10 accuracy live:** restart the GPU monitor (stopped since 4 Oct) and report the T+10 prediction error daily, so every change is measured. | Our work. |
+| P9 | **Train a real T+20 head** (T+20 is interpolated today) and tune the T+10 head the advisor now relies on. | Retrain (features.HORIZONS). |
+| P10 | **Data cleaning:** analyser calibration periods (RUN flags), frozen sensors, outliers (e.g. 516 °C). | Plant to confirm RUN flags (questionnaire §9.5); our work. |
+| P11 | **Use feeder setpoints as well as actual flows** (e.g. `467RL400_SPSPM` is already in the live feed) to separate what the operator set from what the feeder delivered. | Our work; retrain. |
+| P12 | **Stable advice (A8):** keep the advice unless meaningfully better, practical step sizes — makes advice followable and its accuracy testable. | Plant step sizes (questionnaire §7). |
+
+Suggested order: P1 → P8 → P2, P3 → P4, P5 → the rest.
 
 ## 3. Open items — ML model accuracy
 | # | Item | Notes |
