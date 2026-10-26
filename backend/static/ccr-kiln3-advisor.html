@@ -606,6 +606,18 @@ function bandGauge(live,pred){
 /* ---------------- list render ---------------- */
 function actionable(p){ return p.recOk!==false&&!!p.liveOk; }
 function guardOf(p){ var g=GUARD[TAGS[p.id]]; return g&&g.breach?g:null; }
+// data-validation errors that block this row: its own, or one affecting every lever
+function valErrors(){ return ((VAL&&VAL.issues)||[]).filter(function(i){return i.severity==="error";}); }
+function valOf(p){
+  var t=TAGS[p.id];
+  return valErrors().filter(function(i){ return i.scope==="all"||i.scope===t; });
+}
+function blockText(p){
+  var g=guardOf(p), bits=[];
+  if(g) bits.push("Guardrail: "+guardText(p,g));
+  valOf(p).forEach(function(i){ bits.push("Data check: "+i.tag+" "+i.check+" — "+i.detail); });
+  return bits.join(". ");
+}
 function guardText(p,g){
   var bits=[];
   [["live","live_breach","Live"],["recommended","recommended_breach",TAGS[p.id]===CV?"Predicted T+10":"Recommended"]].forEach(function(k){
@@ -620,7 +632,7 @@ function rowHTML(p){
   var cls="row row--"+dir+(st.open?" is-open":"")+(st.declining?" is-declining":"");
   if(st.status==="accepted")cls+=" row--accepted";
   if(st.status==="declined")cls+=" row--declined";
-  var gb=guardOf(p);
+  var gb=blockText(p);
   if(gb)cls+=" row--breach";
   var deltaTxt=!actionable(p)?"—":(d>0?"+":"")+fmt(d,p.dec);
   var recTxt=p.recOk===false?"—":fmt(p.rec,p.dec);
@@ -644,7 +656,7 @@ function rowHTML(p){
   h+= '</div>';
 
   if(st.status==="open"){
-    if(gb) h+='<p class="grnote">Guardrail: '+esc(guardText(p,gb))+'. Accept is blocked; Decline is still allowed.</p>';
+    if(gb) h+='<p class="grnote">'+esc(gb)+'. Accept is blocked; Decline is still allowed.</p>';
     h+='<div class="actions">';
     h+= '<button class="btn btn--accept" data-act="accept"'+(!actionable(p)||gb?' disabled':'')+'>Accept</button>';
     h+= '<button class="btn btn--decline" data-act="declineStart"'+(!actionable(p)?' disabled':'')+'>Decline</button>';
@@ -688,7 +700,7 @@ document.getElementById("list").addEventListener("click",function(ev){
 
   if(act==="toggle"){ st.open=!st.open; if(!st.open) st.declining=false; render(); return; }
   if(act==="accept"){
-    if(!actionable(p)||guardOf(p)||busy) return;
+    if(!actionable(p)||blockText(p)||busy) return;
     busy=true;
     postDecision(p,"accepted").then(function(row){
       st.status="accepted"; st.declining=false; st.open=false;
@@ -1033,7 +1045,7 @@ function paintLab(li){
 // Roof / floor breaches from /api/twin/advisor -> guardrails (backend/guardrails.py).
 // Banner + beep every 2 s until Silenced; a NEW breached parameter re-arms it.
 // The server refuses an Accept on its own anyway (HTTP 409).
-var GUARD={}, grKey="", grSilenced=false, grCtx=null;
+var GUARD={}, VAL=null, grKey="", grSilenced=false, grCtx=null;
 function grBeep(){
   try{
     grCtx=grCtx||new (window.AudioContext||window.webkitAudioContext)();
@@ -1044,25 +1056,41 @@ function grBeep(){
     o.start(); o.stop(grCtx.currentTime+0.25);
   }catch(e){}
 }
-function paintGuard(gr){
+function paintGuard(gr,val){
   GUARD=(gr&&gr.params)||{};
-  var tags=(gr&&gr.breached)||[], key=tags.slice().sort().join(",");
-  if(key!==grKey){ if(tags.some(function(t){return (","+grKey+",").indexOf(","+t+",")<0;})) grSilenced=false; grKey=key; }
+  if(val!==undefined) VAL=val;
+  var tags=(gr&&gr.breached)||[], errs=valErrors();
+  // alarm key: breached tags + validation errors (tag:check)
+  var ids=tags.concat(errs.map(function(i){return i.tag+":"+i.check;}));
+  var key=ids.slice().sort().join(",");
+  if(key!==grKey){ if(ids.some(function(t){return (","+grKey+",").indexOf(","+t+",")<0;})) grSilenced=false; grKey=key; }
   var el=document.getElementById("grAlarm");
-  if(!tags.length){ el.hidden=true; el.classList.remove("is-on"); return; }
-  var names=tags.map(function(t){
-    var p=PARAMS.filter(function(x){return TAGS[x.id]===t;})[0];
-    return p?p.name+" — "+guardText(p,GUARD[t]):t;
-  });
-  document.getElementById("grAlarmTxt").innerHTML="<b>Guardrail breach</b> — "+esc(names.join(" · "))
-    +". Accept is blocked for "+(tags.length>1?"these parameters":"this parameter")+"; Decline is still allowed.";
+  if(!ids.length){ el.hidden=true; el.classList.remove("is-on"); return; }
+  var html=[];
+  if(tags.length){
+    var names=tags.map(function(t){
+      var p=PARAMS.filter(function(x){return TAGS[x.id]===t;})[0];
+      return p?p.name+" — "+guardText(p,GUARD[t]):t;
+    });
+    html.push("<b>Guardrail breach</b> — "+esc(names.join(" · ")));
+  }
+  if(errs.length){
+    html.push("<b>Data check failed</b> — "+esc(errs.map(function(i){
+      var who=i.scope==="all"?"blocks every parameter"
+        :((PARAMS.filter(function(x){return TAGS[x.id]===i.scope;})[0]||{}).name||i.scope);
+      return i.tag+" "+i.check+": "+i.detail+" ("+who+")";
+    }).join(" · ")));
+  }
+  document.getElementById("grAlarmTxt").innerHTML=html.join("<br>")
+    +". Accept is blocked where affected; Decline is still allowed.";
   el.hidden=false;
   el.classList.toggle("is-on",!grSilenced);
   document.getElementById("grSilence").textContent=grSilenced?"Silenced":"Silence";
   document.getElementById("grSilence").disabled=grSilenced;
 }
 document.getElementById("grSilence").addEventListener("click",function(){
-  grSilenced=true; paintGuard({params:GUARD,breached:grKey?grKey.split(","):[]});
+  grSilenced=true;
+  paintGuard({params:GUARD,breached:Object.keys(GUARD).filter(function(t){return GUARD[t].breach;})});
 });
 setInterval(function(){ if(grKey&&!grSilenced) grBeep(); },2000);
 
@@ -1119,7 +1147,7 @@ function pollAdvisor(){
     }
     paintClinker(a.clinker_guard);
     paintLab(a.lab_inputs);
-    paintGuard(a.guardrails);
+    paintGuard(a.guardrails,a.validation||null);
     // Don't wipe a half-filled decline form; values refresh on the next poll.
     var declining=PARAMS.some(function(p){return state[p.id].declining;});
     if(!declining) render();

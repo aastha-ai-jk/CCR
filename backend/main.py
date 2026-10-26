@@ -519,7 +519,112 @@ def twin_advisor():
     # current data only. Reported here; blocking Accept comes separately.
     from backend import guardrails
     out["guardrails"] = guardrails.evaluate(_fresh_values(s), _advisor_recommended(r))
+    out["validation"] = _current_validation()["report"]
     return _json_safe(out)
+
+
+# Data validation (backend/validation.py): every input reading and every
+# recommendation is checked continuously. A background thread re-evaluates
+# every VALIDATION_INTERVAL_S and logs problems to validation_events; request
+# handlers use the latest result (recomputed if older than VALIDATION_MAX_AGE_S).
+VALIDATION_INTERVAL_S = 10
+VALIDATION_MAX_AGE_S = 15
+_validation = {"inputs": [], "rec": [], "report": None, "at": 0.0}
+_validation_lock = threading.Lock()
+
+
+def _recent_live(minutes: int = 30) -> pd.DataFrame | None:
+    """The live feed's last `minutes` of 2-s rows, oldest first (None if unavailable)."""
+    try:
+        df = db.q("SELECT * FROM process_live ORDER BY ts DESC LIMIT :n", {"n": int(minutes * 33)})
+    except Exception:
+        return None
+    if df is None or not len(df):
+        return None
+    t = pd.to_datetime(df["ts"], format="mixed", errors="coerce")
+    df = df[t >= t.max() - pd.Timedelta(minutes=minutes)]
+    return df.iloc[::-1].reset_index(drop=True)
+
+
+def _plc_ranges() -> dict:
+    from backend import validation
+    cat = db.tag_catalog().set_index("tag")
+    out = {}
+    for t in validation.LEVERS:
+        if t in cat.index and pd.notna(cat.loc[t, "y_min"]) and pd.notna(cat.loc[t, "y_max"]):
+            out[t] = (float(cat.loc[t, "y_min"]), float(cat.loc[t, "y_max"]))
+    return out
+
+
+def _current_validation(max_age: float = VALIDATION_MAX_AGE_S) -> dict:
+    """Latest validation of the live inputs and the twin advisor's recommendation."""
+    from backend import validation
+    with _validation_lock:
+        if _validation["report"] is not None and time.time() - _validation["at"] <= max_age:
+            return _validation
+    s = _snapshot()
+    inputs = validation.check_inputs(s, _recent_live() if s.get("source") != "historical" else None)
+    # The ranges come from production history (feed above 461 t/h). Below that
+    # there is no fuel advice anyway, so out-of-range readings are not alarmed.
+    feed = (s.get("values") or {}).get(config.KILN_FEED_TAG)
+    if feed is not None and float(feed) < config.KILN_FEED_MIN_TPH:
+        inputs = [i for i in inputs if i["check"] not in ("range", "rare value")]
+    r = _advisor["result"]
+    rec_issues = []
+    rec = _advisor_recommended(r)                     # {} unless current and live-based
+    if rec:
+        rec_issues = validation.check_recommendation(
+            {k: v for k, v in rec.items() if k != analysis.CV}, s.get("values", {}),
+            rec.get(analysis.CV), r.get("interlocks"), _plc_ranges())
+    rep = validation.report(inputs, rec_issues)
+    with _validation_lock:
+        _validation.update(inputs=inputs, rec=rec_issues, report=rep, at=time.time())
+        return dict(_validation)
+
+
+def _validation_loop() -> None:
+    from backend import validation
+    while True:
+        try:
+            v = _current_validation(max_age=0)
+            validation.log_events(db.engine(), v["report"])
+        except Exception as e:                       # never let the monitor die
+            print(f"[validation] check failed: {e!r}")
+        time.sleep(VALIDATION_INTERVAL_S)
+
+
+@app.on_event("startup")
+def _start_validation_monitor() -> None:
+    threading.Thread(target=_validation_loop, name="validation-monitor", daemon=True).start()
+
+
+@app.get("/api/validation")
+def get_validation():
+    """Current validation of every live input and of the twin advisor's
+    recommendation: status, which levers are blocked, and every issue."""
+    import json as _json
+    from backend import validation
+    v = _current_validation()
+    meta = {}
+    try:
+        raw = _json.loads(validation.LIMITS_PATH.read_text(encoding="utf-8"))
+        meta = {"limits_generated": raw.get("_generated"), "limits_rows": raw.get("_rows"),
+                "tags_with_limits": len(raw.get("tags", {}))}
+    except Exception:
+        pass
+    return _json_safe({**(v["report"] or {}), "age_sec": round(time.time() - v["at"], 1), **meta})
+
+
+@app.get("/api/validation/events")
+def get_validation_events(limit: int = Query(100, ge=1, le=2000), open_only: bool = False):
+    """Validation problems over time: when each started, was last seen, and cleared."""
+    from backend import validation
+    from sqlalchemy import text
+    with db.engine().begin() as con:
+        con.execute(text(validation._EVENTS_DDL))
+    where = "WHERE cleared_at IS NULL" if open_only else ""
+    df = db.q(f"SELECT * FROM validation_events {where} ORDER BY id DESC LIMIT :n", {"n": limit})
+    return _json_safe({"n": int(len(df)), "events": _clean_records(df)})
 
 
 def _fresh_values(s: dict) -> dict:
@@ -912,13 +1017,17 @@ def _accept_refusal(req: DecisionReq, snap: dict) -> str | None:
     parameter -- the server's own live and recommended values AND the request's
     -- against the guardrail limits. Fail-safe: if the check itself fails, refuse."""
     try:
-        from backend import guardrails
+        from backend import guardrails, validation
         live = _fresh_values(snap).get(req.tag)
         rec = _advisor_recommended(_advisor["result"]).get(req.tag)
-        return guardrails.refuse_accept(req.tag, {
+        why = guardrails.refuse_accept(req.tag, {
             "live": live, "recommended": rec,
             "submitted current": req.current_value,
             "submitted recommended": req.recommended_value})
+        if why:
+            return why
+        # never judge an Accept on a cached result: re-check the data now
+        return validation.refuse_accept(req.tag, _current_validation(max_age=0)["report"])
     except Exception as e:
         return (f"Refused: guardrail check could not run ({e!r}). "
                 "Accept is blocked until it works again; Decline is still allowed.")
