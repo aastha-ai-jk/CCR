@@ -515,7 +515,27 @@ def twin_advisor():
         out.update(r)
         out.setdefault("available", "recommended" in r)
         out["age_sec"] = round(time.time() - _advisor["computed_at"], 1)
+    # Hard roof / floor (backend/guardrails.py): live and recommended values,
+    # current data only. Reported here; blocking Accept comes separately.
+    from backend import guardrails
+    out["guardrails"] = guardrails.evaluate(_fresh_values(s), _advisor_recommended(r))
     return _json_safe(out)
+
+
+def _fresh_values(s: dict) -> dict:
+    """Live values to judge -- none when the snapshot is historical (not current)."""
+    return {} if s.get("source") in (None, "historical") else dict(s.get("values") or {})
+
+
+def _advisor_recommended(r: dict | None) -> dict:
+    """Recommended levers + predicted T+10 temp (under the CV tag), current advice only."""
+    if not r or not r.get("recommended") or r.get("source") in (None, "historical"):
+        return {}
+    out = dict(r["recommended"])
+    t = ((r.get("predicted") or {}).get("temp") or {}).get("mean")
+    if t is not None:
+        out[analysis.CV] = t
+    return out
 
 
 @app.get("/api/latest")

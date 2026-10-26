@@ -122,6 +122,8 @@ def _bounds(levers: list[str] = OPT_LEVERS) -> dict[str, tuple[float, float]]:
     cat = db.tag_catalog().set_index("tag")
     defaults = analysis.feature_defaults()
     obs = _observed_limits()
+    from backend import guardrails
+    _guard = guardrails.limits()
     out = {}
     for t in levers:
         lo, hi = cat.loc[t, "y_min"], cat.loc[t, "y_max"]
@@ -133,6 +135,9 @@ def _bounds(levers: list[str] = OPT_LEVERS) -> dict[str, tuple[float, float]]:
         ls = _lever_settings(t)
         lo = ls["min"] if ls.get("min") is not None else lo
         hi = ls["max"] if ls.get("max") is not None else hi
+        g = _guard.get(t) or {}                  # hard guardrail: never advise outside it
+        lo = max(lo, g["min"]) if g.get("min") is not None else lo
+        hi = min(hi, g["max"]) if g.get("max") is not None else hi
         out[t] = (float(lo), float(hi))
     return out
 

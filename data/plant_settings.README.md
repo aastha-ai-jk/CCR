@@ -42,3 +42,16 @@ Fill values from the plant questionnaire (`CCR_Kiln3_Advisor_Plant_Inputs.docx`)
 
 Example: `"temperature_bands": {"State 3": [880, 900]}` and
 `"optimizer": {"levers": {"261WF080_TPH": {"min": 4, "max": 12, "max_step": 1}}}`.
+
+## guardrails (hard roof / floor, re-read on every request)
+
+| Tag | Parameter | min | max |
+|---|---|---|---|
+| 423CI400_TT_4 | PC outlet temperature (degC) | 820 | 951 |
+| 467RL400_TPH | Calciner coal firing (t/h) | 15 | 34.90 |
+| 261WF080_TPH | SAFR (t/h) | 0 | 26.50 |
+
+Source: CCR operators via project lead (2026-10-21; temp floor 850 -> 820 on 2026-10-23).
+Checked on the live value and the recommended value (for temperature: the predicted T+10).
+A value exactly at a limit is allowed; `null` = no limit. The optimizer never searches
+outside these limits. Reported in `/api/twin/advisor` -> `guardrails`.
