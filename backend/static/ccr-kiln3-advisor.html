@@ -1009,7 +1009,9 @@ function pollAdvisor(){
     });
     if(fresh){
       advMeta="recommended for "+(clockAt(a.ts,h)||"next "+h+" min")
-        +" · computed at "+(clockAt(a.ts,0)||"—")+(a.computing?" · updating…":"")
+        +" · computed at "+(clockAt(a.ts,0)||"—")
+        +(a.held&&a.held_since&&a.held_since!==a.ts?" · advice held since "+(clockAt(a.held_since,0)||"—")+" (still the best option)":"")
+        +(a.computing?" · updating…":"")
         +(a.all_limits_met===false?" · no setting meets every limit — closest option shown":"");
     }else if(a.available){
       advMeta="last advisory is stale (from "+(clockAt(a.ts,0)||"—")+", "+a.source

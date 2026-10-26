@@ -10,6 +10,8 @@ control system.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -227,7 +229,8 @@ def _f(v, nd: int = 2):
 def optimize(conditions: dict, n_trials: int = 200,
              levers: list[str] | None = None, clinker: dict | None = None,
              objective_mode: str | None = None, horizon: int | None = None,
-             max_move_pct: float | None = None) -> dict:
+             max_move_pct: float | None = None, steps: dict | None = None,
+             incumbent: dict | None = None, hold: dict | None = None) -> dict:
     """Run the Optuna search and return the contract's advisory dict.
 
     ``levers`` picks which MVs to search (default: the four calciner fuel
@@ -241,6 +244,12 @@ def optimize(conditions: dict, n_trials: int = 200,
     count in heat, TSR and cost.
     ``max_move_pct``: cap each searched lever's move at ± this % of its live
     value (advisor: 10 %), on top of the trust region and plant max steps.
+    ``steps`` ({tag: step}): candidates on a practical grid (e.g. 0.1 t/h).
+    ``incumbent`` ({tag: value}): the advice currently shown. It is re-scored
+    on the latest data and KEPT unless the best new option is clearly better
+    (``hold``: {"temp_c": closer to the band at T+horizon by >= this,
+    "coal_tph": less coal by >= this}) or it is no longer valid (outside the
+    current bounds, or breaks a limit a new option meets). Result "held".
     """
     import optuna
 
@@ -303,7 +312,13 @@ def optimize(conditions: dict, n_trials: int = 200,
             # advisor: one recommendation moves a lever at most ±max_move_pct % of
             # its live value (floor 0.1 so a lever at ~0 can still be advised)
             r = min(r, max(abs(c) * float(max_move_pct) / 100.0, 0.1))
-        bounds[t] = (max(lo, c - r), min(hi, c + r))
+        b_lo, b_hi = max(lo, c - r), min(hi, c + r)
+        s = (steps or {}).get(t)
+        if s:                                   # practical grid, e.g. 0.1 t/h
+            g_lo, g_hi = math.ceil(b_lo / s - 1e-9) * s, math.floor(b_hi / s + 1e-9) * s
+            if g_hi >= g_lo:
+                b_lo, b_hi = round(g_lo, 6), round(g_hi, 6)
+        bounds[t] = (b_lo, b_hi)
     obj = _opt_settings().get("objective") or {}
     # plant setting > caller's mode (advisor: least_coal) > OPTIMIZER_MODE env
     mode = obj.get("mode") or objective_mode or config.OPTIMIZER_MODE
@@ -348,7 +363,14 @@ def optimize(conditions: dict, n_trials: int = 200,
         return ex
 
     def objective(trial: "optuna.Trial") -> float:
-        levers = {t: trial.suggest_float(t, *bounds[t]) for t in opt_levers}
+        levers = {t: (trial.suggest_float(t, *bounds[t], step=(steps or {}).get(t))
+                      if (steps or {}).get(t) and bounds[t][1] > bounds[t][0]
+                      else trial.suggest_float(t, *bounds[t]))
+                  for t in opt_levers}
+        # only the re-scored held advice may sit in the widened (cap + slack) zone
+        if not trial.user_attrs.get("incumbent") and any(
+                not (strict[t][0] - 1e-6 <= levers[t] <= strict[t][1] + 1e-6) for t in opt_levers):
+            raise optuna.TrialPruned()
         core = twin_model.predict_core(levers, conditions)
         if core is None:
             raise optuna.TrialPruned()
@@ -409,12 +431,38 @@ def optimize(conditions: dict, n_trials: int = 200,
         trial.set_user_attr("limits_excess", excess)
         return raw + penalty
 
+    strict = dict(bounds)                          # reset below if a held value widens them
     # Baseline = current levers at current conditions, predicted BEFORE the
     # search: the live history moves on during a run (fast in replay), and the
     # baseline must describe the same moment as the trials it is compared with.
     base_core = twin_model.predict_core(base_vals, conditions)
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=1))
+    # A8: re-score the advice currently shown, on today's data, as trial #0 —
+    # only if it is still inside the current bounds (else it is no longer valid).
+    # Advice already shown stays valid until the plant's current value is more
+    # than hold.max_dev_pct (default 20 %, user choice 26 Oct) away from it.
+    # New advice keeps the strict max_move_pct cap; the bounds only widen to
+    # let the held value be re-scored.
+    max_dev = float((hold or {}).get("max_dev_pct", 20.0))
+
+    def inc_ok_for(t) -> bool:
+        if t not in incumbent or incumbent[t] is None:
+            return False
+        v, (b_lo, b_hi) = float(incumbent[t]), bounds[t]
+        if b_lo - 1e-6 <= v <= b_hi + 1e-6:
+            return True
+        c = base_vals[t]
+        lo_e, hi_e = full_bounds[t]
+        return lo_e <= v <= hi_e and abs(v - c) <= max(abs(c) * max_dev / 100.0, 0.1) + 1e-6
+    inc_valid = bool(incumbent) and all(inc_ok_for(t) for t in opt_levers)
+    strict = dict(bounds)                          # new options stay inside these
+    if inc_valid:
+        for t in opt_levers:                       # let Optuna accept the held value
+            v = float(incumbent[t])
+            bounds[t] = (min(bounds[t][0], v), max(bounds[t][1], v))
+        study.enqueue_trial({t: float(incumbent[t]) for t in opt_levers},
+                            user_attrs={"incumbent": True})
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
     scored = [t for t in study.trials if "levers" in t.user_attrs]
@@ -432,6 +480,36 @@ def optimize(conditions: dict, n_trials: int = 200,
         best = min(pool, key=lambda t: t.user_attrs["raw"])
     else:
         best = min(pool, key=lambda t: t.value if t.value is not None else float("inf"))
+
+    # A8 stable advice: keep the incumbent unless the best new option is clearly
+    # better. Same footing (limits met) -> needs >= hold.coal_tph less coal or
+    # >= hold.temp_c closer to the band at T+horizon; meeting the limits where
+    # the incumbent does not always wins.
+    held = False
+    inc = next((t for t in scored if t.user_attrs.get("incumbent")), None)
+    if inc is not None and best is not inc:
+        h = {"temp_c": 2.0, "coal_tph": 0.5, **(hold or {})}
+
+        def gap(t) -> float:
+            v = at_h(t.user_attrs["pred"][CV], t.user_attrs.get("traj"))["mean"]
+            return 0.0 if blo <= v <= bhi else min(abs(v - blo), abs(v - bhi))
+        inc_ok, best_ok = inc.user_attrs.get("feasible"), best.user_attrs.get("feasible")
+        if best_ok and not inc_ok:
+            clearly_better = True
+        elif inc_ok and not best_ok:
+            clearly_better = False
+        else:
+            clearly_better = (gap(inc) - gap(best) >= float(h["temp_c"])
+                              or inc.user_attrs["levers"][COAL] - best.user_attrs["levers"][COAL]
+                              >= float(h["coal_tph"]) and gap(best) <= gap(inc) + 0.5)
+        if not clearly_better:
+            best, held = inc, True
+        hold_reason = "kept: no clearly better option" if held else "replaced: new option clearly better"
+    elif inc is not None:
+        held, hold_reason = True, "kept: still the best option"
+    else:
+        hold_reason = ("no previous advice" if not incumbent else
+                       f"replaced: plant moved more than {max_dev:g} % away from the previous advice")
     rec = best.user_attrs["levers"]
     pred = best.user_attrs["pred"]
     rec_traj = best.user_attrs.get("traj")
@@ -520,6 +598,8 @@ def optimize(conditions: dict, n_trials: int = 200,
 
     return {
         "recommended": {t: _f(rec[t]) for t in opt_levers},
+        "held": held,                                  # A8: previous advice kept
+        "hold_reason": hold_reason,
         "horizon_min": int(horizon or analysis.DELTA),
         "predicted": {
             "temp": {"mean": _f(rec_temp, 1), "p10": _f(rec_pt.get("p10"), 1),

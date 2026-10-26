@@ -409,6 +409,19 @@ def _advisor_run() -> None:
         from twin import optimize as twin_opt
         s, snap, conditions, levers = _live_inputs()
         _advisor["inputs"] = {t: s["values"].get(t) for t in ADVISOR_TRIGGER}
+        # "Current" value of each advised lever = its 2-minute mean, not the
+        # noisy 2-s reading (SAFR weigh-feeder jumps 1-2 t/h between samples):
+        # anchors the ±10 % move cap (A10) and the held-advice check (A8).
+        try:
+            from backend.decisions import _lever_series
+            from twin.optimize import ADVISOR_LEVERS
+            t_now = _dt.datetime.fromisoformat(str(s["ts"]))
+            for t in ADVISOR_LEVERS:
+                m = _lever_series(t, t_now - _dt.timedelta(seconds=int(_adv_setting("current_avg_sec", 120))), t_now)
+                if len(m) >= 3:
+                    conditions[t] = levers[t] = float(m.mean())
+        except Exception:
+            pass                                      # fall back to the instant reading
         # Kiln stopped / not in load: no fuel advice (control actions only apply
         # above KILN_FEED_MIN_TPH, per the combustion control logic).
         feed = s["values"].get(config.KILN_FEED_TAG)
@@ -417,7 +430,23 @@ def _advisor_run() -> None:
                                     "kiln_feed": feed, "ts": s["ts"], "source": s["source"]},
                             computed_at=time.time())
             return
+        # A8: the advice on screen is re-scored and kept unless clearly beaten;
+        # never held beyond its own horizon (then a fresh search decides).
+        prev = _advisor.get("result") or {}
+        horizon = int(_adv_setting("horizon_min", twin_opt.ADVISOR_HORIZON))
+        held_since = prev.get("held_since") or prev.get("ts")
+        try:
+            prev_age = (_dt.datetime.fromisoformat(str(s["ts"])) -
+                        _dt.datetime.fromisoformat(str(held_since))).total_seconds() / 60.0
+        except Exception:
+            prev_age = None
+        incumbent = (prev.get("recommended") if prev.get("recommended") and prev_age is not None
+                     and prev_age < horizon and prev.get("source") == s["source"] else None)
         r = twin_opt.optimize({**conditions, **levers},
+                              incumbent=incumbent,
+                              steps=_adv_setting("step", {"467RL400_TPH": 0.1, "261WF080_TPH": 0.1}),
+                              hold=_adv_setting("hold", {"temp_c": 2.0, "coal_tph": 0.5,
+                                                         "max_dev_pct": 20.0}),
                               n_trials=int(_adv_setting("trials", ADVISOR_TRIALS)),
                               levers=twin_opt.ADVISOR_LEVERS,
                               clinker=_latest_clinker() or {},
@@ -426,6 +455,7 @@ def _advisor_run() -> None:
                               # A10: at most ±10 % of the live value per recommendation
                               max_move_pct=float(_adv_setting("max_move_pct", 10.0)))
         r["ts"], r["source"] = s["ts"], s["source"]
+        r["held_since"] = held_since if r.get("held") and incumbent else s["ts"]
         from twin import reasoning                # "why" text: template, + LLM when enabled
         reasoning.attach(r)
         from backend import decisions               # advisor_log: computed / new-recommendation count
