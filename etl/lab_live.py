@@ -42,13 +42,18 @@ _SOURCES = {
 }
 
 
+# Plausible ranges: eLIMS stores "not measured" as 0 (seen 26 Oct: Ltr.Wt. = 0),
+# so values outside these are ignored and the last valid result is used.
+VALID = {"free_lime": (0.2, 5.0), "liter_weight": (900.0, 1600.0),
+         "liq": (20.0, 35.0), "doc": (85.0, 100.0)}
+
+
 def _latest(q, table: str, col: str):
-    """(ts, value) of the newest non-null result; DOC averages the two kiln sides."""
+    """(ts, value) of the newest VALID result; DOC averages the two kiln sides."""
+    lo, hi = VALID.get(col, (float("-inf"), float("inf")))
     try:
-        if col == "doc":
-            d = q(f"SELECT ts, {col} AS v FROM {table} WHERE {col} IS NOT NULL ORDER BY ts DESC LIMIT 4")
-        else:
-            d = q(f"SELECT ts, {col} AS v FROM {table} WHERE {col} IS NOT NULL ORDER BY ts DESC LIMIT 1")
+        d = q(f"SELECT ts, {col} AS v FROM {table} WHERE {col} IS NOT NULL "
+              f"AND {col} >= {lo} AND {col} <= {hi} ORDER BY ts DESC LIMIT {4 if col == 'doc' else 1}")
     except Exception:
         return None
     if not len(d):

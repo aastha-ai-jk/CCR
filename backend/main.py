@@ -373,7 +373,13 @@ def _latest_clinker() -> dict | None:
     if not rows:
         return None
     d = pd.concat(rows, ignore_index=True)
-    d = d.dropna(subset=["t"]).sort_values("t")
+    # eLIMS stores "not measured" as 0: implausible values count as missing
+    from etl.lab_live import VALID
+    for col in ("free_lime", "liter_weight"):
+        lo, hi = VALID[col]
+        v = pd.to_numeric(d[col], errors="coerce")
+        d[col] = v.where((v >= lo) & (v <= hi))
+    d = d.dropna(subset=["t"]).dropna(subset=["free_lime", "liter_weight"], how="all").sort_values("t")
     if not len(d):
         return None
     r = d.iloc[-1]
