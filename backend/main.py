@@ -532,6 +532,7 @@ def twin_advisor():
     out["guardrails"]["direction"] = _direction(s, r)         # GR2: heat vs band
     out["guardrails"]["drift"] = _drift(s)                    # GR6: model drift
     out["guardrails"]["uncertainty"] = _uncertainty(r)        # GR7: P10-P90 range
+    out["guardrails"]["heat"] = _heat_change(s, r)            # GR8: total heat change
     out["validation"] = _current_validation()["report"]
     return _json_safe(out)
 
@@ -705,6 +706,31 @@ def _uncertainty(r: dict | None) -> dict:
     from backend import guardrails
     temp = ((r or {}).get("predicted") or {}).get("temp") if _advisor_recommended(r) else None
     return guardrails.uncertainty(temp)
+
+
+def _heat_change(s: dict, r: dict | None) -> dict:
+    """GR8: total calciner heat of the recommendation vs the live heat (2-min
+    average of every calciner fuel; the advised levers replaced by the advice)."""
+    from backend import guardrails
+    from twin import economics
+    rec = _advisor_recommended(r)
+    rec.pop(analysis.CV, None)
+    live = _fresh_values(s)
+    if not rec or not live:
+        return guardrails.heat_change(None, None)
+    econ = config.fuel_economics()
+    cur = {t: live.get(t) for t in econ}
+    d = _recent_live(minutes=3)
+    if d is not None and len(d):
+        t = pd.to_datetime(d["ts"], format="mixed", errors="coerce")
+        d = d[t >= t.max() - pd.Timedelta(seconds=120)]
+        for f in econ:
+            if f in d and pd.to_numeric(d[f], errors="coerce").notna().any():
+                cur[f] = float(pd.to_numeric(d[f], errors="coerce").mean())
+    cur = {f: float(v) for f, v in cur.items() if v is not None}
+    h0 = economics._heat_per_h(cur, econ)[1]
+    h1 = economics._heat_per_h({**cur, **rec}, econ)[1]
+    return guardrails.heat_change(h0, h1)
 
 
 def _fresh_values(s: dict) -> dict:
@@ -1126,6 +1152,11 @@ def _accept_refusal(req: DecisionReq, snap: dict) -> str | None:
         u = _uncertainty(_advisor["result"])
         if u["flag"]:
             return (f"Refused by forecast uncertainty: {u['reason']}. Accept is blocked for this "
+                    "recommendation; Decline is still allowed.")
+        # GR8: total heat change against the live heat too large
+        h = _heat_change(snap, _advisor["result"])
+        if h["flag"]:
+            return (f"Refused by heat-change cap: {h['reason']}. Accept is blocked for this "
                     "recommendation; Decline is still allowed.")
         # never judge an Accept on a cached result: re-check the data now
         return validation.refuse_accept(req.tag, _current_validation(max_age=0)["report"])

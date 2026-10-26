@@ -95,7 +95,7 @@
       "priority": null
     },
     "heat_balance": {
-      "max_change_pct": null
+      "max_change_pct": 10
     }
   },
 

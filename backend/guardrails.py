@@ -169,6 +169,24 @@ def drift(errors) -> dict:
     return out
 
 
+# GR8: total calciner heat change. The recommendation against the LIVE heat
+# (2-min average) may change total heat by at most optimizer.heat_balance.
+# max_change_pct -- catches held advice the plant has moved away from.
+def heat_change(live_kcal_h, rec_kcal_h) -> dict:
+    s = (config.plant_settings().get("optimizer") or {}).get("heat_balance") or {}
+    cap = _num(s.get("max_change_pct"))
+    h0, h1 = _num(live_kcal_h), _num(rec_kcal_h)
+    out = {"flag": False, "change_pct": None, "max_change_pct": cap, "reason": None}
+    if cap is None or h0 is None or h1 is None or h0 <= 0:
+        return out
+    pct = (h1 - h0) / h0 * 100.0
+    out["change_pct"] = round(pct, 2)
+    if abs(pct) > cap:
+        out.update(flag=True, reason=f"the move changes total calciner heat by {pct:+.1f} % "
+                                     f"against the live heat (max ±{cap:g} %)")
+    return out
+
+
 # GR7: uncertain forecast. The T+10 temperature under the recommendation comes
 # with a P10-P90 range; too wide, or reaching the temperature roof / floor =
 # the move is not safe to accept.

@@ -623,6 +623,8 @@ function blockText(p){
   if(DRIFT&&DRIFT.flag) bits.push("Model drift: "+DRIFT.reason);
   // GR7: forecast under this recommendation too uncertain
   if(UNCERT&&UNCERT.flag) bits.push("Uncertain forecast: "+UNCERT.reason);
+  // GR8: total heat change against the live heat too large
+  if(HEATCHK&&HEATCHK.flag) bits.push("Heat change: "+HEATCHK.reason);
   valOf(p).forEach(function(i){ bits.push("Data check: "+i.tag+" "+i.check+" — "+i.detail); });
   return bits.join(". ");
 }
@@ -1054,7 +1056,7 @@ function paintLab(li){
 // Roof / floor breaches from /api/twin/advisor -> guardrails (backend/guardrails.py).
 // Banner + beep every 2 s until Silenced; a NEW breached parameter re-arms it.
 // The server refuses an Accept on its own anyway (HTTP 409).
-var GUARD={}, VAL=null, COMB=[], DIRCHK=null, DRIFT=null, UNCERT=null, grKey="", grSilenced=false, grCtx=null;
+var GUARD={}, VAL=null, COMB=[], DIRCHK=null, DRIFT=null, UNCERT=null, HEATCHK=null, grKey="", grSilenced=false, grCtx=null;
 function combText(){
   return COMB.map(function(b){ return b.name+" "+fmt(b.value,b.tag.indexOf("_O2")>0?1:0)+" (limit "+b.rule+")"; }).join(", ");
 }
@@ -1074,6 +1076,7 @@ function paintGuard(gr,val){
   if(gr&&"direction" in gr) DIRCHK=gr.direction;
   if(gr&&"drift" in gr) DRIFT=gr.drift;
   if(gr&&"uncertainty" in gr) UNCERT=gr.uncertainty;
+  if(gr&&"heat" in gr) HEATCHK=gr.heat;
   if(val!==undefined) VAL=val;
   var tags=(gr&&gr.breached)||[], errs=valErrors();
   // alarm key: breached tags + live CO/O2 breaches + direction + drift + validation errors (tag:check)
@@ -1081,6 +1084,7 @@ function paintGuard(gr,val){
                       DIRCHK&&DIRCHK.flag?["direction"]:[],
                       DRIFT&&DRIFT.flag?["drift"]:[],
                       UNCERT&&UNCERT.flag?["uncertainty"]:[],
+                      HEATCHK&&HEATCHK.flag?["heat"]:[],
                       errs.map(function(i){return i.tag+":"+i.check;}));
   var key=ids.slice().sort().join(",");
   if(key!==grKey){ if(ids.some(function(t){return (","+grKey+",").indexOf(","+t+",")<0;})) grSilenced=false; grKey=key; }
@@ -1110,6 +1114,10 @@ function paintGuard(gr,val){
     html.push("<b>Forecast too uncertain</b> — "+esc(UNCERT.reason)
       +". This recommendation cannot be accepted");
   }
+  if(HEATCHK&&HEATCHK.flag){
+    html.push("<b>Heat change too large ("+(HEATCHK.change_pct>0?"+":"")+fmt(HEATCHK.change_pct,1)+" %)</b> — "
+      +esc(HEATCHK.reason)+". This recommendation cannot be accepted");
+  }
   if(errs.length){
     html.push("<b>Data check failed</b> — "+esc(errs.map(function(i){
       var who=i.scope==="all"?"blocks every parameter"
@@ -1127,7 +1135,7 @@ function paintGuard(gr,val){
 document.getElementById("grSilence").addEventListener("click",function(){
   grSilenced=true;
   paintGuard({params:GUARD,breached:Object.keys(GUARD).filter(function(t){return GUARD[t].breach;}),
-              combustion:{breaches:COMB}, direction:DIRCHK, drift:DRIFT, uncertainty:UNCERT});
+              combustion:{breaches:COMB}, direction:DIRCHK, drift:DRIFT, uncertainty:UNCERT, heat:HEATCHK});
 });
 setInterval(function(){ if(grKey&&!grSilenced) grBeep(); },2000);
 
