@@ -169,6 +169,36 @@ def drift(errors) -> dict:
     return out
 
 
+# GR7: uncertain forecast. The T+10 temperature under the recommendation comes
+# with a P10-P90 range; too wide, or reaching the temperature roof / floor =
+# the move is not safe to accept.
+TEMP_TAG = "423CI400_TT_4"
+
+
+def uncertainty(temp: dict | None) -> dict:
+    """temp: {"mean", "p10", "p90"} of the predicted T+10 temperature."""
+    s = (config.plant_settings().get("guardrails") or {}).get("uncertainty") or {}
+    max_w = _num(s.get("max_width_c"))
+    max_w = 35.0 if max_w is None else max_w
+    t = temp or {}
+    p10, p90 = _num(t.get("p10")), _num(t.get("p90"))
+    out = {"flag": False, "p10": p10, "p90": p90, "width": None, "max_width_c": max_w, "reason": None}
+    if p10 is None or p90 is None:
+        return out
+    out["width"] = round(p90 - p10, 1)
+    l = limits().get(TEMP_TAG) or {}
+    bad = []
+    if p90 - p10 > max_w:
+        bad.append(f"T+10 range {p10:.0f}-{p90:.0f} °C is {p90 - p10:.0f} °C wide (max {max_w:g})")
+    if l.get("max") is not None and p90 > l["max"]:
+        bad.append(f"P90 {p90:.0f} °C reaches above the roof {l['max']:g}")
+    if l.get("min") is not None and p10 < l["min"]:
+        bad.append(f"P10 {p10:.0f} °C reaches below the floor {l['min']:g}")
+    if bad:
+        out.update(flag=True, reason="; ".join(bad))
+    return out
+
+
 def _say(tag: str, what: str, value: float, kind: str, l: dict) -> str:
     edge = f"above the roof {l['max']:g}" if kind == "above_roof" else f"below the floor {l['min']:g}"
     return f"{tag} {what} {value:g} is {edge}"

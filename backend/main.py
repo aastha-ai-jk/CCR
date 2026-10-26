@@ -531,6 +531,7 @@ def twin_advisor():
     out["guardrails"]["combustion"] = _combustion(s)          # GR1: actual CO / O2
     out["guardrails"]["direction"] = _direction(s, r)         # GR2: heat vs band
     out["guardrails"]["drift"] = _drift(s)                    # GR6: model drift
+    out["guardrails"]["uncertainty"] = _uncertainty(r)        # GR7: P10-P90 range
     out["validation"] = _current_validation()["report"]
     return _json_safe(out)
 
@@ -697,6 +698,13 @@ def _drift(s: dict) -> dict:
           & (d["feed_gate"].fillna(0).astype(int) == 1)]
     err = pd.to_numeric(d["actual10"], errors="coerce") - pd.to_numeric(d["pred10_mean"], errors="coerce")
     return guardrails.drift(err.dropna().tolist())
+
+
+def _uncertainty(r: dict | None) -> dict:
+    """GR7: P10-P90 of the predicted T+10 temperature, current advice only."""
+    from backend import guardrails
+    temp = ((r or {}).get("predicted") or {}).get("temp") if _advisor_recommended(r) else None
+    return guardrails.uncertainty(temp)
 
 
 def _fresh_values(s: dict) -> dict:
@@ -1114,6 +1122,11 @@ def _accept_refusal(req: DecisionReq, snap: dict) -> str | None:
         if d["flag"]:
             return (f"Refused by model drift check: {d['reason']}. Accept is blocked until the "
                     "forecasts are accurate again; Decline is still allowed.")
+        # GR7: the forecast under this recommendation is too uncertain
+        u = _uncertainty(_advisor["result"])
+        if u["flag"]:
+            return (f"Refused by forecast uncertainty: {u['reason']}. Accept is blocked for this "
+                    "recommendation; Decline is still allowed.")
         # never judge an Accept on a cached result: re-check the data now
         return validation.refuse_accept(req.tag, _current_validation(max_age=0)["report"])
     except Exception as e:

@@ -25,6 +25,10 @@
       "min_points": 30,
       "max_mae_c": 12.0,
       "max_abs_bias_c": 8.0
+    },
+    "uncertainty": {
+      "_about": "GR7: P10-P90 of the predicted T+10 temperature under the recommendation wider than max_width_c, or P90 above / P10 below the temperature roof / floor above -> Accept blocked. Seen so far: median 24, max 33 degC (25 live points, 2026-10-26).",
+      "max_width_c": 35.0
     }
   },
 
