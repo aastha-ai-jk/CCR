@@ -30,6 +30,11 @@ CV = analysis.CV
 COAL = "467RL400_TPH"
 AFR = ["LAFR_FT", "K3V10_F1", "261WF080_TPH"]
 HORIZON = analysis.DELTA  # minutes ahead the twin predicts (== 5)
+# P8: the advisor works at T+10, so its prediction is logged and checked too
+ADV_H = twin_opt.ADVISOR_HORIZON
+_COLS10 = {"horizon10_ts": "TEXT", "pred10_mean": "REAL", "pred10_p10": "REAL",
+           "pred10_p90": "REAL", "matured10": "INTEGER DEFAULT 0",
+           "actual10": "REAL", "abs_error10": "REAL"}
 
 _DDL_AFR = """
 CREATE TABLE IF NOT EXISTS afr_quality (
@@ -128,6 +133,29 @@ def _mature(eng):
     return n
 
 
+def _mature10(eng):
+    """Same as _mature for the advisor's T+10 prediction (P8)."""
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    due = pd.read_sql(text("SELECT rowid, horizon10_ts, pred10_mean FROM shadow_log "
+                           "WHERE COALESCE(matured10,0)=0 AND pred10_mean IS NOT NULL "
+                           "AND horizon10_ts <= :now"), eng, params={"now": now})
+    n = 0
+    with eng.begin() as con:
+        for r in due.itertuples():
+            act = con.execute(text(
+                f'SELECT "{CV}" AS v FROM process_live '
+                "WHERE ts >= :h ORDER BY ts ASC LIMIT 1"),
+                {"h": r.horizon10_ts}).fetchone()
+            if act is None or act[0] is None:
+                continue
+            actual = float(act[0])
+            con.execute(text("UPDATE shadow_log SET matured10=1, actual10=:a, "
+                             "abs_error10=:e WHERE rowid=:id"),
+                        {"a": actual, "e": abs(actual - float(r.pred10_mean)), "id": r.rowid})
+            n += 1
+    return n
+
+
 def _afr_quality(eng, snap: dict, ts: str) -> str:
     """Online AFR calorific-quality inference (observe-only insight).
 
@@ -182,6 +210,10 @@ def tick(eng) -> str:
     cur_temp = _num(snap.get(CV))
 
     matured = _mature(eng)
+    try:
+        matured += _mature10(eng)
+    except Exception:
+        pass                                  # older table without the T+10 columns
     if cur_temp is None:
         return f"no calciner temp in snapshot (matured {matured})"
 
@@ -234,6 +266,12 @@ def tick(eng) -> str:
                                  if i.get("pass") is not None)),
         "matured": 0, "actual_future": None, "abs_error": None,
     }
+    # P8: the T+10 point of the same trajectory (the advisor's horizon)
+    p10 = next((p for p in (core.get("trajectory") or []) if p.get("min") == ADV_H), None)
+    if p10 is not None:
+        row.update(horizon10_ts=(now + dt.timedelta(minutes=ADV_H)).isoformat(timespec="seconds"),
+                   pred10_mean=p10["mean"], pred10_p10=p10.get("p10"), pred10_p90=p10.get("p90"),
+                   matured10=0, actual10=None, abs_error10=None)
     pd.DataFrame([row]).to_sql("shadow_log", eng, if_exists="append", index=False)
     afr = _afr_quality(eng, snap, ts)
     return (f"actual={cur_temp:.1f} pred(t+{HORIZON})={pm['mean']:.1f} "
@@ -255,6 +293,11 @@ def main():
             con.execute(text("ALTER TABLE shadow_log ADD COLUMN pred_raw REAL"))
         except Exception:
             pass                  # already present
+        for col, typ in _COLS10.items():     # migration: T+10 tracking (P8, 2026-10-26)
+            try:
+                con.execute(text(f"ALTER TABLE shadow_log ADD COLUMN {col} {typ}"))
+            except Exception:
+                pass
     print(f"[shadow] DB={config.database_url().split('/')[-1]} horizon={HORIZON}min "
           f"interval={args.interval}s — OBSERVE-ONLY")
     if args.once:

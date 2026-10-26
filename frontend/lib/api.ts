@@ -141,6 +141,12 @@ export interface DeclinedReachedResult {
   rows: DeclinedReachedRow[];
 }
 
+export interface AccuracyStats { n: number; mae: number; bias: number; within_5: number; p90_abs: number }
+export interface AccuracyResult {
+  available: boolean; note?: string;
+  days: { day: string; t10: AccuracyStats | null; t5: AccuracyStats | null }[];
+}
+
 export interface DecisionsResult {
   day: string; n: number;
   counts: { accepted: number; declined: number; undone: number };
@@ -206,6 +212,7 @@ export const api = {
   twinFuture: () => get<TwinFuture>("/api/twin/future"),
   declinedReached: (day?: string) =>
     get<DeclinedReachedResult>(`/api/admin/declined-reached${day ? `?day=${encodeURIComponent(day)}` : ""}`),
+  accuracy: (days = 7) => get<AccuracyResult>(`/api/admin/accuracy?days=${days}`),
   decisionDays: () => get<{ day: string; n: number; accepted: number; declined: number }[]>("/api/decisions/days"),
   decisions: (day?: string) =>
     get<DecisionsResult>(`/api/decisions${day ? `?day=${encodeURIComponent(day)}` : ""}`),

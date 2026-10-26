@@ -741,6 +741,37 @@ def shadow(limit: int = 240):
     })
 
 
+@app.get("/api/admin/accuracy")
+def admin_accuracy(days: int = Query(7, ge=1, le=60)):
+    """P8: day-wise accuracy of the twin's checked predictions (shadow_log),
+    kiln running only. T+10 is the advisor's horizon; T+5 for comparison.
+    error = actual - predicted; within_5 = share with |error| <= 5 C."""
+    cut = (_dt.date.today() - _dt.timedelta(days=days - 1)).isoformat()
+    try:
+        d = db.q("SELECT ts, feed_gate, pred_mean, actual_future, matured, "
+                 "pred10_mean, actual10, matured10 FROM shadow_log WHERE ts >= :c",
+                 {"c": cut})
+    except Exception:
+        return {"available": False, "days": [], "note": "no T+10 tracking yet (shadow runner)"}
+    out = []
+    if len(d):
+        d = d[d["feed_gate"].fillna(0).astype(int) == 1].copy()
+        d["day"] = d["ts"].astype(str).str[:10]
+        for day, g in sorted(d.groupby("day"), reverse=True):
+            row = {"day": day}
+            for h, pc, ac, mc in ((10, "pred10_mean", "actual10", "matured10"),
+                                  (5, "pred_mean", "actual_future", "matured")):
+                m = g[(g[mc].fillna(0).astype(int) == 1) & g[ac].notna() & g[pc].notna()]
+                err = (m[ac].astype(float) - m[pc].astype(float))
+                row[f"t{h}"] = None if not len(m) else {
+                    "n": int(len(m)), "mae": round(float(err.abs().mean()), 2),
+                    "bias": round(float(err.mean()), 2),
+                    "within_5": round(float((err.abs() <= 5).mean()) * 100, 1),
+                    "p90_abs": round(float(err.abs().quantile(0.9)), 2)}
+            out.append(row)
+    return _json_safe({"available": True, "days": out})
+
+
 def _latest_optimizer_row():
     try:
         r = db.q("SELECT * FROM optimizer_log ORDER BY ts DESC LIMIT 1")

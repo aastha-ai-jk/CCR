@@ -1,6 +1,6 @@
 "use client";
 import { Fragment, useEffect, useState } from "react";
-import { api, DeclinedReachedResult, DeclinedReachedRow } from "@/lib/api";
+import { api, AccuracyResult, DeclinedReachedResult, DeclinedReachedRow } from "@/lib/api";
 import { Panel, Stat, Badge, Loading } from "@/components/ui";
 
 // Administrative dashboard — day-wise check of operator DECLINES.
@@ -117,7 +117,62 @@ export default function Admin() {
           )}
         </>
       )}
+
+      <AccuracyPanel day={day} />
     </div>
+  );
+}
+
+// P8: how good the twin's T+10 forecast (the advisor's horizon) has been, day by
+// day, from predictions checked against the actual temperature 10 min later.
+function AccuracyPanel({ day }: { day: string }) {
+  const [acc, setAcc] = useState<AccuracyResult | null>(null);
+  useEffect(() => {
+    const load = () => api.accuracy(7).then(setAcc).catch(() => setAcc(null));
+    load();
+    const t = setInterval(load, 300000);
+    return () => clearInterval(t);
+  }, []);
+  const tone = (mae?: number) => (mae === undefined ? "" : mae <= 6 ? "text-[var(--ok)]" : mae <= 9 ? "text-[var(--warn)]" : "text-[var(--bad)]");
+  return (
+    <Panel title="Model accuracy — T+10 forecast (last 7 days)"
+      right={<span className="text-xs text-[var(--muted)]">predicted vs actual calciner outlet temp, 10 min later · kiln running only</span>}>
+      {!acc ? <Loading /> : !acc.available || acc.days.length === 0 ? (
+        <div className="text-sm text-[var(--muted)]">{acc.note || "No checked predictions yet — the shadow runner records them every 30 s; the first T+10 checks appear 10 min after it starts."}</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--muted)] border-b border-[var(--line)]">
+                <th className="py-2 pr-3">Day</th>
+                <th className="pr-3 text-right">T+10 avg error</th>
+                <th className="pr-3 text-right">within ±5 °C</th>
+                <th className="pr-3 text-right">bias (actual − pred)</th>
+                <th className="pr-3 text-right">worst 10 %</th>
+                <th className="pr-3 text-right">checks</th>
+                <th className="text-right text-[var(--muted)]">T+5 avg error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {acc.days.map((d) => (
+                <tr key={d.day} className={`border-b border-[var(--line)] ${d.day === day ? "bg-[var(--panel-2)]" : ""}`}>
+                  <td className="py-2 pr-3 mono">{d.day}</td>
+                  <td className={`pr-3 mono text-right ${tone(d.t10?.mae)}`}>{d.t10 ? `${d.t10.mae.toFixed(1)} °C` : "—"}</td>
+                  <td className="pr-3 mono text-right">{d.t10 ? `${d.t10.within_5.toFixed(0)} %` : "—"}</td>
+                  <td className="pr-3 mono text-right">{d.t10 ? `${d.t10.bias >= 0 ? "+" : ""}${d.t10.bias.toFixed(1)} °C` : "—"}</td>
+                  <td className="pr-3 mono text-right">{d.t10 ? `> ${d.t10.p90_abs.toFixed(1)} °C` : "—"}</td>
+                  <td className="pr-3 mono text-right">{d.t10?.n ?? 0}</td>
+                  <td className="mono text-right text-[var(--muted)]">{d.t5 ? `${d.t5.mae.toFixed(1)} °C` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="text-[11px] text-[var(--muted)] mt-2">
+            Avg error: green ≤ 6 °C · amber ≤ 9 °C · red above. A rising error or a growing bias means the model is drifting from the plant.
+          </div>
+        </div>
+      )}
+    </Panel>
   );
 }
 
