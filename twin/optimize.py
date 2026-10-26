@@ -226,7 +226,8 @@ def _f(v, nd: int = 2):
 
 def optimize(conditions: dict, n_trials: int = 200,
              levers: list[str] | None = None, clinker: dict | None = None,
-             objective_mode: str | None = None, horizon: int | None = None) -> dict:
+             objective_mode: str | None = None, horizon: int | None = None,
+             max_move_pct: float | None = None) -> dict:
     """Run the Optuna search and return the contract's advisory dict.
 
     ``levers`` picks which MVs to search (default: the four calciner fuel
@@ -238,6 +239,8 @@ def optimize(conditions: dict, n_trials: int = 200,
     the band check use T+horizon; None keeps the model's own T+5 point.
     Calciner fuel levers not searched stay at their live values but still
     count in heat, TSR and cost.
+    ``max_move_pct``: cap each searched lever's move at ± this % of its live
+    value (advisor: 10 %), on top of the trust region and plant max steps.
     """
     import optuna
 
@@ -296,6 +299,10 @@ def optimize(conditions: dict, n_trials: int = 200,
             # the operating envelope for some tags), floored at ±1 unit
             frac = _TRUST_FRAC_KILN if t in KILN_SIDE else _TRUST_FRAC
             r = min((hi - lo) * frac, max(abs(c), 1.0))
+        if max_move_pct is not None:
+            # advisor: one recommendation moves a lever at most ±max_move_pct % of
+            # its live value (floor 0.1 so a lever at ~0 can still be advised)
+            r = min(r, max(abs(c) * float(max_move_pct) / 100.0, 0.1))
         bounds[t] = (max(lo, c - r), min(hi, c + r))
     obj = _opt_settings().get("objective") or {}
     # plant setting > caller's mode (advisor: least_coal) > OPTIMIZER_MODE env

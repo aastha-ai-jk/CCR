@@ -34,6 +34,10 @@ Fill values from the plant questionnaire (`CCR_Kiln3_Advisor_Plant_Inputs.docx`)
 | 8.6 | `advisor.setpoint_expiry_min` | minutes | 30 |
 | — | `advisor.setpoint_reach_tol_frac` | fraction of the lever's range | 0.005 |
 | — | `advisor.trials` | optimizer trials per run | 120 |
+| 7.1–7.4 | `advisor.max_move_pct` | largest move per recommendation, % of the lever's live value (coal, SAFR) | 10 |
+| — | `advisor.horizon_min` | prediction horizon the advice is for (min) | 10 |
+| — | `advisor.min_gap_sec` | fastest re-computation when the plant moves (s) | 15 |
+| — | `advisor.decline_check_tol` | admin check tolerance per tag, e.g. `{"261WF080_TPH": 1.5}` | coal 2.5 t/h · SAFR 1.5 t/h · PC temp 5 °C |
 | — | `optimizer.objective.move_weight` / `.confidence_weight` | objective weights | 0.15 / 0.20 |
 
 Example: `"temperature_bands": {"State 3": [880, 900]}` and

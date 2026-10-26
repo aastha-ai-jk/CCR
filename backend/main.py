@@ -422,7 +422,9 @@ def _advisor_run() -> None:
                               levers=twin_opt.ADVISOR_LEVERS,
                               clinker=_latest_clinker() or {},
                               objective_mode="least_coal",   # plant aim; settings can override
-                              horizon=int(_adv_setting("horizon_min", twin_opt.ADVISOR_HORIZON)))
+                              horizon=int(_adv_setting("horizon_min", twin_opt.ADVISOR_HORIZON)),
+                              # A10: at most ±10 % of the live value per recommendation
+                              max_move_pct=float(_adv_setting("max_move_pct", 10.0)))
         r["ts"], r["source"] = s["ts"], s["source"]
         from twin import reasoning                # "why" text: template, + LLM when enabled
         reasoning.attach(r)
