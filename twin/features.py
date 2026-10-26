@@ -87,6 +87,11 @@ _LAB_TOL = pd.Timedelta("90min")        # nearest-lab join tolerance
 # free-lime sample nearest t + FREE_LIME_LAG (so the model predicts free lime
 # ~2 h ahead). Hot-meal DOC is sampled at the calciner, so it stays unshifted.
 FREE_LIME_LAG = pd.Timedelta("120min")
+# Live eLIMS labels (A2, plant/QC 26 Oct 2026): the calciner conditions at t
+# are labelled with the clinker result STAMPED in eLIMS at t + 2 h and the
+# hot-meal result stamped at t + 4 h (fixed eLIMS lags).
+ELIMS_CLINKER_LAG = pd.Timedelta("2h")
+ELIMS_HOTMEAL_LAG = pd.Timedelta("4h")
 
 
 # --------------------------------------------------------------------------- #
@@ -237,18 +242,37 @@ def _quality_targets(ts: pd.Series, free_lime_lag: pd.Timedelta = FREE_LIME_LAG
                                direction="nearest", tolerance=_LAB_TOL)
         return merged[col]
 
-    cl = db.q("SELECT ts, free_lime FROM lab_clinker")
-    cl["ts"] = pd.to_datetime(cl["ts"], format="mixed")
-    cl["free_lime"] = pd.to_numeric(cl["free_lime"], errors="coerce")
-    cl.loc[~cl["free_lime"].between(_FL_LO, _FL_HI), "free_lime"] = np.nan
-    free_lime = _asof(cl, "free_lime", free_lime_lag)
+    def _table(sql: str) -> pd.DataFrame:
+        try:
+            d = db.q(sql)
+        except Exception:                        # live table absent on this install
+            return pd.DataFrame(columns=["ts", "v"])
+        d["ts"] = pd.to_datetime(d["ts"], format="mixed", errors="coerce")
+        d["v"] = pd.to_numeric(d["v"], errors="coerce")
+        return d.dropna(subset=["ts"])
 
-    hm = db.q("SELECT ts, doc FROM lab_hotmeal")
-    hm["ts"] = pd.to_datetime(hm["ts"], format="mixed")
-    hm["doc"] = pd.to_numeric(hm["doc"], errors="coerce")
+    # The lab files (lab_clinker / lab_hotmeal) carry the SAME eLIMS time
+    # stamps as the live tables (checked 26 Oct: same samples, 0 offset), so
+    # both get the same lag: the PLC row at t takes the clinker stamped t + 2 h
+    # and the hot meal stamped t + 4 h. Identical samples in both collapse in
+    # the groupby on the shared time stamp.
+    cl_file = _table("SELECT ts, free_lime AS v FROM lab_clinker")
+    cl_live = _table("SELECT ts, free_lime AS v FROM lab_freelime_live")
+    cl = pd.concat([cl_file, cl_live], ignore_index=True).rename(columns={"v": "free_lime"})
+    cl.loc[~cl["free_lime"].between(_FL_LO, _FL_HI), "free_lime"] = np.nan
+    cl = cl.groupby("ts", as_index=False)["free_lime"].mean()
+    free_lime = _asof(cl, "free_lime", ELIMS_CLINKER_LAG if free_lime_lag == FREE_LIME_LAG else free_lime_lag)
+
+    # Hot meal: was looked up at the PLC row's own time (no lag) before 26 Oct.
+    hm_file = _table("SELECT ts, doc AS v FROM lab_hotmeal")
+    hm_live = _table("SELECT ts, doc AS v FROM lab_hotmeal_live")
+    hm = pd.concat([hm_file, hm_live], ignore_index=True).rename(columns={"v": "doc"})
+    hm["ts"] = hm["ts"] - ELIMS_HOTMEAL_LAG
     hm.loc[~hm["doc"].between(_DOC_LO, _DOC_HI), "doc"] = np.nan
     hm = hm.groupby("ts", as_index=False)["doc"].mean()   # average kiln sides
     doc = _asof(hm, "doc")
+    print(f"[features] quality labels: clinker {len(cl_file)} file + {len(cl_live)} eLIMS live, "
+          f"hot meal {len(hm_file)} file + {len(hm_live)} eLIMS live")
     return free_lime, doc
 
 

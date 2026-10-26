@@ -357,7 +357,7 @@ def _latest_clinker() -> dict | None:
     lag_h = float(((_adv_setting("elims_lag_h", {}) or {}).get("clinker")) or ELIMS_LAG_H["clinker"])
     rows = []
     for sql, lag in (("SELECT ts, free_lime, liter_weight FROM lab_clinker "
-                      "WHERE free_lime IS NOT NULL OR liter_weight IS NOT NULL ORDER BY ts DESC LIMIT 20", 0.0),
+                      "WHERE free_lime IS NOT NULL OR liter_weight IS NOT NULL ORDER BY ts DESC LIMIT 20", lag_h),
                      ("SELECT ts, free_lime, liter_weight FROM lab_freelime_live "
                       "WHERE free_lime IS NOT NULL ORDER BY ts DESC LIMIT 20", lag_h)):
         try:

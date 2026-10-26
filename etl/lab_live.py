@@ -80,7 +80,9 @@ def latest_lab(q, max_age_h=None, now: dt.datetime | None = None, lag_h: dict | 
             if not got:
                 continue
             tested, v = got
-            sampled = tested - dt.timedelta(hours=lags[material]) if is_elims else tested
+            # lab files carry the same eLIMS time stamps (checked 26 Oct), so the
+            # lag applies to both sources
+            sampled = tested - dt.timedelta(hours=lags[material])
             if best is None or sampled > best[0]:
                 best = (sampled, v, label, tested)
         if best is None:
