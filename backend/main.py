@@ -896,10 +896,32 @@ def post_decision(req: DecisionReq):
     with the twin's advisory context at that moment. Never writes to the plant."""
     from fastapi import HTTPException
     from backend import decisions
+    snap = _snapshot()
+    if req.action == "accepted":
+        why = _accept_refusal(req, snap)
+        if why:                                  # Decline / Undo are never blocked
+            raise HTTPException(status_code=409, detail=why)
     try:
-        return _json_safe(decisions.record(req.model_dump(), _advisor["result"], _snapshot()))
+        return _json_safe(decisions.record(req.model_dump(), _advisor["result"], snap))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+
+def _accept_refusal(req: DecisionReq, snap: dict) -> str | None:
+    """Why an Accept must be refused, or None. Checks every value known for the
+    parameter -- the server's own live and recommended values AND the request's
+    -- against the guardrail limits. Fail-safe: if the check itself fails, refuse."""
+    try:
+        from backend import guardrails
+        live = _fresh_values(snap).get(req.tag)
+        rec = _advisor_recommended(_advisor["result"]).get(req.tag)
+        return guardrails.refuse_accept(req.tag, {
+            "live": live, "recommended": rec,
+            "submitted current": req.current_value,
+            "submitted recommended": req.recommended_value})
+    except Exception as e:
+        return (f"Refused: guardrail check could not run ({e!r}). "
+                "Accept is blocked until it works again; Decline is still allowed.")
 
 
 @app.get("/api/decisions")
