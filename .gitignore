@@ -18,6 +18,8 @@ models/*.pt
 #   .env currently holds only a placeholder DB password.
 # Secrets (OpenAI API key etc.) go in .env.secrets — NEVER committed.
 .env.secrets
+# eLIMS login for the live quality feeds — NEVER committed.
+.env.elims
 #   The 106 MB sqlite is tracked via Git LFS (see .gitattributes).
 .gstack/
 # live runtime state (regenerated continuously by shadow/monitor/retrain)

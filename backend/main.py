@@ -212,21 +212,20 @@ def lab_clinker(limit: int = 500):
         "SELECT * FROM lab_clinker ORDER BY ts DESC LIMIT :n", {"n": limit}))
 
 
+_LAB_INFO: dict = {"info": {}}
+
+
 def _live_inputs() -> tuple[dict, dict, dict, dict]:
     """Live snapshot -> (snapshot meta, values, twin conditions, twin levers)."""
     s = _snapshot()
     snap = dict(s["values"])
     snap["ts"] = s["ts"]
-    lime = db.q("SELECT free_lime, liter_weight, liq FROM lab_clinker "
-                "WHERE free_lime IS NOT NULL ORDER BY ts DESC LIMIT 1")
-    doc = db.q("SELECT doc FROM lab_hotmeal WHERE doc IS NOT NULL ORDER BY ts DESC LIMIT 1")
-    conditions = {}
-    if len(lime):
-        conditions.update({"free_lime": float(lime["free_lime"][0]),
-                           "liter_weight": float(lime["liter_weight"][0]),
-                           "liquid": float(lime["liq"][0])})
-    if len(doc):
-        conditions["doc"] = float(doc["doc"][0])
+    # Lab votes (free lime, liter weight, liquid, DOC): newest of live eLIMS and
+    # the lab files, used only when fresh (P1 / A5). Stale ones are left out of
+    # the state vote; _LAB_INFO keeps what was seen for the advisor screen.
+    from etl.lab_live import latest_lab
+    conditions, _LAB_INFO["info"] = latest_lab(
+        db.q, float(config.plant_settings().get("advisor", {}).get("lab_max_age_h") or 8.0))
     # PLC state-setting vars + current temp so the band/state votes use live data
     conditions["current_temp"] = snap.get("423CI400_TT_4")
     for t in analysis.STATE_PLC:
@@ -356,12 +355,15 @@ def _latest_clinker() -> dict | None:
     rows = []
     for sql in ("SELECT ts, free_lime, liter_weight FROM lab_clinker "
                 "WHERE free_lime IS NOT NULL OR liter_weight IS NOT NULL ORDER BY ts DESC LIMIT 20",
-                "SELECT ts, free_lime, NULL AS liter_weight FROM lab_freelime_live "
+                "SELECT ts, free_lime, liter_weight FROM lab_freelime_live "
                 "WHERE free_lime IS NOT NULL ORDER BY ts DESC LIMIT 20"):
         try:
             rows.append(db.q(sql))
         except Exception:
-            pass                                   # table absent on this install
+            try:                                   # live table from before liter weight
+                rows.append(db.q(sql.replace("free_lime, liter_weight", "free_lime, NULL AS liter_weight")))
+            except Exception:
+                pass                               # table absent on this install
     if not rows:
         return None
     d = pd.concat(rows, ignore_index=True)
@@ -427,7 +429,8 @@ def _advisor_run() -> None:
         feed = s["values"].get(config.KILN_FEED_TAG)
         if feed is None or float(feed) < config.KILN_FEED_MIN_TPH:
             _advisor.update(result={"available": False, "kiln_running": False,
-                                    "kiln_feed": feed, "ts": s["ts"], "source": s["source"]},
+                                    "kiln_feed": feed, "ts": s["ts"], "source": s["source"],
+                                    "lab_inputs": dict(_LAB_INFO["info"])},
                             computed_at=time.time())
             return
         # A8: the advice on screen is re-scored and kept unless clearly beaten;
@@ -456,6 +459,7 @@ def _advisor_run() -> None:
                               max_move_pct=float(_adv_setting("max_move_pct", 10.0)))
         r["ts"], r["source"] = s["ts"], s["source"]
         r["held_since"] = held_since if r.get("held") and incumbent else s["ts"]
+        r["lab_inputs"] = dict(_LAB_INFO["info"])      # which lab values voted, and their age
         from twin import reasoning                # "why" text: template, + LLM when enabled
         reasoning.attach(r)
         from backend import decisions               # advisor_log: computed / new-recommendation count

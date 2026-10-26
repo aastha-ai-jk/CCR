@@ -43,14 +43,18 @@ FIELD_MAP = {
     "C3S": "c3s", "C2S": "c2s", "C3A": "c3a", "C4AF": "c4af",
     "CaO": "cao", "SiO2": "sio2", "Al2O3": "al2o3", "Fe2O3": "fe2o3",
     "MgO": "mgo", "SO3": "so3", "Na2O": "na2o", "K2O": "k2o", "LIQ": "liq",
+    "Ltr.Wt.": "liter_weight", "CL": "cl",          # 2026-10-26: state vote + SO3/Cl watch
 }
 _DDL = """
 CREATE TABLE IF NOT EXISTS lab_freelime_live (
   elims_id TEXT PRIMARY KEY, ts TEXT, free_lime REAL, lsf REAL, sm REAL,
   c3s REAL, c2s REAL, c3a REAL, c4af REAL, cao REAL, sio2 REAL, al2o3 REAL,
-  fe2o3 REAL, mgo REAL, so3 REAL, na2o REAL, k2o REAL, liq REAL
+  fe2o3 REAL, mgo REAL, so3 REAL, na2o REAL, k2o REAL, liq REAL,
+  liter_weight REAL, cl REAL
 )
 """
+_MIGRATE = ("ALTER TABLE lab_freelime_live ADD COLUMN liter_weight REAL",
+            "ALTER TABLE lab_freelime_live ADD COLUMN cl REAL")
 
 
 def _creds() -> dict:
@@ -157,6 +161,12 @@ def main():
     eng = _engine()
     with eng.begin() as con:
         con.execute(text(_DDL))
+    for sql in _MIGRATE:                       # older tables: add the new columns
+        try:
+            with eng.begin() as con:
+                con.execute(text(sql))
+        except Exception:
+            pass
     token = _auth(c)
     today = dt.date.today()
 

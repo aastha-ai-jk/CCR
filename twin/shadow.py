@@ -91,21 +91,13 @@ def _temp_trend(eng, now_temp: float) -> float:
 
 
 def _lab_conditions(eng) -> dict:
-    out = {}
+    """Fresh lab values only (live eLIMS first) — same rule as the advisor."""
     try:
-        cl = pd.read_sql("SELECT free_lime, liter_weight, liq FROM lab_clinker "
-                         "WHERE free_lime IS NOT NULL ORDER BY ts DESC LIMIT 1", eng)
-        if len(cl):
-            out.update(free_lime=_num(cl["free_lime"][0]),
-                       liter_weight=_num(cl["liter_weight"][0]),
-                       liquid=_num(cl["liq"][0]))
-        doc = pd.read_sql("SELECT doc FROM lab_hotmeal WHERE doc IS NOT NULL "
-                          "ORDER BY ts DESC LIMIT 1", eng)
-        if len(doc):
-            out["doc"] = _num(doc["doc"][0])
+        from etl.lab_live import latest_lab
+        cond, _ = latest_lab(lambda sql: pd.read_sql(sql, eng))
+        return {k: v for k, v in cond.items() if v is not None}
     except Exception:
-        pass
-    return {k: v for k, v in out.items() if v is not None}
+        return {}
 
 
 def _mature(eng):
