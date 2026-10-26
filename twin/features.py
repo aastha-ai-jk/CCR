@@ -213,6 +213,44 @@ def _engineer(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# P10 data cleaning. Impossible values (outside the hard range in
+# data/validation_limits.json, e.g. calciner temp 516 degC) and measuring
+# instruments (analysers, temperatures) flat for FROZEN_MIN+ minutes are
+# not learnt from. Operator-held settings (fan speed, kiln feed, kiln coal,
+# kiln speed sit at one value for hours by design) are NOT frozen sensors.
+FROZEN_MIN = 60
+_MEASURED = ("_CO_PPM", "_O2", "_NO", "_TT", "_TEMP")
+
+
+def _bad_rows(df: pd.DataFrame) -> pd.Series:
+    import json
+    try:
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "data" / "validation_limits.json"
+        lim = json.loads(path.read_text(encoding="utf-8")).get("tags", {})
+    except (OSError, ValueError):
+        lim = {}
+    bad = pd.Series(False, index=df.index)
+    n_range = n_frozen = 0
+    for c in _raw_columns():
+        if c not in df:
+            continue
+        v = df[c]
+        l = lim.get(c)
+        if l:
+            out = (v < l["hard_lo"]) | (v > l["hard_hi"])
+            n_range += int((out & ~bad).sum())
+            bad |= out
+        if any(k in c for k in _MEASURED):
+            run = (v != v.shift()).cumsum()
+            flat = v.notna() & (v.groupby(run).transform("size") >= FROZEN_MIN)
+            n_frozen += int((flat & ~bad).sum())
+            bad |= flat
+    print(f"[features] P10 cleaning: {int(bad.sum())} of {len(df)} rows dropped "
+          f"({n_range} impossible value, {n_frozen} frozen instrument)")
+    return bad
+
+
 def _load() -> pd.DataFrame:
     """Query in-load rows, coerce numeric, sort by ts, engineer features."""
     cols = ", ".join(f'"{c}"' for c in _raw_columns())
@@ -220,6 +258,7 @@ def _load() -> pd.DataFrame:
     df["ts"] = pd.to_datetime(df["ts"], format="mixed")
     for c in _raw_columns():
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["_bad"] = _bad_rows(df)                        # P10: dropped in build_training_data
     # Levers hold their last setpoint until moved — forward-fill gaps in the
     # manipulated variables (e.g. K3V10_F1 was uncaptured by the live feed for
     # a month due to a tag-name typo; rates correctly read 0 across the fill).
@@ -313,7 +352,13 @@ def build_training_data(sample: int | None = None) -> dict:
         y[f"safety_{tag}"] = df[tag].shift(-DELTA).where(fwd_ok)
 
     # keep rows with a complete feature vector and a known current temp
-    valid = df[feats].notna().all(axis=1) & df[CV].notna()
+    valid = df[feats].notna().all(axis=1) & df[CV].notna() & ~df["_bad"]
+    # a target read from a bad row (e.g. 516 degC h minutes ahead) is not learnt either
+    for h in HORIZONS:
+        bad_ahead = df["_bad"].shift(-h, fill_value=False).astype(bool)
+        y[f"temp_h{h}"] = y[f"temp_h{h}"].where(~bad_ahead)
+        y[f"temp_smooth_h{h}"] = y[f"temp_smooth_h{h}"].where(~bad_ahead)
+    y["temp"], y["temp_smooth"] = y[f"temp_h{DELTA}"], y[f"temp_smooth_h{DELTA}"]
     df = df[valid].reset_index(drop=True)
     y = {k: v[valid.values].reset_index(drop=True) for k, v in y.items()}
 
