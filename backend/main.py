@@ -530,6 +530,7 @@ def twin_advisor():
     out["guardrails"] = guardrails.evaluate(_fresh_values(s), _advisor_recommended(r))
     out["guardrails"]["combustion"] = _combustion(s)          # GR1: actual CO / O2
     out["guardrails"]["direction"] = _direction(s, r)         # GR2: heat vs band
+    out["guardrails"]["drift"] = _drift(s)                    # GR6: model drift
     out["validation"] = _current_validation()["report"]
     return _json_safe(out)
 
@@ -676,6 +677,26 @@ def _direction(s: dict, r: dict | None) -> dict:
     ok = bool(_advisor_recommended(r))
     return guardrails.direction(_fresh_values(s).get(analysis.CV) if ok else None,
                                 (r or {}).get("target_band"), (r or {}).get("heat"))
+
+
+def _drift(s: dict) -> dict:
+    """GR6: recent T+10 forecast errors from shadow_log (kiln running only).
+    Judged only while the live feed is current."""
+    from backend import guardrails
+    if not _fresh_values(s):
+        return guardrails.drift([])
+    win = guardrails.drift_settings()["window_min"]
+    try:
+        d = db.q("SELECT ts, feed_gate, pred10_mean, actual10, matured10 FROM shadow_log "
+                 "ORDER BY rowid DESC LIMIT 2000")
+    except Exception:
+        return guardrails.drift([])
+    t = pd.to_datetime(d["ts"], format="mixed", errors="coerce")
+    d = d[(t >= pd.Timestamp(_dt.datetime.now()) - pd.Timedelta(minutes=win + 10))
+          & (d["matured10"].fillna(0).astype(int) == 1)
+          & (d["feed_gate"].fillna(0).astype(int) == 1)]
+    err = pd.to_numeric(d["actual10"], errors="coerce") - pd.to_numeric(d["pred10_mean"], errors="coerce")
+    return guardrails.drift(err.dropna().tolist())
 
 
 def _fresh_values(s: dict) -> dict:
@@ -1088,6 +1109,11 @@ def _accept_refusal(req: DecisionReq, snap: dict) -> str | None:
         if d["flag"]:
             return (f"Refused by direction check: {d['reason']}. Accept is blocked for this "
                     "recommendation; Decline is still allowed.")
+        # GR6: the forecasts behind the advice have drifted
+        d = _drift(snap)
+        if d["flag"]:
+            return (f"Refused by model drift check: {d['reason']}. Accept is blocked until the "
+                    "forecasts are accurate again; Decline is still allowed.")
         # never judge an Accept on a cached result: re-check the data now
         return validation.refuse_accept(req.tag, _current_validation(max_age=0)["report"])
     except Exception as e:

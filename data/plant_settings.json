@@ -18,6 +18,13 @@
     "doc": {
       "_about": "GR3: latest fresh hot meal DOC (sample < 8 h) below min = under-calcining -> the advisor will not cut total calciner heat (clinker quality guard). 94.0 = project lead 2026-10-26 (about the lowest 5 % of live DOC since 1 Jul; plant to confirm).",
       "min": 94.0
+    },
+    "drift": {
+      "_about": "GR6: T+10 forecasts checked by the shadow runner over the last window_min (kiln running, at least min_points checks). Mean abs error above max_mae_c or mean bias beyond max_abs_bias_c -> model drifting, Accept blocked. Test MAE 6.9, persistence 9.1 (2026-10-26); tune once more live checks exist.",
+      "window_min": 60,
+      "min_points": 30,
+      "max_mae_c": 12.0,
+      "max_abs_bias_c": 8.0
     }
   },
 

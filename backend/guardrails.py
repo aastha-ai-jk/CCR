@@ -141,6 +141,34 @@ def direction(live_temp, band: dict | None, heat: dict | None) -> dict:
     return out
 
 
+# GR6: model drift. The shadow runner checks every T+10 forecast against the
+# actual temperature; if the recent error is too large or one-sided, the
+# forecasts behind the advice are not trustworthy: Accept blocked until it clears.
+def drift_settings() -> dict:
+    s = (config.plant_settings().get("guardrails") or {}).get("drift") or {}
+    d = {"window_min": 60, "min_points": 30, "max_mae_c": 12.0, "max_abs_bias_c": 8.0}
+    return {k: (_num(s.get(k)) if _num(s.get(k)) is not None else v) for k, v in d.items()}
+
+
+def drift(errors) -> dict:
+    """errors: actual - predicted T+10 (degC) of the checks in the window."""
+    st = drift_settings()
+    e = [x for x in (_num(v) for v in errors) if x is not None]
+    out = {"flag": False, "n": len(e), "mae": None, "bias": None, "reason": None, **st}
+    if len(e) < st["min_points"]:
+        return out
+    mae, bias = sum(abs(x) for x in e) / len(e), sum(e) / len(e)
+    out.update(mae=round(mae, 2), bias=round(bias, 2))
+    bad = []
+    if mae > st["max_mae_c"]:
+        bad.append(f"T+10 error {mae:.1f} °C above {st['max_mae_c']:g}")
+    if abs(bias) > st["max_abs_bias_c"]:
+        bad.append(f"forecasts {'too low' if bias > 0 else 'too high'} by {abs(bias):.1f} °C on average")
+    if bad:
+        out.update(flag=True, reason=f"last {st['window_min']:g} min ({len(e)} checks): " + "; ".join(bad))
+    return out
+
+
 def _say(tag: str, what: str, value: float, kind: str, l: dict) -> str:
     edge = f"above the roof {l['max']:g}" if kind == "above_roof" else f"below the floor {l['min']:g}"
     return f"{tag} {what} {value:g} is {edge}"
