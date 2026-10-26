@@ -123,13 +123,15 @@ QUALITY_SPECS = {
 # Clinker quality ZONE for the advisor's lab-based guard (twin.optimize): the
 # latest lab clinker result decides whether a recommendation may cut or raise
 # total calciner heat. None = that edge is not checked until the plant
-# confirms it. Free lime max mirrors QUALITY_SPECS. A lab result older than
-# CLINKER_LAB_MAX_AGE_H leaves the guard inactive.
+# confirms it. Free lime max mirrors QUALITY_SPECS. A lab result whose SAMPLE
+# is older than CLINKER_LAB_MAX_AGE_H leaves the guard inactive (eLIMS stamps
+# clinker 2 h after sampling, so a new result is already ~2 h old; 6 h matches
+# the state vote's clinker limit in etl/lab_live.py).
 CLINKER_ZONE = {
     "free_lime":    {"min": None, "max": QUALITY_SPECS["free_lime"]["max"]},   # %
     "liter_weight": {"min": None, "max": None},                                # g/l
 }
-CLINKER_LAB_MAX_AGE_H = 4.0
+CLINKER_LAB_MAX_AGE_H = 6.0
 
 # Objective emphasis: "cost" (min ₹/ton clinker) | "tsr" (max thermal
 # substitution) | "coal" (min coal tph). All three KPIs reported regardless.

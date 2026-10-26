@@ -3,9 +3,11 @@
 The state vote and the twin use free lime, liter weight, liquid phase (clinker)
 and hot-meal DOC. Each is taken from the newest result across the live eLIMS
 tables (lab_freelime_live, lab_hotmeal_live) and the older Excel-loaded tables
-(lab_clinker, lab_hotmeal), and is USED only if that result is younger than
-max_age_h (default 8 h, closes A5): a stale lab value is left out of the vote
-rather than steering the band with weeks-old data.
+(lab_clinker, lab_hotmeal), and is USED only if its SAMPLE is younger than
+the material's limit (clinker 6 h, hot meal 8 h; closes A5): a stale lab value is
+left out of the vote rather than steering the band with old data. eLIMS stamps
+results a fixed time after sampling (clinker 2 h, hot meal 4 h — QC team), so
+sample time = eLIMS time - lag.
 
     latest_lab(q, max_age_h) -> (conditions, info)
       conditions: {"free_lime", "liter_weight", "liquid", "doc"} — fresh values only
@@ -18,14 +20,25 @@ import datetime as dt
 
 import pandas as pd
 
-LAB_MAX_AGE_H = 8.0
+LAB_MAX_AGE_H = 8.0      # legacy single limit (still honoured if passed as a number)
 
-# condition name -> [(table, column, source label)], checked in this order
+# Fixed eLIMS lag (QC team, 26 Oct 2026): an eLIMS result's time stamp is this
+# many hours AFTER the sample was taken. Sample time = eLIMS time - lag; the
+# age of a lab value is counted from its SAMPLE time.
+ELIMS_LAG_H = {"clinker": 2.0, "hotmeal": 4.0}
+# Usable while the sample is younger than this (lag + about one-two lab cycles)
+MAX_AGE_H = {"clinker": 6.0, "hotmeal": 8.0}
+
+# condition name -> (material, [(table, column, source label, is_elims)])
 _SOURCES = {
-    "free_lime": [("lab_freelime_live", "free_lime", "eLIMS live"), ("lab_clinker", "free_lime", "lab file")],
-    "liter_weight": [("lab_freelime_live", "liter_weight", "eLIMS live"), ("lab_clinker", "liter_weight", "lab file")],
-    "liquid": [("lab_freelime_live", "liq", "eLIMS live"), ("lab_clinker", "liq", "lab file")],
-    "doc": [("lab_hotmeal_live", "doc", "eLIMS live"), ("lab_hotmeal", "doc", "lab file")],
+    "free_lime": ("clinker", [("lab_freelime_live", "free_lime", "eLIMS live", True),
+                              ("lab_clinker", "free_lime", "lab file", False)]),
+    "liter_weight": ("clinker", [("lab_freelime_live", "liter_weight", "eLIMS live", True),
+                                 ("lab_clinker", "liter_weight", "lab file", False)]),
+    "liquid": ("clinker", [("lab_freelime_live", "liq", "eLIMS live", True),
+                           ("lab_clinker", "liq", "lab file", False)]),
+    "doc": ("hotmeal", [("lab_hotmeal_live", "doc", "eLIMS live", True),
+                        ("lab_hotmeal", "doc", "lab file", False)]),
 }
 
 
@@ -51,23 +64,35 @@ def _latest(q, table: str, col: str):
     return t.to_pydatetime(), float(d.loc[d["t"].idxmax(), "v"])
 
 
-def latest_lab(q, max_age_h: float = LAB_MAX_AGE_H, now: dt.datetime | None = None):
+def latest_lab(q, max_age_h=None, now: dt.datetime | None = None, lag_h: dict | None = None):
+    """max_age_h: {material: hours} (or one number for all); lag_h: {material: hours}."""
     now = now or dt.datetime.now()
+    lags = {**ELIMS_LAG_H, **(lag_h or {})}
+    if isinstance(max_age_h, (int, float)):
+        limits = {m: float(max_age_h) for m in MAX_AGE_H}
+    else:
+        limits = {**MAX_AGE_H, **(max_age_h or {})}
     cond, info = {}, {}
-    for name, sources in _SOURCES.items():
+    for name, (material, sources) in _SOURCES.items():
         best = None
-        for table, col, label in sources:
+        for table, col, label, is_elims in sources:
             got = _latest(q, table, col)
-            if got and (best is None or got[0] > best[0]):
-                best = (*got, label)
+            if not got:
+                continue
+            tested, v = got
+            sampled = tested - dt.timedelta(hours=lags[material]) if is_elims else tested
+            if best is None or sampled > best[0]:
+                best = (sampled, v, label, tested)
         if best is None:
-            info[name] = {"value": None, "ts": None, "age_h": None, "used": False, "source": None}
+            info[name] = {"value": None, "ts": None, "tested": None, "age_h": None,
+                          "used": False, "source": None, "max_age_h": limits[material]}
             continue
-        t, v, label = best
-        age = (now - t).total_seconds() / 3600.0
-        used = age <= max_age_h and v == v              # v == v: not NaN
-        info[name] = {"value": round(v, 3), "ts": t.isoformat(timespec="minutes"),
-                      "age_h": round(age, 1), "used": bool(used), "source": label}
+        sampled, v, label, tested = best
+        age = (now - sampled).total_seconds() / 3600.0
+        used = age <= limits[material] and v == v        # v == v: not NaN
+        info[name] = {"value": round(v, 3), "ts": sampled.isoformat(timespec="minutes"),
+                      "tested": tested.isoformat(timespec="minutes"), "age_h": round(age, 1),
+                      "used": bool(used), "source": label, "max_age_h": limits[material]}
         if used:
             cond[name] = v
     return cond, info

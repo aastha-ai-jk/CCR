@@ -224,8 +224,9 @@ def _live_inputs() -> tuple[dict, dict, dict, dict]:
     # the lab files, used only when fresh (P1 / A5). Stale ones are left out of
     # the state vote; _LAB_INFO keeps what was seen for the advisor screen.
     from etl.lab_live import latest_lab
+    adv = config.plant_settings().get("advisor", {}) or {}
     conditions, _LAB_INFO["info"] = latest_lab(
-        db.q, float(config.plant_settings().get("advisor", {}).get("lab_max_age_h") or 8.0))
+        db.q, max_age_h=adv.get("lab_max_age_h"), lag_h=adv.get("elims_lag_h"))
     # PLC state-setting vars + current temp so the band/state votes use live data
     conditions["current_temp"] = snap.get("423CI400_TT_4")
     for t in analysis.STATE_PLC:
@@ -352,22 +353,26 @@ ADVISOR_TRIALS = 120
 def _latest_clinker() -> dict | None:
     """Newest clinker lab result (ts, free_lime, liter_weight) from lab_clinker
     and, where the eLIMS live feed runs, lab_freelime_live."""
+    from etl.lab_live import ELIMS_LAG_H
+    lag_h = float(((_adv_setting("elims_lag_h", {}) or {}).get("clinker")) or ELIMS_LAG_H["clinker"])
     rows = []
-    for sql in ("SELECT ts, free_lime, liter_weight FROM lab_clinker "
-                "WHERE free_lime IS NOT NULL OR liter_weight IS NOT NULL ORDER BY ts DESC LIMIT 20",
-                "SELECT ts, free_lime, liter_weight FROM lab_freelime_live "
-                "WHERE free_lime IS NOT NULL ORDER BY ts DESC LIMIT 20"):
+    for sql, lag in (("SELECT ts, free_lime, liter_weight FROM lab_clinker "
+                      "WHERE free_lime IS NOT NULL OR liter_weight IS NOT NULL ORDER BY ts DESC LIMIT 20", 0.0),
+                     ("SELECT ts, free_lime, liter_weight FROM lab_freelime_live "
+                      "WHERE free_lime IS NOT NULL ORDER BY ts DESC LIMIT 20", lag_h)):
         try:
-            rows.append(db.q(sql))
+            got = db.q(sql)
         except Exception:
             try:                                   # live table from before liter weight
-                rows.append(db.q(sql.replace("free_lime, liter_weight", "free_lime, NULL AS liter_weight")))
+                got = db.q(sql.replace("free_lime, liter_weight", "free_lime, NULL AS liter_weight"))
             except Exception:
-                pass                               # table absent on this install
+                continue                           # table absent on this install
+        # eLIMS stamps clinker results 2 h after sampling: use the SAMPLE time
+        got["t"] = pd.to_datetime(got["ts"], format="mixed", errors="coerce") - pd.Timedelta(hours=lag)
+        rows.append(got)
     if not rows:
         return None
     d = pd.concat(rows, ignore_index=True)
-    d["t"] = pd.to_datetime(d["ts"], format="mixed", errors="coerce")
     d = d.dropna(subset=["t"]).sort_values("t")
     if not len(d):
         return None
