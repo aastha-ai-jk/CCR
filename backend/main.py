@@ -388,6 +388,15 @@ def _latest_clinker() -> dict | None:
             "free_lime": num(r["free_lime"]), "liter_weight": num(r["liter_weight"])}
 
 
+def _guard_lab() -> dict:
+    """Latest clinker lab + the hot meal DOC (GR3) when its sample is fresh."""
+    c = dict(_latest_clinker() or {})
+    d = (_LAB_INFO["info"] or {}).get("doc") or {}
+    if d.get("used") and d.get("value") is not None:
+        c.update(doc=d["value"], doc_ts=d.get("ts"))
+    return c
+
+
 def _adv_setting(key: str, default):
     """data/plant_settings.json "advisor" value (re-read each call), else default."""
     v = (config.plant_settings().get("advisor") or {}).get(key)
@@ -463,7 +472,7 @@ def _advisor_run() -> None:
                                                          "max_dev_pct": 20.0}),
                               n_trials=int(_adv_setting("trials", ADVISOR_TRIALS)),
                               levers=twin_opt.ADVISOR_LEVERS,
-                              clinker=_latest_clinker() or {},
+                              clinker=_guard_lab(),
                               objective_mode="least_coal",   # plant aim; settings can override
                               horizon=int(_adv_setting("horizon_min", twin_opt.ADVISOR_HORIZON)),
                               # A10: at most ±10 % of the live value per recommendation

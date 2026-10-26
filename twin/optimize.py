@@ -198,16 +198,26 @@ def clinker_guard(clinker: dict | None) -> dict:
            "lab_ts": c.get("ts"), "age_h": None,
            "zone": {k: dict(v) for k, v in z.items()},
            "max_age_h": config.CLINKER_LAB_MAX_AGE_H}
+    # GR3: hot meal DOC below its minimum = calciner under-calcining -> no heat
+    # cut. c["doc"] is passed only when the sample is fresh (etl/lab_live, 8 h).
+    doc_min = ((config.plant_settings().get("guardrails") or {}).get("doc") or {}).get("min")
+    doc = c.get("doc")
+    out.update(doc=doc, doc_ts=c.get("doc_ts"), doc_min=doc_min)
+    doc_low = doc is not None and doc_min is not None and float(doc) < float(doc_min)
+    fresh = False
     try:
         lab = pd.Timestamp(str(c.get("ts")).replace(" ", "T")[:19])
         now = pd.Timestamp(c["now"]) if c.get("now") else pd.Timestamp(_dt.datetime.now())
         out["age_h"] = round((now - lab).total_seconds() / 3600.0, 2)
+        fresh = -1 <= out["age_h"] <= config.CLINKER_LAB_MAX_AGE_H
     except Exception:
+        pass
+    if not fresh and not doc_low:
         return out
-    if out["age_h"] is None or out["age_h"] > config.CLINKER_LAB_MAX_AGE_H or out["age_h"] < -1:
-        return out
-    fl, lw = c.get("free_lime"), c.get("liter_weight")
+    fl, lw = (c.get("free_lime"), c.get("liter_weight")) if fresh else (None, None)
     under, over = [], []
+    if doc_low:
+        under.append(f"hot meal DOC {float(doc):.1f}% below {float(doc_min):g}%")
     if fl is not None and z["free_lime"]["max"] is not None and fl > z["free_lime"]["max"]:
         under.append(f"free lime {fl:.2f}% above {z['free_lime']['max']:g}%")
     if lw is not None and z["liter_weight"]["min"] is not None and lw < z["liter_weight"]["min"]:
@@ -223,7 +233,7 @@ def clinker_guard(clinker: dict | None) -> dict:
     elif under and over:                     # conflicting signals: hold heat steady
         out.update(active=True, direction="hold_heat", status="conflicting", reasons=under + over)
     else:
-        out["status"] = "in_zone"
+        out["status"] = "in_zone" if fresh else "no_recent_lab"
     return out
 
 

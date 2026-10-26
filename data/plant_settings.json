@@ -14,6 +14,10 @@
     "direction": {
       "_about": "GR2: live temp above the band and the move adds total calciner heat (or below and it cuts heat) by more than min_heat_change_pct -> Accept blocked. Smaller changes are noise / grid rounding.",
       "min_heat_change_pct": 1.0
+    },
+    "doc": {
+      "_about": "GR3: latest fresh hot meal DOC (sample < 8 h) below min = under-calcining -> the advisor will not cut total calciner heat (clinker quality guard). 94.0 = project lead 2026-10-26 (about the lowest 5 % of live DOC since 1 Jul; plant to confirm).",
+      "min": 94.0
     }
   },
 

@@ -985,17 +985,18 @@ function paintClinker(g){
   var vals=[];
   if(typeof g.free_lime==="number") vals.push("free lime "+fmt(g.free_lime,2)+" %");
   if(typeof g.liter_weight==="number") vals.push("liter weight "+fmt(g.liter_weight,0)+" g/l");
+  if(typeof g.doc==="number") vals.push("hot meal DOC "+fmt(g.doc,1)+" %"+(typeof g.doc_min==="number"?" (min "+fmt(g.doc_min,1)+")":""));
   var lab=g.lab_ts?(clockAt(g.lab_ts,0)+" "+String(g.lab_ts).slice(8,10)+"/"+String(g.lab_ts).slice(5,7)):"—";
   var txt;
   if(g.active){
     el.className="clknote is-guard";
-    txt="<b>Clinker quality guard on</b> — "+esc(g.reasons.join("; "))+" (lab "+esc(lab)+"). "
+    txt="<b>Quality guard on</b> — "+esc(g.reasons.join("; "))+" (lab "+esc(lab)+"). "
       +({no_heat_cut:"Recommendations will not cut total calciner heat.",
          no_heat_rise:"Recommendations will not raise total calciner heat.",
          hold_heat:"Conflicting signals: total heat held steady."}[g.direction]||"");
   }else if(g.status==="in_zone"){
     el.className="clknote is-ok";
-    txt="<b>Clinker in quality zone</b> — "+esc(vals.join(", "))+" (lab "+esc(lab)+").";
+    txt="<b>Clinker and hot meal in quality zone</b> — "+esc(vals.join(", "))+" (lab "+esc(lab)+").";
   }else{
     el.className="clknote";
     txt="Clinker guard inactive — no lab result in the last "+g.max_age_h+" h"
