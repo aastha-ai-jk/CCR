@@ -615,6 +615,8 @@ function valOf(p){
 function blockText(p){
   var g=guardOf(p), bits=[];
   if(g) bits.push("Guardrail: "+guardText(p,g));
+  // GR1: live CO / O2 unsafe -> a move that ADDS fuel (or heat) is blocked
+  if(COMB.length&&dirOf(p)==="up") bits.push("Combustion: live "+combText()+" — no fuel increase");
   valOf(p).forEach(function(i){ bits.push("Data check: "+i.tag+" "+i.check+" — "+i.detail); });
   return bits.join(". ");
 }
@@ -1045,7 +1047,10 @@ function paintLab(li){
 // Roof / floor breaches from /api/twin/advisor -> guardrails (backend/guardrails.py).
 // Banner + beep every 2 s until Silenced; a NEW breached parameter re-arms it.
 // The server refuses an Accept on its own anyway (HTTP 409).
-var GUARD={}, VAL=null, grKey="", grSilenced=false, grCtx=null;
+var GUARD={}, VAL=null, COMB=[], grKey="", grSilenced=false, grCtx=null;
+function combText(){
+  return COMB.map(function(b){ return b.name+" "+fmt(b.value,b.tag.indexOf("_O2")>0?1:0)+" (limit "+b.rule+")"; }).join(", ");
+}
 function grBeep(){
   try{
     grCtx=grCtx||new (window.AudioContext||window.webkitAudioContext)();
@@ -1058,10 +1063,12 @@ function grBeep(){
 }
 function paintGuard(gr,val){
   GUARD=(gr&&gr.params)||{};
+  if(gr&&gr.combustion) COMB=gr.combustion.breaches||[];
   if(val!==undefined) VAL=val;
   var tags=(gr&&gr.breached)||[], errs=valErrors();
-  // alarm key: breached tags + validation errors (tag:check)
-  var ids=tags.concat(errs.map(function(i){return i.tag+":"+i.check;}));
+  // alarm key: breached tags + live CO/O2 breaches + validation errors (tag:check)
+  var ids=tags.concat(COMB.map(function(b){return "comb:"+b.tag;}),
+                      errs.map(function(i){return i.tag+":"+i.check;}));
   var key=ids.slice().sort().join(",");
   if(key!==grKey){ if(ids.some(function(t){return (","+grKey+",").indexOf(","+t+",")<0;})) grSilenced=false; grKey=key; }
   var el=document.getElementById("grAlarm");
@@ -1073,6 +1080,10 @@ function paintGuard(gr,val){
       return p?p.name+" — "+guardText(p,GUARD[t]):t;
     });
     html.push("<b>Guardrail breach</b> — "+esc(names.join(" · ")));
+  }
+  if(COMB.length){
+    html.push("<b>Live CO/O₂ outside safety limit</b> — "+esc(combText())
+      +". No recommendation that adds fuel can be accepted; cuts are allowed");
   }
   if(errs.length){
     html.push("<b>Data check failed</b> — "+esc(errs.map(function(i){
@@ -1090,7 +1101,8 @@ function paintGuard(gr,val){
 }
 document.getElementById("grSilence").addEventListener("click",function(){
   grSilenced=true;
-  paintGuard({params:GUARD,breached:Object.keys(GUARD).filter(function(t){return GUARD[t].breach;})});
+  paintGuard({params:GUARD,breached:Object.keys(GUARD).filter(function(t){return GUARD[t].breach;}),
+              combustion:{breaches:COMB}});
 });
 setInterval(function(){ if(grKey&&!grSilenced) grBeep(); },2000);
 

@@ -519,6 +519,7 @@ def twin_advisor():
     # current data only. Reported here; blocking Accept comes separately.
     from backend import guardrails
     out["guardrails"] = guardrails.evaluate(_fresh_values(s), _advisor_recommended(r))
+    out["guardrails"]["combustion"] = _combustion(s)          # GR1: actual CO / O2
     out["validation"] = _current_validation()["report"]
     return _json_safe(out)
 
@@ -625,6 +626,37 @@ def get_validation_events(limit: int = Query(100, ge=1, le=2000), open_only: boo
     where = "WHERE cleared_at IS NULL" if open_only else ""
     df = db.q(f"SELECT * FROM validation_events {where} ORDER BY id DESC LIMIT :n", {"n": limit})
     return _json_safe({"n": int(len(df)), "events": _clean_records(df)})
+
+
+def _combustion(s: dict) -> dict:
+    """GR1: live CO / O2 against the safety interlocks (current data only).
+    Judged on the last avg_sec average (brief spikes don't count); rows where
+    an analyser purges (O2 above 15 %) are left out of that analyser's average."""
+    from backend import guardrails
+    cat = db.tag_catalog().set_index("tag")
+    names = {t: str(cat.loc[t, "name"]) for t in config.INTERLOCKS if t in cat.index}
+    vals = _fresh_values(s)
+    if not vals:
+        return guardrails.combustion({}, names)
+    avg_sec = float(guardrails.combustion_settings().get("avg_sec") or 120)
+    d = _recent_live(minutes=max(1, int(avg_sec // 60) + 1))
+    if d is not None and len(d):
+        t = pd.to_datetime(d["ts"], format="mixed", errors="coerce")
+        d = d[t >= t.max() - pd.Timedelta(seconds=avg_sec)]
+        probe = {**guardrails._PROBE, **{o: o for o in guardrails._PROBE.values()}}
+        vals = dict(vals)
+        for tag in config.INTERLOCKS:
+            if tag not in d:
+                continue
+            v = pd.to_numeric(d[tag], errors="coerce")
+            o2 = probe.get(tag)
+            if o2 in d:
+                v = v[pd.to_numeric(d[o2], errors="coerce") <= guardrails.PURGE_O2]
+            if v.notna().any():
+                vals[tag] = float(v.mean())
+            else:                                  # whole window purging: no judgement
+                vals.pop(tag, None)
+    return guardrails.combustion(vals, names)
 
 
 def _fresh_values(s: dict) -> dict:
@@ -1024,6 +1056,12 @@ def _accept_refusal(req: DecisionReq, snap: dict) -> str | None:
             "live": live, "recommended": rec,
             "submitted current": req.current_value,
             "submitted recommended": req.recommended_value})
+        if why:
+            return why
+        # GR1: live CO / O2 unsafe -> no Accept that adds fuel
+        why = guardrails.refuse_fuel_raise(
+            req.tag, live if live is not None else req.current_value,
+            rec if rec is not None else req.recommended_value, _combustion(snap))
         if why:
             return why
         # never judge an Accept on a cached result: re-check the data now

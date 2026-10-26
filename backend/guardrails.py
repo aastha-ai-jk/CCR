@@ -73,6 +73,49 @@ def evaluate(live: dict, recommended: dict, lim: dict | None = None) -> dict:
             "any_breach": bool(breached)}
 
 
+# GR1: the ACTUAL gas readings against the safety interlocks (config.INTERLOCKS,
+# plant_settings "interlocks"). High CO / low O2 now = combustion short of air:
+# no Accept may ADD fuel until it clears; cutting fuel is still allowed.
+PURGE_O2 = 15.0                                   # O2 above this = analyser purging (plant air)
+_PROBE = {"423AM823_CO_PPM": "423AM823_O2", "423AM822_CO_PPM": "423AM822_O2"}
+
+
+def combustion_settings() -> dict:
+    """plant_settings guardrails.combustion: {"avg_sec", "limits": {tag: value}}."""
+    return (config.plant_settings().get("guardrails") or {}).get("combustion") or {}
+
+
+def combustion(live: dict, names: dict | None = None) -> dict:
+    """{"breaches": [{tag, name, value, rule}], "any": bool} from live values
+    (the caller passes the short-window averages)."""
+    over = combustion_settings().get("limits") or {}
+    out = []
+    for tag, (op, lim) in config.INTERLOCKS.items():
+        lim = _num(over.get(tag)) if _num(over.get(tag)) is not None else lim
+        v = _num(live.get(tag))
+        if v is None:
+            continue
+        o2 = tag if tag.endswith("_O2") else _PROBE.get(tag)
+        if o2 and (_num(live.get(o2)) or 0) > PURGE_O2:
+            continue                              # analyser purging: reading is plant air
+        if not (v < lim if op == "<" else v > lim):
+            out.append({"tag": tag, "name": (names or {}).get(tag, tag), "value": v,
+                        "rule": f"{op} {lim:g}"})
+    return {"breaches": out, "any": bool(out)}
+
+
+def refuse_fuel_raise(tag: str, live_v, rec_v, comb: dict) -> str | None:
+    """GR1: refuse an Accept that raises fuel (or temperature) while live CO/O2 is unsafe."""
+    if not comb.get("any"):
+        return None
+    lv, rv = _num(live_v), _num(rec_v)
+    if lv is not None and rv is not None and rv <= lv:
+        return None                               # a cut / hold moves towards safety
+    why = "; ".join(f"{b['name']} {b['value']:g} (limit {b['rule']})" for b in comb["breaches"])
+    return (f"Refused by combustion guard: live {why}. Accept that adds fuel is blocked "
+            "until CO/O2 is back inside its limit; a cut and Decline are still allowed.")
+
+
 def _say(tag: str, what: str, value: float, kind: str, l: dict) -> str:
     edge = f"above the roof {l['max']:g}" if kind == "above_roof" else f"below the floor {l['min']:g}"
     return f"{tag} {what} {value:g} is {edge}"

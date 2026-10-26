@@ -5,7 +5,12 @@
     "_about": "Hard roof / floor per advisor parameter (CCR operators via project lead 2026-10-21; temp floor 850->820 on 2026-10-23). Checked on the live value and the recommended value (temp: the predicted T+10). A value exactly AT a limit is allowed. null = no limit. Re-read on every request.",
     "423CI400_TT_4": {"min": 820, "max": 951},
     "467RL400_TPH":  {"min": 15,  "max": 34.90},
-    "261WF080_TPH":  {"min": 0,   "max": 26.50}
+    "261WF080_TPH":  {"min": 0,   "max": 26.50},
+    "combustion": {
+      "_about": "GR1: LIVE CO / O2 (2-min average, analyser purge excluded) against the interlock limits; while one is outside, no Accept may add fuel. 'limits' overrides an interlock for GR1 only. Kiln inlet CO 1500 = PLACEHOLDER (2026-10-26) until the CCR confirms the real limit (default 800 is below its normal ~690-1230 ppm).",
+      "avg_sec": 120,
+      "limits": {"423AM822_CO_PPM": 1500}
+    }
   },
 
   "process": {
