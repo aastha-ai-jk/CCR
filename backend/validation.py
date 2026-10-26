@@ -52,6 +52,9 @@ SAFETY = ["423AM823_CO_PPM", "423AM823_O2", "423AM822_CO_PPM", "423AM822_O2"]
 CRITICAL = [CV, "353RL130_TPH", "467RL300_TPH", "423FN010_ST", "433MD140_ST1", "LAFR_FT", *SAFETY]
 # Fuel feeders that may sit at exactly 0 while switched off: not "stuck" then.
 FEEDERS = {"467RL400_TPH", "261WF080_TPH", "LAFR_FT", "467RL300_TPH"}
+# Operator-held settings: one value for hours by design (fan at 1000-1002 rpm
+# 73 % of the time, kiln feed at 481.1 t/h ...) -- never "stuck" (P10, 26 Oct).
+HELD = {"423FN010_ST", "433MD140_ST1", "353RL130_TPH", "467RL300_TPH"}
 CHECKED = CRITICAL + LEVERS                     # get spike / stuck / missing checks
 RUN_FLAG = {"423AM823_CO_PPM": "423AM823_RUN", "423AM823_O2": "423AM823_RUN",
             "423AM822_CO_PPM": "423AM822_RUN", "423AM822_O2": "423AM822_RUN"}
@@ -206,7 +209,7 @@ def check_inputs(snapshot: dict, recent: pd.DataFrame | None, lim: dict | None =
             span = (r["t"].iloc[-1] - r["t"].iloc[0]).total_seconds()
             if span >= need:
                 tail = s[(r["t"] >= now - pd.Timedelta(seconds=need)) & ok]
-                if (len(tail) >= 10 and tail.nunique() == 1
+                if (len(tail) >= 10 and tail.nunique() == 1 and tag not in HELD
                         and not (tag in FEEDERS and latest == 0)):
                     issues.append(_issue(tag, "stuck", "error", float(latest),
                                          f"unchanged at {latest:.6g} for {need/60:.0f}+ min "
