@@ -40,6 +40,13 @@ NAME = "ccr-advisor-" + datetime.date.today().strftime("%Y%m%d")
 HASHED_EXT = (".py", ".ts", ".tsx", ".js", ".json", ".html", ".txt", ".css")
 PRUNED = ("data/", "models/", "node_modules/", "frontend/node_modules/", ".venv/", ".git/",
           "frontend/.next/")
+# settings files under data/ ARE deployed (guardrail limits, validation limits);
+# the server's find must hash them too (27 Oct: plant_settings.json changed)
+DATA_DEPLOYED = ("data/plant_settings.json", "data/validation_limits.json")
+
+
+def pruned(f: str) -> bool:
+    return f.startswith(PRUNED) and f not in DATA_DEPLOYED
 NOT_DEPLOYED = ("ops/", "docs/progress-report/", "docs/twin-dashboard/", "twin/exp_", ".claude/",
                 "frontend/.claude/", "OPC Data call syntex")
 
@@ -74,7 +81,7 @@ def server_bases() -> dict[str, str]:
                              check=True).stdout.splitlines()
     bases = {}
     for f in tracked:
-        if not f.endswith(HASHED_EXT) or f.startswith(PRUNED) or f.startswith(NOT_DEPLOYED):
+        if not f.endswith(HASHED_EXT) or pruned(f) or f.startswith(NOT_DEPLOYED):
             continue
         new = blob(NEW, f)
         if new is not None and have.get(f) != sha(new):
@@ -97,7 +104,7 @@ def main() -> None:
                 continue
             if f in bases:
                 base = bases[f]
-            elif SERVER_HASHES and f.endswith(HASHED_EXT) and not f.startswith(PRUNED):
+            elif SERVER_HASHES and f.endswith(HASHED_EXT) and not pruned(f):
                 continue                                # server already has the NEW version
             else:
                 old = blob(BASE, f)
