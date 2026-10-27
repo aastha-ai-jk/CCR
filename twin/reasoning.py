@@ -1,17 +1,19 @@
 """Operator-facing "why" text for each advisor recommendation (ADVISORY ONLY).
 
 Every advisory gets a TEMPLATE explanation built from the optimiser's own
-numbers. When REASONING_PROVIDER=openai, a small LLM (default gpt-5-nano)
-rewrites those same facts into plainer sentences in the background; its text
-replaces the template only if every number in it matches a fact. The LLM never
-sees anything but process numbers and never changes a recommendation.
+numbers. When REASONING_PROVIDER is anthropic (Claude Haiku 5.5, chosen
+27 Oct 2026) or openai (gpt-5-nano), a small LLM rewrites those same facts into
+plainer sentences in the background; its text replaces the template only if
+every number in it matches a fact. The LLM never sees anything but process
+numbers and never changes a recommendation.
 
-    .env
-    REASONING_PROVIDER=off | openai     (default off)
-    REASONING_MODEL=gpt-5-nano
-    REASONING_EFFORT=minimal
+    .env.secrets
+    REASONING_PROVIDER=off | anthropic | openai   (default off)
+    REASONING_MODEL=claude-haiku-5-5              (default per provider)
+    REASONING_EFFORT=low                          (anthropic: low..max; openai: minimal..)
     REASONING_TIMEOUT_SEC=20
-    OPENAI_API_KEY=...                  (only needed when the provider is openai)
+    ANTHROPIC_API_KEY=...                         (provider anthropic)
+    OPENAI_API_KEY=...                            (provider openai)
 
 attach(result) sets result["reasoning"] = {"source", "ts", "rows": {param_id: text}}
 and, when enabled, starts one background LLM call per changed recommendation.
@@ -27,8 +29,11 @@ import threading
 import config  # noqa: F401  (loads .env into the environment)
 
 PROVIDER = os.getenv("REASONING_PROVIDER", "off").strip().lower()
-MODEL = os.getenv("REASONING_MODEL", "gpt-5-nano")
-EFFORT = os.getenv("REASONING_EFFORT", "minimal")
+_DEFAULTS = {"anthropic": ("claude-haiku-5-5", "low"), "openai": ("gpt-5-nano", "minimal")}
+MODEL = os.getenv("REASONING_MODEL") or _DEFAULTS.get(PROVIDER, ("", ""))[0]
+EFFORT = os.getenv("REASONING_EFFORT") or _DEFAULTS.get(PROVIDER, ("", ""))[1]
+if PROVIDER == "anthropic" and EFFORT not in ("low", "medium", "high", "xhigh", "max"):
+    EFFORT = "low"                       # short text from given facts: least thinking
 TIMEOUT = float(os.getenv("REASONING_TIMEOUT_SEC", "20"))
 
 CV = config.CALCINER_TEMP_TAG
@@ -201,8 +206,68 @@ Facts:
 """
 
 
+def _rows(text: str, f: dict) -> dict | None:
+    """The LLM's JSON reply -> {row: text}, or None unless every row is present
+    and every number in it is a fact."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    m = re.search(r"\{.*\}", text, re.S)
+    rows = json.loads(m.group(0) if m else text)
+    want = {"calc_out", *f["levers"].keys()}
+    if not isinstance(rows, dict) or set(rows) != want:
+        return None
+    rows = {k: str(v).strip() for k, v in rows.items()}
+    if not all(rows.values()) or not all(numbers_ok(v, f) for v in rows.values()):
+        return None
+    return rows
+
+
 def _llm(f: dict) -> dict | None:
-    """One gpt-5-nano call; returns {row: text} or None. Never raises."""
+    """One LLM call; returns {row: text} or None. Never raises."""
+    return _llm_anthropic(f) if PROVIDER == "anthropic" else _llm_openai(f)
+
+
+def _llm_anthropic(f: dict) -> dict | None:
+    """One Claude Haiku call (ANTHROPIC_API_KEY)."""
+    try:
+        import anthropic
+    except ImportError:
+        _log(f, None, "anthropic-error: SDK not installed", None, None)
+        return None
+    if not os.getenv("ANTHROPIC_API_KEY", "").strip():
+        _log(f, None, "anthropic-error: no ANTHROPIC_API_KEY in .env.secrets", None, None)
+        return None
+    try:
+        client = anthropic.Anthropic(timeout=TIMEOUT, max_retries=1)
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=4000,
+            output_config={"effort": EFFORT},
+            messages=[{"role": "user", "content": _PROMPT + json.dumps(f, ensure_ascii=False)}],
+        )
+        u = resp.usage
+        if resp.stop_reason == "refusal":
+            _log(f, None, "anthropic-refusal", u.input_tokens, u.output_tokens)
+            return None
+        rows = _rows("".join(b.text for b in resp.content if b.type == "text"), f)
+        _log(f, rows, "anthropic" if rows else "anthropic-rejected", u.input_tokens, u.output_tokens)
+        return rows
+    except anthropic.AuthenticationError:
+        _log(f, None, "anthropic-error: invalid API key", None, None)
+    except anthropic.RateLimitError:
+        _log(f, None, "anthropic-error: rate limited", None, None)
+    except anthropic.APIStatusError as e:
+        _log(f, None, f"anthropic-error: HTTP {e.status_code}", None, None)
+    except anthropic.APIConnectionError:
+        _log(f, None, "anthropic-error: no connection (blocked network?)", None, None)
+    except Exception as e:                       # bad JSON etc.: keep the template
+        _log(f, None, f"anthropic-error: {type(e).__name__}", None, None)
+    return None
+
+
+def _llm_openai(f: dict) -> dict | None:
+    """One gpt-5-nano call (OPENAI_API_KEY)."""
     try:
         from openai import OpenAI
         client = OpenAI(timeout=TIMEOUT, max_retries=1)
@@ -212,19 +277,10 @@ def _llm(f: dict) -> dict | None:
             input=[{"role": "user", "content": _PROMPT + json.dumps(f, ensure_ascii=False)}],
             max_output_tokens=4000,
         )
-        text = (resp.output_text or "").strip()
-        if not text:
-            return None
-        m = re.search(r"\{.*\}", text, re.S)
-        rows = json.loads(m.group(0) if m else text)
-        want = {"calc_out", *f["levers"].keys()}
-        if not isinstance(rows, dict) or set(rows) != want:
-            return None
-        rows = {k: str(v).strip() for k, v in rows.items()}
-        if not all(rows.values()) or not all(numbers_ok(v, f) for v in rows.values()):
-            return None
-        u = getattr(resp, "usage", None)
-        _log(f, rows, "openai", getattr(u, "input_tokens", None), getattr(u, "output_tokens", None))
+        rows = _rows(resp.output_text, f)
+        if rows:
+            u = getattr(resp, "usage", None)
+            _log(f, rows, "openai", getattr(u, "input_tokens", None), getattr(u, "output_tokens", None))
         return rows
     except Exception as e:
         _log(f, None, f"openai-error: {type(e).__name__}", None, None)
@@ -265,7 +321,7 @@ def attach(r: dict) -> None:
         return
     ts = r.get("ts")
     r["reasoning"] = {"source": "template", "ts": ts, "rows": tmpl}
-    if PROVIDER != "openai":
+    if PROVIDER not in ("anthropic", "openai"):
         return
     k = _key(f)
     with _lock:
