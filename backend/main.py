@@ -465,6 +465,20 @@ def _advisor_run() -> None:
             prev_age = None
         incumbent = (prev.get("recommended") if prev.get("recommended") and prev_age is not None
                      and prev_age < horizon and prev.get("source") == s["source"] else None)
+        # Held advice must still pass the total-heat cap (GR8) against the plant as
+        # it is NOW; else it would stay on screen yet be blocked -> search afresh.
+        if incumbent:
+            try:
+                from backend import guardrails
+                from twin import economics
+                econ = config.fuel_economics()
+                cur = {t: float(conditions[t]) for t in econ if conditions.get(t) is not None}
+                h = guardrails.heat_change(economics._heat_per_h(cur, econ)[1],
+                                           economics._heat_per_h({**cur, **incumbent}, econ)[1])
+                if h["flag"]:
+                    incumbent = None
+            except Exception:
+                pass                                  # the optimizer's own hold rules still apply
         r = twin_opt.optimize({**conditions, **levers},
                               incumbent=incumbent,
                               steps=_adv_setting("step", {"467RL400_TPH": 0.1, "261WF080_TPH": 0.1}),
