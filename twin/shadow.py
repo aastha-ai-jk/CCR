@@ -100,52 +100,73 @@ def _lab_conditions(eng) -> dict:
         return {}
 
 
-def _mature(eng):
-    """Fill realised temperature + error for predictions whose horizon has passed."""
-    now = dt.datetime.now().isoformat(timespec="seconds")
-    due = pd.read_sql(text("SELECT rowid, horizon_ts, pred_mean FROM shadow_log "
-                           "WHERE matured=0 AND horizon_ts <= :now"),
-                      eng, params={"now": now})
-    if not len(due):
-        return 0
+# A prediction is graded only against a reading within ACTUAL_TOL_S of its
+# target time. Before 27 Oct the first reading AFTER the target was taken, so
+# across a feed gap a forecast was graded against a reading hours later (live
+# T+10 error showed 15 degC and the drift guard blocked every Accept). No
+# reading near the target once GRADE_WAIT_S has passed -> matured = -1
+# ("no reading"), left out of every accuracy figure.
+ACTUAL_TOL_S = 60
+GRADE_WAIT_S = 120
+
+
+def _actual_at(con, target: str) -> float | None:
+    """The live calciner temp nearest `target` within +-ACTUAL_TOL_S, or None."""
+    t = dt.datetime.fromisoformat(str(target))
+    lo = (t - dt.timedelta(seconds=ACTUAL_TOL_S)).isoformat(timespec="seconds")
+    hi = (t + dt.timedelta(seconds=ACTUAL_TOL_S)).isoformat(timespec="seconds")
+    rows = con.execute(text(f'SELECT ts, "{CV}" FROM process_live '
+                            "WHERE ts >= :lo AND ts <= :hi AND "
+                            f'"{CV}" IS NOT NULL'), {"lo": lo, "hi": hi}).fetchall()
+    if not rows:
+        return None
+    best = min(rows, key=lambda r: abs((dt.datetime.fromisoformat(str(r[0])) - t).total_seconds()))
+    return float(best[1])
+
+
+def _grade(eng, ts_col: str, pred_col: str, flag: str, act_col: str, err_col: str) -> int:
+    now = dt.datetime.now()
+    due = pd.read_sql(text(f"SELECT rowid, {ts_col} AS h, {pred_col} AS p FROM shadow_log "
+                           f"WHERE COALESCE({flag},0)=0 AND {pred_col} IS NOT NULL "
+                           f"AND {ts_col} <= :now"),
+                      eng, params={"now": now.isoformat(timespec="seconds")})
     n = 0
     with eng.begin() as con:
         for r in due.itertuples():
-            act = con.execute(text(
-                f'SELECT "{CV}" AS v FROM process_live '
-                "WHERE ts >= :h ORDER BY ts ASC LIMIT 1"),
-                {"h": r.horizon_ts}).fetchone()
-            if act is None or act[0] is None:
+            actual = _actual_at(con, r.h)
+            if actual is None:
+                if (now - dt.datetime.fromisoformat(str(r.h))).total_seconds() > GRADE_WAIT_S:
+                    con.execute(text(f"UPDATE shadow_log SET {flag}=-1, {act_col}=NULL, "
+                                     f"{err_col}=NULL WHERE rowid=:id"), {"id": r.rowid})
                 continue
-            actual = float(act[0])
-            con.execute(text("UPDATE shadow_log SET matured=1, actual_future=:a, "
-                             "abs_error=:e WHERE rowid=:id"),
-                        {"a": actual, "e": abs(actual - float(r.pred_mean)), "id": r.rowid})
+            con.execute(text(f"UPDATE shadow_log SET {flag}=1, {act_col}=:a, {err_col}=:e "
+                             "WHERE rowid=:id"),
+                        {"a": actual, "e": abs(actual - float(r.p)), "id": r.rowid})
             n += 1
     return n
+
+
+def _mature(eng):
+    """Fill realised temperature + error for predictions whose horizon has passed."""
+    return _grade(eng, "horizon_ts", "pred_mean", "matured", "actual_future", "abs_error")
 
 
 def _mature10(eng):
     """Same as _mature for the advisor's T+10 prediction (P8)."""
-    now = dt.datetime.now().isoformat(timespec="seconds")
-    due = pd.read_sql(text("SELECT rowid, horizon10_ts, pred10_mean FROM shadow_log "
-                           "WHERE COALESCE(matured10,0)=0 AND pred10_mean IS NOT NULL "
-                           "AND horizon10_ts <= :now"), eng, params={"now": now})
-    n = 0
+    return _grade(eng, "horizon10_ts", "pred10_mean", "matured10", "actual10", "abs_error10")
+
+
+def regrade(eng) -> dict:
+    """Re-grade every past prediction with the +-ACTUAL_TOL_S rule (27 Oct fix)."""
     with eng.begin() as con:
-        for r in due.itertuples():
-            act = con.execute(text(
-                f'SELECT "{CV}" AS v FROM process_live '
-                "WHERE ts >= :h ORDER BY ts ASC LIMIT 1"),
-                {"h": r.horizon10_ts}).fetchone()
-            if act is None or act[0] is None:
-                continue
-            actual = float(act[0])
-            con.execute(text("UPDATE shadow_log SET matured10=1, actual10=:a, "
-                             "abs_error10=:e WHERE rowid=:id"),
-                        {"a": actual, "e": abs(actual - float(r.pred10_mean)), "id": r.rowid})
-            n += 1
-    return n
+        con.execute(text("UPDATE shadow_log SET matured=0 WHERE matured IN (1, -1)"))
+        con.execute(text("UPDATE shadow_log SET matured10=0 WHERE matured10 IN (1, -1)"))
+    _mature(eng), _mature10(eng)
+    with eng.begin() as con:
+        c = dict(con.execute(text(
+            "SELECT SUM(matured=1), SUM(matured=-1), SUM(matured10=1), SUM(matured10=-1) "
+            "FROM shadow_log")).fetchone()._mapping)
+    return dict(zip(("t5_graded", "t5_no_reading", "t10_graded", "t10_no_reading"), c.values()))
 
 
 def _afr_quality(eng, snap: dict, ts: str) -> str:
@@ -275,6 +296,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval", type=float, default=30.0)
     ap.add_argument("--once", action="store_true", help="single tick then exit")
+    ap.add_argument("--regrade", action="store_true",
+                    help="re-grade all past predictions (+-60 s rule) then exit")
     args = ap.parse_args()
 
     eng = _engine()
@@ -290,8 +313,15 @@ def main():
                 con.execute(text(f"ALTER TABLE shadow_log ADD COLUMN {col} {typ}"))
             except Exception:
                 pass
+    try:                          # grading looks up readings by time: index once (27 Oct)
+        with eng.begin() as con:
+            con.execute(text("CREATE INDEX IF NOT EXISTS ix_process_live_ts ON process_live (ts)"))
+    except Exception:
+        pass                      # no process_live yet (no live feed on this install)
     print(f"[shadow] DB={config.database_url().split('/')[-1]} horizon={HORIZON}min "
           f"interval={args.interval}s — OBSERVE-ONLY")
+    if args.regrade:
+        print("[shadow] regrade", regrade(eng)); return
     if args.once:
         print("[shadow]", tick(eng)); return
     while True:
