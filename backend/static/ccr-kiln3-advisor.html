@@ -174,6 +174,10 @@ main{display:flex;flex-direction:column;min-width:0;}
   border:1px solid var(--red);border-left:4px solid var(--red);border-radius:var(--r);
   background:#2A1A17;color:var(--ink-bright);font-size:13px;}
 .gralarm[hidden]{display:none;}
+.feednote{margin:0 0 12px;padding:10px 14px;border:1px solid var(--line);border-left:4px solid var(--ink-faint);
+  border-radius:var(--r);background:var(--panel);color:var(--ink-dim);font-size:13px;}
+.feednote[hidden]{display:none;}
+.feednote b{color:var(--ink-bright);font-weight:600;}
 .gralarm b{color:var(--red);}
 .gralarm__txt{flex:1;}
 .gralarm.is-on{animation:grpulse 1.2s ease-in-out infinite;}
@@ -423,6 +427,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
       </div>
       <p class="advnote" id="advNote">Goal: least calciner coal, then as much SAFR as the limits allow, keeping the calciner in band at T+10 min. Apply now — effect at T+10. Only calciner coal and SAFR are recommended; LAFR PC/TAD, kiln coal, kiln feed, preheater fan speed and kiln speed are held at their live values (plant decision). Advisory only.</p>
       <p class="clknote" id="clkNote" hidden></p>
+      <p class="feednote" id="feedNote" hidden></p>
       <div class="gralarm" id="grAlarm" role="alert" hidden>
         <span class="gralarm__txt" id="grAlarmTxt"></span>
         <button class="btn btn--ghost btn--sm" id="grSilence">Silence</button>
@@ -608,6 +613,10 @@ function actionable(p){ return p.recOk!==false&&!!p.liveOk; }
 function guardOf(p){ var g=GUARD[TAGS[p.id]]; return g&&g.breach?g:null; }
 // data-validation errors that block this row: its own, or one affecting every lever
 function valErrors(){ return ((VAL&&VAL.issues)||[]).filter(function(i){return i.severity==="error";}); }
+// "live feed down" is not a safety breach: grey notice, no beep, no red rows
+// (Accept stays blocked - there is nothing current to accept against)
+function isFeedDown(i){ return i.check==="freshness"; }
+function feedDown(){ return valErrors().some(isFeedDown); }
 function valOf(p){
   var t=TAGS[p.id];
   return valErrors().filter(function(i){ return i.scope==="all"||i.scope===t; });
@@ -625,7 +634,7 @@ function blockText(p){
   if(UNCERT&&UNCERT.flag) bits.push("Uncertain forecast: "+UNCERT.reason);
   // GR8: total heat change against the live heat too large
   if(HEATCHK&&HEATCHK.flag) bits.push("Heat change: "+HEATCHK.reason);
-  valOf(p).forEach(function(i){ bits.push("Data check: "+i.tag+" "+i.check+" — "+i.detail); });
+  valOf(p).forEach(function(i){ if(!isFeedDown(i)) bits.push("Data check: "+i.tag+" "+i.check+" — "+i.detail); });
   return bits.join(". ");
 }
 function guardText(p,g){
@@ -668,7 +677,7 @@ function rowHTML(p){
   if(st.status==="open"){
     if(gb) h+='<p class="grnote">'+esc(gb)+'. Accept is blocked; Decline is still allowed.</p>';
     h+='<div class="actions">';
-    h+= '<button class="btn btn--accept" data-act="accept"'+(!actionable(p)||gb?' disabled':'')+'>Accept</button>';
+    h+= '<button class="btn btn--accept" data-act="accept"'+(!actionable(p)||gb||feedDown()?' disabled':'')+'>Accept</button>';
     h+= '<button class="btn btn--decline" data-act="declineStart"'+(!actionable(p)?' disabled':'')+'>Decline</button>';
     h+= '<span class="actions__note">Advisory only — your decision is logged to the twin; nothing is written to the DCS.</span>';
     h+='</div>';
@@ -710,7 +719,7 @@ document.getElementById("list").addEventListener("click",function(ev){
 
   if(act==="toggle"){ st.open=!st.open; if(!st.open) st.declining=false; render(); return; }
   if(act==="accept"){
-    if(!actionable(p)||blockText(p)||busy) return;
+    if(!actionable(p)||blockText(p)||feedDown()||busy) return;
     busy=true;
     postDecision(p,"accepted").then(function(row){
       st.status="accepted"; st.declining=false; st.open=false;
@@ -1079,7 +1088,13 @@ function paintGuard(gr,val){
   if(gr&&"uncertainty" in gr) UNCERT=gr.uncertainty;
   if(gr&&"heat" in gr) HEATCHK=gr.heat;
   if(val!==undefined) VAL=val;
-  var tags=(gr&&gr.breached)||[], errs=valErrors();
+  var tags=(gr&&gr.breached)||[], errs=valErrors().filter(function(i){return !isFeedDown(i);});
+  var fn=document.getElementById("feedNote");
+  if(feedDown()){
+    fn.innerHTML="<b>Live feed down — waiting for data.</b> No current plant values, so there is no "
+      +"recommendation and Accept is unavailable. It resumes on its own when the feed returns.";
+    fn.hidden=false;
+  }else fn.hidden=true;
   // alarm key: breached tags + live CO/O2 breaches + direction + drift + validation errors (tag:check)
   var ids=tags.concat(COMB.map(function(b){return "comb:"+b.tag;}),
                       DIRCHK&&DIRCHK.flag?["direction"]:[],
