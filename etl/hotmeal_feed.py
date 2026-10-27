@@ -121,6 +121,8 @@ def main():
             days = [(dt.date.today() - dt.timedelta(1)).isoformat(), dt.date.today().isoformat()]
             n, token = _pull(eng, c, token, days)
             print(f"[{dt.datetime.now():%H:%M:%S}] upserted {n}")
+            if args.once:                      # one live poll, then exit
+                return
         except KeyboardInterrupt:
             break
         except Exception as e:

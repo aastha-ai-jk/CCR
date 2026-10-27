@@ -184,6 +184,8 @@ def main():
         try:
             n, token = _pull(eng, c, token, [dt.date.today().isoformat()])
             print(f"[{dt.datetime.now():%H:%M:%S}] upserted {n} of today")
+            if args.once:                      # one live poll, then exit
+                return
         except KeyboardInterrupt:
             break
         except Exception as e:
