@@ -24,7 +24,7 @@ from backend.analysis import CV, DELTA, MV, SAFETY
 
 HORIZON_MIN = DELTA  # == analysis.DELTA (5 min calciner thermal dead-time)
 # v3: the twin predicts a TRAJECTORY — heads at each of these horizons (min).
-HORIZONS: tuple[int, ...] = (5, 10, 15, 30)
+HORIZONS: tuple[int, ...] = (5, 10, 15, 20, 30)   # 20 added 26 Oct (P9; was interpolated)
 
 # --- named process columns used as features -------------------------------
 CALCINER_COAL = "467RL400_TPH"          # strongest lever; gets its own lags/rolls

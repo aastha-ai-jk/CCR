@@ -46,8 +46,10 @@ def h_key(bundle: dict, h: int):
 
 def main() -> None:
     global H
+    import sys
+    label = sys.argv[1] if len(sys.argv) > 1 else "p10_clean"   # e.g. p9_t20
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
-    bak = MODELS / f"backup-before-P10-{stamp}"
+    bak = MODELS / f"backup-before-{label}-{stamp}"
     bak.mkdir(parents=True, exist_ok=True)
     shutil.copy2(PKL, bak / PKL.name)
     shutil.copy2(MET, bak / MET.name)
@@ -73,8 +75,9 @@ def main() -> None:
     if not keep:
         shutil.copy2(bak / PKL.name, PKL)
         shutil.copy2(bak / MET.name, MET)
-    (MODELS / "exp_p10_clean_results.json").write_text(json.dumps(res, indent=2))
-    print("[p10]", json.dumps(res))
+    res["horizons"] = sorted(int(h) for h in new["temp_multi"])
+    (MODELS / f"exp_{label}_results.json").write_text(json.dumps(res, indent=2))
+    print(f"[{label}]", json.dumps(res))
 
 
 H = 5

@@ -913,12 +913,13 @@ function pollTwin(){
     document.getElementById("predFor").textContent=clockAt(f.ts,hm)||"--:--";
     document.getElementById("predRange").textContent=typeof p.p10==="number"&&typeof p.p90==="number"
       ?"likely "+fmt(p.p10,0)+"–"+fmt(p.p90,0)+" °C":"at current settings";
-    // T+20 and T+30, less prominent. The model is trained at 5/10/15/30 min,
-    // so T+20 is interpolated between the T+15 and T+30 heads (marked est.).
+    // T+20 and T+30, less prominent. T+20 is a trained head since P9; an older
+    // model without it falls back to interpolating T+15..T+30 (marked est.).
     var tr=f.trajectory||[], by={};
     tr.forEach(function(t){ by[t.min]=t; });
     var later=[];
-    if(by[15]&&by[30]){
+    if(by[20]) later.push(by[20]);
+    else if(by[15]&&by[30]){
       var w=(20-15)/(30-15), mix=function(k){return by[15][k]+(by[30][k]-by[15][k])*w;};
       later.push({min:20,mean:mix("mean"),p10:mix("p10"),p90:mix("p90"),est:true});
     }
