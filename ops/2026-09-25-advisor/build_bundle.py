@@ -36,6 +36,11 @@ FILES = [f for f in subprocess.run(["git", "diff", "--name-only", BASE, NEW], cw
                                    capture_output=True, text=True, check=True).stdout.splitlines()
          if not f.startswith("ops/") and f != ".gitignore"]   # git housekeeping, not app code
 NAME = "ccr-advisor-" + datetime.date.today().strftime("%Y%m%d")
+if "--suffix" in _args:              # second deploy on one day: keep the first one's rollback
+    i = _args.index("--suffix")
+    NAME += _args[i + 1]
+    del _args[i:i + 2]
+    NEW = _args[0] if _args else "HEAD"
 # server-hash mode: what the server's find covered, and what is never deployed
 HASHED_EXT = (".py", ".ts", ".tsx", ".js", ".json", ".html", ".txt", ".css")
 PRUNED = ("data/", "models/", "node_modules/", "frontend/node_modules/", ".venv/", ".git/",
