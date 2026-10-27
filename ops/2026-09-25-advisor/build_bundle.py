@@ -94,7 +94,9 @@ def main() -> None:
     out = HERE / "dist" / f"{NAME}.tar.gz"
     out.parent.mkdir(exist_ok=True)
     bases = server_bases() if SERVER_HASHES else {}
-    files = sorted(set(FILES) | set(bases))
+    # server-hash mode: exactly the app files whose server hash differs (docs,
+    # docker files, dotfiles are not app files and are not hashed on the server)
+    files = sorted(bases) if SERVER_HASHES else sorted(FILES)
     skipped = []
     with tarfile.open(out, "w:gz") as tar:
         for f in files:
