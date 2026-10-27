@@ -39,13 +39,20 @@ _SOURCES = {
                            ("lab_clinker", "liq", "lab file", False)]),
     "doc": ("hotmeal", [("lab_hotmeal_live", "doc", "eLIMS live", True),
                         ("lab_hotmeal", "doc", "lab file", False)]),
+    # shown with their plant max (quality.hotmeal_so3_max / _cl_max, 27 Oct);
+    # not state votes or model inputs (INFO_ONLY)
+    "so3": ("hotmeal", [("lab_hotmeal_live", "so3", "eLIMS live", True)]),
+    "cl": ("hotmeal", [("lab_hotmeal_live", "cl", "eLIMS live", True)]),
 }
+INFO_ONLY = {"so3", "cl"}
+_MAX_KEY = {"so3": "hotmeal_so3_max", "cl": "hotmeal_cl_max"}
 
 
 # Plausible ranges: eLIMS stores "not measured" as 0 (seen 26 Oct: Ltr.Wt. = 0),
 # so values outside these are ignored and the last valid result is used.
 VALID = {"free_lime": (0.2, 5.0), "liter_weight": (900.0, 1600.0),
-         "liq": (20.0, 35.0), "doc": (85.0, 100.0)}
+         "liq": (20.0, 35.0), "doc": (85.0, 100.0), "so3": (0.01, 15.0), "cl": (0.001, 10.0)}
+_SIDES = ("doc", "so3", "cl")             # hot meal: kiln sides A and B, averaged
 
 
 def _latest(q, table: str, col: str):
@@ -53,7 +60,7 @@ def _latest(q, table: str, col: str):
     lo, hi = VALID.get(col, (float("-inf"), float("inf")))
     try:
         d = q(f"SELECT ts, {col} AS v FROM {table} WHERE {col} IS NOT NULL "
-              f"AND {col} >= {lo} AND {col} <= {hi} ORDER BY ts DESC LIMIT {4 if col == 'doc' else 1}")
+              f"AND {col} >= {lo} AND {col} <= {hi} ORDER BY ts DESC LIMIT {4 if col in _SIDES else 1}")
     except Exception:
         return None
     if not len(d):
@@ -63,10 +70,19 @@ def _latest(q, table: str, col: str):
     if not len(d):
         return None
     t = d["t"].max()
-    if col == "doc":                      # sides A and B, tested minutes apart
+    if col in _SIDES:                     # sides A and B, tested minutes apart
         near = d[(t - d["t"]) <= pd.Timedelta(hours=1)]
         return t.to_pydatetime(), float(pd.to_numeric(near["v"], errors="coerce").mean())
     return t.to_pydatetime(), float(d.loc[d["t"].idxmax(), "v"])
+
+
+def _plant_max(key: str) -> float | None:
+    try:
+        import config
+        v = (config.plant_settings().get("quality") or {}).get(key)
+        return None if v is None else float(v)
+    except Exception:
+        return None
 
 
 def latest_lab(q, max_age_h=None, now: dt.datetime | None = None, lag_h: dict | None = None):
@@ -100,6 +116,9 @@ def latest_lab(q, max_age_h=None, now: dt.datetime | None = None, lag_h: dict | 
         info[name] = {"value": round(v, 3), "ts": sampled.isoformat(timespec="minutes"),
                       "tested": tested.isoformat(timespec="minutes"), "age_h": round(age, 1),
                       "used": bool(used), "source": label, "max_age_h": limits[material]}
-        if used:
+        if name in _MAX_KEY:
+            mx = _plant_max(_MAX_KEY[name])
+            info[name].update(max=mx, above_max=bool(used and mx is not None and v > mx))
+        if used and name not in INFO_ONLY:
             cond[name] = v
     return cond, info

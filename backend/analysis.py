@@ -76,6 +76,19 @@ for _key, _bands in ((config.plant_settings().get("state_rules") or {}).items())
         STATE_RULES[_key] = (STATE_RULES[_key][0], [tuple(map(float, b)) for b in _bands])
 
 
+def vote_state(votes: dict) -> int:
+    """Operating state from the per-key votes: the weighted mean of the votes
+    (plant_settings "state_weights", plant 2026-10-27), rounded; equal weights
+    for a key without one. No votes -> State 2."""
+    if not votes:
+        return 2
+    w = {k: v for k, v in (config.plant_settings().get("state_weights") or {}).items()
+         if not k.startswith("_") and isinstance(v, (int, float))}
+    total = sum(w.get(k, 1.0 / len(STATE_RULES)) for k in votes)
+    mean = sum(w.get(k, 1.0 / len(STATE_RULES)) * s for k, s in votes.items()) / total
+    return min(3, max(1, int(round(mean))))
+
+
 def _classify_state(key: str, value: float | None) -> int | None:
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return None
@@ -216,10 +229,7 @@ def simulate(levers: dict, conditions: dict | None = None, k: int = 400) -> dict
         s = _classify_state(key, None if val is None else float(val))
         if s:
             votes[key] = s
-    if votes:
-        state_num = int(round(np.mean(list(votes.values()))))
-    else:
-        state_num = 2
+    state_num = vote_state(votes)                    # weighted (plant, 27 Oct)
     state = f"State {state_num}"
     band = config.TEMP_STATE_BANDS[state]
 

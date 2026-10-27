@@ -106,9 +106,14 @@ def fuel_economics() -> dict:
     # plant_settings.json "fuels" wins over both (a set value = no longer an estimate)
     for tag, meta in ((plant_settings().get("fuels") or {}).items()):
         if tag in out and isinstance(meta, dict):
+            if meta.get("ignore"):               # plant: leave this fuel out of heat / TSR
+                del out[tag]
+                continue
             given = {k: v for k, v in meta.items() if v is not None and not k.startswith("_")}
             out[tag].update(given)
-            if "gcv_kcal_kg" in given and "price_per_ton" in given:
+            # heat and TSR need only the calorific value; cost is not considered
+            # (plant, 2026-10-27), so a confirmed GCV ends the "estimate" label
+            if "gcv_kcal_kg" in given:
                 out[tag]["is_estimate"] = False
     return out
 

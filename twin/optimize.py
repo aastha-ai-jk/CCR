@@ -150,7 +150,7 @@ def _band(conditions: dict) -> tuple[str, float, float, dict]:
         s = analysis._classify_state(key, None if val is None else float(val))
         if s:
             votes[key] = s
-    state_num = int(round(float(np.mean(list(votes.values()))))) if votes else 2
+    state_num = analysis.vote_state(votes)           # weighted (plant, 27 Oct)
     state = f"State {state_num}"
     low, high = config.TEMP_STATE_BANDS[state]
     return state, float(low), float(high), votes
@@ -200,10 +200,13 @@ def clinker_guard(clinker: dict | None) -> dict:
            "max_age_h": config.CLINKER_LAB_MAX_AGE_H}
     # GR3: hot meal DOC below its minimum = calciner under-calcining -> no heat
     # cut. c["doc"] is passed only when the sample is fresh (etl/lab_live, 8 h).
-    doc_min = ((config.plant_settings().get("guardrails") or {}).get("doc") or {}).get("min")
+    # above its max = over-calcining -> no heat rise (plant 92-96 %, 27 Oct)
+    gd = (config.plant_settings().get("guardrails") or {}).get("doc") or {}
+    doc_min, doc_max = gd.get("min"), gd.get("max")
     doc = c.get("doc")
-    out.update(doc=doc, doc_ts=c.get("doc_ts"), doc_min=doc_min)
+    out.update(doc=doc, doc_ts=c.get("doc_ts"), doc_min=doc_min, doc_max=doc_max)
     doc_low = doc is not None and doc_min is not None and float(doc) < float(doc_min)
+    doc_high = doc is not None and doc_max is not None and float(doc) > float(doc_max)
     fresh = False
     try:
         lab = pd.Timestamp(str(c.get("ts")).replace(" ", "T")[:19])
@@ -212,12 +215,14 @@ def clinker_guard(clinker: dict | None) -> dict:
         fresh = -1 <= out["age_h"] <= config.CLINKER_LAB_MAX_AGE_H
     except Exception:
         pass
-    if not fresh and not doc_low:
+    if not fresh and not doc_low and not doc_high:
         return out
     fl, lw = (c.get("free_lime"), c.get("liter_weight")) if fresh else (None, None)
     under, over = [], []
     if doc_low:
         under.append(f"hot meal DOC {float(doc):.1f}% below {float(doc_min):g}%")
+    if doc_high:
+        over.append(f"hot meal DOC {float(doc):.1f}% above {float(doc_max):g}%")
     if fl is not None and z["free_lime"]["max"] is not None and fl > z["free_lime"]["max"]:
         under.append(f"free lime {fl:.2f}% above {z['free_lime']['max']:g}%")
     if lw is not None and z["liter_weight"]["min"] is not None and lw < z["liter_weight"]["min"]:
