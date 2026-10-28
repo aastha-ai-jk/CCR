@@ -88,15 +88,20 @@ def _fetch_day(c: dict, token: str, day: str) -> list[dict]:
     except U.HTTPError as e:
         if e.code == 401:
             return None  # signal re-auth
+        print(f"[freelime] {day}: eLIMS HTTP {e.code}")
         return []
-    except Exception:
+    except Exception as e:
+        print(f"[freelime] {day}: eLIMS unreachable ({type(e).__name__})")
         return []
     try:
         j = json.loads(r.read())
     except json.JSONDecodeError:
+        print(f"[freelime] {day}: eLIMS answer is not JSON")
         return []
     if isinstance(j, dict) and j.get("status", {}).get("status_code") == "1":
         return j.get("response_data", []) or []
+    st = j.get("status") if isinstance(j, dict) else None
+    print(f"[freelime] {day}: eLIMS status {st}")    # e.g. no data, or an expired session
     return []
 
 
@@ -179,11 +184,15 @@ def main():
         if args.once:
             return
 
-    print(f"[freelime] live poll every {args.interval}s (today) — OBSERVE-ONLY")
+    print(f"[freelime] live poll every {args.interval}s (yesterday + today) — OBSERVE-ONLY")
     while True:
         try:
-            n, token = _pull(eng, c, token, [dt.date.today().isoformat()])
-            print(f"[{dt.datetime.now():%H:%M:%S}] upserted {n} of today")
+            # a fresh eLIMS session every poll: a long-lived one expired and the
+            # feed silently got nothing (26-28 Oct); yesterday too for late entries
+            token = _auth(c)
+            days = [(dt.date.today() - dt.timedelta(1)).isoformat(), dt.date.today().isoformat()]
+            n, token = _pull(eng, c, token, days)
+            print(f"[{dt.datetime.now():%H:%M:%S}] upserted {n}")
             if args.once:                      # one live poll, then exit
                 return
         except KeyboardInterrupt:

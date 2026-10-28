@@ -43,15 +43,22 @@ def _fetch_day(c: dict, token: str, material: str, day: str) -> list[dict] | Non
                                          "Authorization": f"Bearer {token}"}),
                       context=_CTX, timeout=30)
     except U.HTTPError as e:
-        return None if e.code == 401 else []        # None = token expired
-    except Exception:
+        if e.code == 401:
+            return None                              # None = token expired
+        print(f"[hotmeal] {day} {material}: eLIMS HTTP {e.code}")
+        return []
+    except Exception as e:
+        print(f"[hotmeal] {day} {material}: eLIMS unreachable ({type(e).__name__})")
         return []
     try:
         j = json.loads(r.read())
     except json.JSONDecodeError:
+        print(f"[hotmeal] {day} {material}: eLIMS answer is not JSON")
         return []
     if isinstance(j, dict) and j.get("status", {}).get("status_code") == "1":
         return j.get("response_data", []) or []
+    st = j.get("status") if isinstance(j, dict) else None
+    print(f"[hotmeal] {day} {material}: eLIMS status {st}")   # no data, or an expired session
     return []
 
 
@@ -119,6 +126,7 @@ def main():
         try:
             # today and yesterday: late lab entries for the previous day still land
             days = [(dt.date.today() - dt.timedelta(1)).isoformat(), dt.date.today().isoformat()]
+            token = _auth(c)      # fresh session every poll (a long-lived one expired, 26-28 Oct)
             n, token = _pull(eng, c, token, days)
             print(f"[{dt.datetime.now():%H:%M:%S}] upserted {n}")
             if args.once:                      # one live poll, then exit
