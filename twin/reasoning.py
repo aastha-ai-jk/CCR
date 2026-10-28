@@ -1,19 +1,22 @@
 """Operator-facing "why" text for each advisor recommendation (ADVISORY ONLY).
 
 Every advisory gets a TEMPLATE explanation built from the optimiser's own
-numbers. When REASONING_PROVIDER is anthropic (Claude Haiku 5.5, chosen
-27 Oct 2026) or openai (gpt-5-nano), a small LLM rewrites those same facts into
-plainer sentences in the background; its text replaces the template only if
-every number in it matches a fact. The LLM never sees anything but process
-numbers and never changes a recommendation.
+numbers. When REASONING_PROVIDER is bedrock (Claude Haiku 4.5 through the
+company's Amazon Bedrock account, chosen 29 Oct 2026), anthropic or openai, a
+small LLM rewrites those same facts into plainer sentences in the background;
+its text replaces the template only if every number in it matches a fact. The
+LLM never sees anything but process numbers and never changes a recommendation.
 
     .env.secrets
-    REASONING_PROVIDER=off | anthropic | openai   (default off)
-    REASONING_MODEL=claude-haiku-5-5              (default per provider)
-    REASONING_EFFORT=low                          (anthropic: low..max; openai: minimal..)
+    REASONING_PROVIDER=off | bedrock | anthropic | openai   (default off)
+    REASONING_MODEL=...                (default per provider; bedrock:
+                                        global.anthropic.claude-haiku-4-5-20251001-v1:0)
+    REASONING_EFFORT=low               (anthropic: low..max; openai: minimal..; bedrock: unused)
     REASONING_TIMEOUT_SEC=20
-    ANTHROPIC_API_KEY=...                         (provider anthropic)
-    OPENAI_API_KEY=...                            (provider openai)
+    BEDROCK_API_KEY=ABSK...            (provider bedrock; Amazon Bedrock API key)
+    BEDROCK_REGION=ap-south-1          (provider bedrock)
+    ANTHROPIC_API_KEY=...              (provider anthropic)
+    OPENAI_API_KEY=...                 (provider openai)
 
 attach(result) sets result["reasoning"] = {"source", "ts", "rows": {param_id: text}}
 and, when enabled, starts one background LLM call per changed recommendation.
@@ -29,7 +32,12 @@ import threading
 import config  # noqa: F401  (loads .env into the environment)
 
 PROVIDER = os.getenv("REASONING_PROVIDER", "off").strip().lower()
-_DEFAULTS = {"anthropic": ("claude-haiku-5-5", "low"), "openai": ("gpt-5-nano", "minimal")}
+_DEFAULTS = {"bedrock": ("global.anthropic.claude-haiku-4-5-20251001-v1:0", ""),
+             "anthropic": ("claude-haiku-5-5", "low"), "openai": ("gpt-5-nano", "minimal")}
+BEDROCK_REGION = os.getenv("BEDROCK_REGION", "ap-south-1")
+# shown on the advisor page next to the AI text
+_LABELS = {"global.anthropic.claude-haiku-4-5-20251001-v1:0": "Claude Haiku 4.5",
+           "claude-haiku-5-5": "Claude Haiku 5.5", "gpt-5-nano": "GPT-5 nano"}
 MODEL = os.getenv("REASONING_MODEL") or _DEFAULTS.get(PROVIDER, ("", ""))[0]
 EFFORT = os.getenv("REASONING_EFFORT") or _DEFAULTS.get(PROVIDER, ("", ""))[1]
 if PROVIDER == "anthropic" and EFFORT not in ("low", "medium", "high", "xhigh", "max"):
@@ -225,7 +233,51 @@ def _rows(text: str, f: dict) -> dict | None:
 
 def _llm(f: dict) -> dict | None:
     """One LLM call; returns {row: text} or None. Never raises."""
+    if PROVIDER == "bedrock":
+        return _llm_bedrock(f)
     return _llm_anthropic(f) if PROVIDER == "anthropic" else _llm_openai(f)
+
+
+def _llm_bedrock(f: dict) -> dict | None:
+    """One Claude Haiku 4.5 call through Amazon Bedrock (BEDROCK_API_KEY, ABSK...).
+    Haiku 4.5 takes no effort setting; thinking stays off (short text from facts)."""
+    try:
+        import anthropic
+    except ImportError:
+        _log(f, None, "bedrock-error: SDK not installed", None, None)
+        return None
+    key = os.getenv("BEDROCK_API_KEY", "").strip()
+    if not key:
+        _log(f, None, "bedrock-error: no BEDROCK_API_KEY in .env.secrets", None, None)
+        return None
+    try:
+        client = anthropic.AnthropicBedrock(api_key=key, aws_region=BEDROCK_REGION,
+                                            timeout=TIMEOUT, max_retries=1)
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": _PROMPT + json.dumps(f, ensure_ascii=False)}],
+        )
+        u = resp.usage
+        if resp.stop_reason == "refusal":
+            _log(f, None, "bedrock-refusal", u.input_tokens, u.output_tokens)
+            return None
+        rows = _rows("".join(b.text for b in resp.content if b.type == "text"), f)
+        _log(f, rows, "bedrock" if rows else "bedrock-rejected", u.input_tokens, u.output_tokens)
+        return rows
+    except anthropic.AuthenticationError:
+        _log(f, None, "bedrock-error: key not accepted", None, None)
+    except anthropic.PermissionDeniedError:
+        _log(f, None, "bedrock-error: model not enabled for this AWS account", None, None)
+    except anthropic.RateLimitError:
+        _log(f, None, "bedrock-error: rate limited", None, None)
+    except anthropic.APIStatusError as e:
+        _log(f, None, f"bedrock-error: HTTP {e.status_code}", None, None)
+    except anthropic.APIConnectionError:
+        _log(f, None, "bedrock-error: no connection (blocked network?)", None, None)
+    except Exception as e:                       # bad JSON etc.: keep the template
+        _log(f, None, f"bedrock-error: {type(e).__name__}", None, None)
+    return None
 
 
 def _llm_anthropic(f: dict) -> dict | None:
@@ -321,12 +373,12 @@ def attach(r: dict) -> None:
         return
     ts = r.get("ts")
     r["reasoning"] = {"source": "template", "ts": ts, "rows": tmpl}
-    if PROVIDER not in ("anthropic", "openai"):
+    if PROVIDER not in ("bedrock", "anthropic", "openai"):
         return
     k = _key(f)
     with _lock:
         if _state["key"] == k and _state["rows"]:
-            r["reasoning"] = {"source": "ai", "model": MODEL, "ts": _state["ts"],
+            r["reasoning"] = {"source": "ai", "model": _LABELS.get(MODEL, MODEL), "ts": _state["ts"],
                               "rows": {**tmpl, **_state["rows"]}}
             return
         if _state["busy"]:
@@ -339,7 +391,7 @@ def attach(r: dict) -> None:
             if rows:
                 with _lock:
                     _state.update(key=k, rows=rows, ts=ts)
-                r["reasoning"] = {"source": "ai", "model": MODEL, "ts": ts,
+                r["reasoning"] = {"source": "ai", "model": _LABELS.get(MODEL, MODEL), "ts": ts,
                                   "rows": {**tmpl, **rows}}
         finally:
             _state["busy"] = False
