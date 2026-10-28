@@ -58,6 +58,7 @@ Status as of 16 Oct 2026. To be closed once the plant team's answers arrive
 | P10 | **Data cleaning:** analyser calibration periods (RUN flags), frozen sensors, outliers (e.g. 516 °C). | Plant to confirm RUN flags (questionnaire §9.5); our work. |
 | P11 | **Use feeder setpoints as well as actual flows** (e.g. `467RL400_SPSPM` is already in the live feed) to separate what the operator set from what the feeder delivered. | Our work; retrain. |
 | P12 | **Stable advice (A8):** keep the advice unless meaningfully better, practical step sizes — makes advice followable and its accuracy testable. | Plant step sizes (questionnaire §7). |
+| P13 | **TO IMPROVE (user, 28 Oct): live accuracy does not improve week to week.** GPU weekly retrain runs every Saturday night (26 Sep, 4, 10, 17, 24 Oct models) but live T+5 error stays 7.6–11.1 °C per week (best 5.8 °C, 31 Aug–6 Sep; this week 11.1 vs no-model 14.1 = 32 % skill); offline test 6.3. Live error is ~1.5× offline, and on the laptop the cleaned-data + T+20 model looked worse live (25.9 vs 14.8 °C, few checks). The GPU's next automatic retrain (Sat 31 Oct) will build that kind of model. To do: side-by-side live comparison of old vs new model on the same rows; find the live-vs-offline gap (inputs the model sees live vs in training); judge retrains on recent LIVE error, not only the offline test window. | Weekly retrain log on the GPU (`models/retrain_log.jsonl`). |
 
 Suggested order: P1 → P8 → P2, P3 → P4, P5 → the rest.
 
