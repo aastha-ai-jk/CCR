@@ -1199,6 +1199,13 @@ def get_declined_reached(day: str | None = None):
         raise HTTPException(status_code=422, detail=str(e))
 
 
+@app.get("/api/advisor/history")
+def get_advisor_history(days: int = Query(30, ge=1, le=365)):
+    """Date-wise totals per parameter: new recommendations, accepted, declined, undone."""
+    from backend import decisions
+    return _json_safe(decisions.history(days))
+
+
 @app.get("/api/decisions/days")
 def get_decision_days():
     """Date-wise index: every day with decisions and its counts."""

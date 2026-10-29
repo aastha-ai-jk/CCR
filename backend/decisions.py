@@ -263,6 +263,54 @@ def advisory_summary(day: str | None = None) -> dict:
         return {"day": day, "computed": 0, "issued": 0}
 
 
+HISTORY_TEMP_TAG = "423CI400_TT_4"
+HISTORY_STEP = 0.1          # t/h: a lever recommendation that moved by at least this is "new"
+
+
+def history(n_days: int = 30) -> list[dict]:
+    """Date-wise totals for the advisor screen's History panel (newest first):
+    per parameter, NEW recommendations made (a lever counts when its advised
+    value moved by >= HISTORY_STEP versus the previous advisory; the calciner
+    temperature counts every new set) and the operator's accepted / declined /
+    undone clicks. Live data only."""
+    start = (dt.date.today() - dt.timedelta(days=max(1, int(n_days)) - 1)).isoformat()
+    out: dict[str, dict] = {}
+
+    def day_row(day: str) -> dict:
+        return out.setdefault(day, {"day": day, "issued": 0, "params": {}})
+
+    def cell(day: str, tag: str) -> dict:
+        return day_row(day)["params"].setdefault(
+            tag, {"recommended": 0, "accepted": 0, "declined": 0, "undone": 0})
+
+    try:
+        adv = db.q("SELECT day, recommended_json, issued FROM advisor_log "
+                   "WHERE day >= :s AND data_source != 'historical' ORDER BY id", {"s": start})
+    except Exception:                                # table not created yet
+        adv = pd.DataFrame(columns=["day", "recommended_json", "issued"])
+    prev: dict = {}
+    for r in adv.itertuples():
+        try:
+            rec = json.loads(r.recommended_json or "{}")
+        except ValueError:
+            continue
+        if int(r.issued or 0):
+            day_row(r.day)["issued"] += 1
+            cell(r.day, HISTORY_TEMP_TAG)["recommended"] += 1
+        for tag, v in rec.items():
+            c = cell(r.day, tag)
+            if tag not in prev or abs(float(v) - float(prev[tag])) >= HISTORY_STEP - 1e-9:
+                c["recommended"] += 1
+            prev[tag] = v
+    _ensure()
+    dec = db.q("SELECT day, tag, action, COUNT(*) AS n FROM operator_decisions "
+               "WHERE day >= :s GROUP BY day, tag, action", {"s": start})
+    for r in dec.itertuples():
+        if r.action in ("accepted", "declined", "undone"):
+            cell(r.day, r.tag)[r.action] += int(r.n)
+    return [out[d] for d in sorted(out, reverse=True)]
+
+
 # Admin view: was a DECLINE wrong? A recommendation made at time R is for
 # R + horizon (the advisor's T+10). At that target time the system takes the
 # single plant reading nearest to it; if it is within the parameter's
