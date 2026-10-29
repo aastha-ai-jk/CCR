@@ -230,8 +230,6 @@ main{display:flex;flex-direction:column;min-width:0;}
   margin:0;z-index:30;box-shadow:0 10px 36px rgba(0,0,0,.6);}
 .setbar__msg{flex:1;font-size:14px;color:var(--ink-dim);}
 .setbar__msg b{color:var(--ink-bright);font-weight:500;}
-.setbar__last{flex:1 1 100%;font-size:13px;color:var(--ink-dim);}
-.setbar__last b{color:var(--ink-bright);font-weight:500;}
 .btn--undo{border:1px solid var(--line);color:var(--ink);}
 .btn--undo:hover{border-color:var(--amber);color:var(--amber);}
 .setbar__blk{font-size:13px;color:var(--red);font-weight:600;margin-left:6px;}
@@ -716,30 +714,18 @@ function setBlock(){
   if(feedDown()) bits.push("live feed down");
   return bits;
 }
-// the last Accept / Decline: the trail entries that share its action and minute
-function lastSet(){
-  var e=log.length?log[log.length-1]:null; if(!e) return null;
-  var ids=log.filter(function(x){return x.action===e.action&&x.time===e.time&&x.day===e.day;})
-             .map(function(x){return x.id;});
-  return {action:e.action,time:e.time,reason:e.reason,ids:ids};
-}
+// Undo: only for the operator's OWN click on this screen, for UNDO_SEC after it
+// (29 Oct, plant). The cards reopen at once with the next recommendation.
+var UNDO_SEC=120;
+function undoable(){ return SET.lastClick&&Date.now()-SET.lastClick.at<UNDO_SEC*1000?SET.lastClick:null; }
 function setBarHTML(){
-  // the cards reopen at once after a decision (29 Oct): the next recommendation
-  // shows straight away; the last decision stays visible here with Undo
-  var open=openRecs(), n=open.length, h='', ls=lastSet();
-  if(ls){
-    h+='<div class="setbar__last">Last decision: <b>'+esc(ls.action)+'</b> at <b>'+esc(ls.time)+'</b>'
-      +(ls.action==="Declined"&&ls.reason&&ls.reason!=="—"?' — '+esc(ls.reason):'')
-      +' · logged to the twin</div>';
-  }
+  var open=openRecs(), n=open.length, h='', ls=undoable();
   if(!n) return h;
   var blk=setBlock(), all=n===PARAMS.length?"all":n+" open";
   h+='<div class="actions">';
   h+= '<button class="btn btn--accept" data-act="accept"'+(blk.length||busy?' disabled':'')+'>Accept '+all+'</button>';
   h+= '<button class="btn btn--decline" data-act="declineStart"'+(SET.declining||busy?' disabled':'')+'>Decline '+all+'</button>';
-  // Undo the last Accept all / Decline all (withdraws that whole set)
-  if(ls) h+='<button class="btn btn--undo" data-act="undo"'+(busy?' disabled':'')+'>Undo '
-    +(ls.action==="Accepted"?"accept":"decline")+' ('+esc(ls.time)+')</button>';
+  if(ls) h+='<button class="btn btn--undo" data-act="undo"'+(busy?' disabled':'')+'>Undo</button>';
   h+= blk.length?'<span class="setbar__blk">Accept blocked by '+esc(blk.join(", "))+' — see the red '+(blk.length>1?'cards':'card')+'. Decline is still allowed.</span>'
                 :'<span class="actions__note">Advisory only — your decision is logged to the twin; nothing is written to the DCS.</span>';
   h+='</div>';
@@ -787,15 +773,20 @@ function render(){
 document.getElementById("setBar").addEventListener("click",function(ev){
   var btn=ev.target.closest("[data-act]"); if(!btn||busy) return;
   var bar=document.getElementById("setBar"), act=btn.getAttribute("data-act"), recs=openRecs();
-  function run(promise,okMsg,kind){
+  function run(promise,okMsg,kind,click){
     busy=true; render();
-    promise.then(function(){ toast(okMsg,kind); })
+    promise.then(function(){
+      toast(okMsg,kind);
+      SET.lastClick=click||null;              // Undo shows for this click only
+      if(click) setTimeout(function(){ if(!SET.declining&&!busy) render(); },UNDO_SEC*1000+500);
+    })
       .catch(function(e){ toast("Not saved: "+e.message,"dec"); })
       .then(function(){ busy=false; render(); paintDash(); });
   }
   if(act==="accept"){
     if(!recs.length||setBlock().length) return;
-    run(postSet(recs,"accepted"),recs.length+" recommendations accepted — logged to the twin");
+    run(postSet(recs,"accepted"),recs.length+" recommendations accepted — logged to the twin","",
+        {ids:recs.map(function(p){return p.id;}),at:Date.now()});
     return;
   }
   if(act==="declineStart"){ if(!recs.length) return; SET.declining=true; render();
@@ -806,13 +797,14 @@ document.getElementById("setBar").addEventListener("click",function(ev){
     if(!picked){ bar.querySelector(".decl").classList.add("has-err"); return; }
     var note=((bar.querySelector(".decl textarea")||{}).value||"").trim(), why=picked.value;
     SET.declining=false;
-    run(postSet(recs,"declined",why,note),"Decline saved to the twin database — "+why,"dec");
+    run(postSet(recs,"declined",why,note),"Decline saved to the twin database — "+why,"dec",
+        {ids:recs.map(function(p){return p.id;}),at:Date.now()});
     return;
   }
   if(act==="undo"){
-    var ls=lastSet(); if(!ls) return;
+    var ls=undoable(); if(!ls) return;
     var done=PARAMS.filter(function(p){return ls.ids.indexOf(p.id)>=0;});
-    run(postSet(done,"undone"),"Undo logged — the "+ls.action.toLowerCase()+" decision at "+ls.time+" is withdrawn");
+    run(postSet(done,"undone"),"Undo logged — your last decision is withdrawn");
     return;
   }
 });
