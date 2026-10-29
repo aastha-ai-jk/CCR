@@ -107,8 +107,20 @@ main{display:flex;flex-direction:column;min-width:0;}
 }
 .hero__lab{padding:20px 22px;border-left:1px solid var(--line);min-width:0;}
 .hero__lab h2{margin:0 0 10px;font-size:14px;font-weight:600;color:var(--ink-bright);}
-.hero__lab .labinfo>span{display:block;padding:4px 0;border-bottom:1px solid var(--line-soft);}
-.hero__lab .labinfo>span:last-child{border-bottom:none;}
+.lab{display:grid;grid-template-columns:1fr auto 74px;align-items:center;gap:10px;
+  padding:4px 0;border-bottom:1px solid var(--line-soft);font-family:var(--sans);}
+.lab:last-child{border-bottom:none;}
+.lab__n{font-size:13.5px;color:var(--ink-bright);line-height:1.3;min-width:0;
+  display:flex;justify-content:space-between;align-items:baseline;gap:8px;white-space:nowrap;}
+.lab__n small{font-size:11.5px;color:var(--ink-faint);overflow:hidden;text-overflow:ellipsis;}
+.lab__v{font-size:17px;font-weight:500;color:var(--ink-bright);text-align:right;white-space:nowrap;}
+.lab__v em{font-style:normal;font-size:11.5px;color:var(--ink-dim);margin-left:3px;}
+.lab__s{font-style:normal;font-size:11px;text-align:center;padding:2px 6px;border-radius:3px;white-space:nowrap;}
+.lab--used .lab__s{background:rgba(79,184,138,.14);color:var(--green);}
+.lab--old .lab__s,.lab--none .lab__s{background:var(--panel-3);color:var(--ink-dim);}
+.lab--old .lab__v,.lab--none .lab__v{color:var(--ink-dim);}
+.lab--max .lab__s{background:rgba(217,96,79,.15);color:var(--red);}
+.lab--max .lab__v{color:var(--red);}
 /* now -> T+10: the two main readings */
 .pair{display:grid;grid-template-columns:1fr auto 1fr;align-items:stretch;gap:10px;margin:12px 0 12px;}
 .tile{border:1px solid var(--line);border-radius:6px;padding:12px 14px 11px;background:var(--panel-2);display:flex;flex-direction:column;min-width:0;}
@@ -986,8 +998,8 @@ function pollTwin(){
     twinPred=p.mean;
     document.getElementById("predHorizon").textContent=hm;
     document.getElementById("predFor").textContent=clockAt(f.ts,hm)||"--:--";
-    document.getElementById("predRange").textContent=typeof p.p10==="number"&&typeof p.p90==="number"
-      ?"likely "+fmt(p.p10,0)+"–"+fmt(p.p90,0)+" °C":"at current settings";
+    // P10-P90 range no longer shown (plant, 29 Oct); GR7 still checks it
+    document.getElementById("predRange").textContent="at current settings";
     // T+20 and T+30, less prominent. T+20 is a trained head since P9; an older
     // model without it falls back to interpolating T+15..T+30 (marked est.).
     var tr=f.trajectory||[], by={};
@@ -1001,7 +1013,7 @@ function pollTwin(){
     if(by[30]) later.push(by[30]);
     document.getElementById("predTraj").innerHTML=later.map(function(t){
       return '<div><span>In '+t.min+' min · '+(clockAt(f.ts,t.min)||"--:--")+(t.est?' · est.':'')+'</span>'
-        +'<b>'+fmt(t.mean,1)+'</b><i>°C · likely '+fmt(t.p10,0)+'–'+fmt(t.p90,0)+'</i></div>';
+        +'<b>'+fmt(t.mean,1)+'</b><i>°C</i></div>';
     }).join("");
     document.getElementById("twinSrc").textContent=(f.method==="gbt-twin"
       ? "digital twin" : "fallback estimate, twin model not loaded")+" · "+f.source;
@@ -1115,20 +1127,22 @@ function impactOf(a,tag){
 function paintLab(li){
   var el=document.getElementById("labInfo"); if(!el) return;
   if(!li||!Object.keys(li).length){ el.textContent="—"; return; }
-  var names={free_lime:["free lime","%",2],liter_weight:["liter wt","g/l",0],liquid:["liquid","%",1],doc:["DOC","%",1],
-             so3:["hot meal SO₃","%",2],cl:["hot meal Cl","%",2]};
+  var names={free_lime:["Free lime","%",2],liter_weight:["Liter weight","g/l",0],liquid:["Liquid","%",1],doc:["DOC","%",1],
+             so3:["Hot meal SO₃","%",2],cl:["Hot meal Cl","%",2]};
+  // one row per value: name + sample time / age | value | status (in use / too old / above max)
   el.innerHTML=Object.keys(names).map(function(k){
     var x=li[k], n=names[k];
-    if(!x||x.value===null) return '<span class="stale">'+n[0]+' —</span>';
+    if(!x||x.value===null) return '<div class="lab lab--none"><span class="lab__n">'+n[0]+'<small>no result</small></span>'
+      +'<b class="lab__v num">—</b><i class="lab__s">—</i></div>';
     // ts = SAMPLE time (eLIMS time − fixed lag: clinker 2 h, hot meal 4 h)
     var t=String(x.ts||"").slice(11,16), tt=String(x.tested||"").slice(11,16);
-    var txt=n[0]+" "+fmt(x.value,n[2])+(n[1]==="%"?" %":" "+n[1])+" (sampled ≈"+t+", "+fmt(x.age_h,1)+" h)";
     var tip=(x.source||"")+(tt?" · eLIMS "+tt:"")+" · usable up to "+x.max_age_h+" h after sampling";
     // plant max (hot meal SO3 2 %, Cl 1 %): a warning only, no block
-    if(x.above_max) return '<span style="color:var(--red);font-weight:600" title="'+esc(tip)+'">'
-      +esc(txt)+' — above plant max '+fmt(x.max,1)+' %</span>';
-    return x.used?'<span title="'+esc(tip)+'">'+esc(txt)+'</span>'
-                 :'<span class="stale" title="'+esc(tip)+' — too old, not used">'+esc(txt)+'</span>';
+    var cls=x.above_max?"lab--max":x.used?"lab--used":"lab--old";
+    var st=x.above_max?"above max "+fmt(x.max,1):x.used?"in use":"too old";
+    return '<div class="lab '+cls+'" title="'+esc(tip)+'"><span class="lab__n">'+n[0]
+      +'<small>'+t+' · '+fmt(x.age_h,1)+' h ago</small></span>'
+      +'<b class="lab__v num">'+fmt(x.value,n[2])+'<em>'+n[1]+'</em></b><i class="lab__s">'+st+'</i></div>';
   }).join("");
 }
 
