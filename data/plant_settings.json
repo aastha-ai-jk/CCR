@@ -12,8 +12,9 @@
       "limits": {"423AM822_CO_PPM": 1500}
     },
     "direction": {
-      "_about": "GR2: live temp above the band and the move adds total calciner heat (or below and it cuts heat) by more than min_heat_change_pct -> Accept blocked. Smaller changes are noise / grid rounding.",
-      "min_heat_change_pct": 1.0
+      "_about": "GR2 (CAUTION, amber, does not block Accept since 2026-10-29): forecast T+10 temp with the move more than margin_c above the band and the move adds total calciner heat by more than min_heat_change_pct (or below and it cuts heat). Smaller changes are noise / grid rounding. Drift (GR6), uncertainty (GR7) and heat change (GR8) are cautions too; limits, live CO/O2 and data checks stay red and block.",
+      "min_heat_change_pct": 1.0,
+      "margin_c": 5.0
     },
     "doc": {
       "_about": "GR3: latest fresh hot meal DOC (sample < 8 h) below min = under-calcining -> the advisor will not cut total calciner heat; above max = over-calcining -> it will not raise heat. 92-96 % = plant questionnaire 2026-10-27 (was 94.0 project lead placeholder).",

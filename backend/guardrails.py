@@ -116,27 +116,31 @@ def refuse_fuel_raise(tag: str, live_v, rec_v, comb: dict) -> str | None:
             "until CO/O2 is back inside its limit; a cut and Decline are still allowed.")
 
 
-# GR2: direction sanity. Live temperature above the band and the move ADDS total
-# calciner heat, or below the band and it CUTS heat = wrong way: Accept blocked.
-def direction(live_temp, band: dict | None, heat: dict | None) -> dict:
-    """{"flag", "live_temp", "band_lo", "band_hi", "heat_change_pct", "reason"}."""
+# GR2: direction sanity (a CAUTION since 29 Oct, not a block). The predicted
+# T+10 temperature WITH the move lands more than margin_c above the band and the
+# move still ADDS total calciner heat, or more than margin_c below it and the
+# move still CUTS heat = the move pushes the wrong way.
+def direction(pred_temp, band: dict | None, heat: dict | None) -> dict:
+    """{"flag", "pred_temp", "band_lo", "band_hi", "heat_change_pct", "reason"}."""
     s = (config.plant_settings().get("guardrails") or {}).get("direction") or {}
     tol = _num(s.get("min_heat_change_pct"))
     tol = 1.0 if tol is None else tol
-    t, b, h = _num(live_temp), band or {}, heat or {}
+    margin = _num(s.get("margin_c"))
+    margin = 5.0 if margin is None else margin
+    t, b, h = _num(pred_temp), band or {}, heat or {}
     lo, hi = _num(b.get("low")), _num(b.get("high"))
     h0, h1 = _num(h.get("current_kcal_h")), _num(h.get("recommended_kcal_h"))
-    out = {"flag": False, "live_temp": t, "band_lo": lo, "band_hi": hi,
+    out = {"flag": False, "pred_temp": t, "band_lo": lo, "band_hi": hi,
            "heat_change_pct": None, "reason": None}
     if None in (t, lo, hi, h0, h1) or h0 <= 0:
         return out
     dh = (h1 - h0) / h0 * 100.0
     out["heat_change_pct"] = round(dh, 2)
-    if t > hi and dh > tol:
-        out.update(flag=True, reason=f"temperature {t:.1f} is above the band {lo:g}-{hi:g} "
+    if t > hi + margin and dh > tol:
+        out.update(flag=True, reason=f"forecast T+10 {t:.1f} °C is above the band {lo:g}-{hi:g} "
                                      f"but the move adds {dh:+.1f} % calciner heat")
-    elif t < lo and dh < -tol:
-        out.update(flag=True, reason=f"temperature {t:.1f} is below the band {lo:g}-{hi:g} "
+    elif t < lo - margin and dh < -tol:
+        out.update(flag=True, reason=f"forecast T+10 {t:.1f} °C is below the band {lo:g}-{hi:g} "
                                      f"but the move cuts {dh:+.1f} % calciner heat")
     return out
 

@@ -688,10 +688,13 @@ def _combustion(s: dict) -> dict:
 
 def _direction(s: dict, r: dict | None) -> dict:
     """GR2: does the current advice move total calciner heat the right way for
-    where the live temperature is against the band? Current data only."""
+    where the PREDICTED T+10 temperature (the advice's own target) lands against
+    the band? Judged on current advice only (29 Oct: was the live temperature,
+    which flagged correct moves made ahead of a forecast rise or fall)."""
     from backend import guardrails
-    ok = bool(_advisor_recommended(r))
-    return guardrails.direction(_fresh_values(s).get(analysis.CV) if ok else None,
+    ok = bool(_advisor_recommended(r)) and bool(_fresh_values(s))
+    pred = ((r or {}).get("predicted") or {}).get("temp") or {}
+    return guardrails.direction(pred.get("mean") if ok else None,
                                 (r or {}).get("target_band"), (r or {}).get("heat"))
 
 
@@ -1152,26 +1155,9 @@ def _accept_refusal(req: DecisionReq, snap: dict) -> str | None:
             rec if rec is not None else req.recommended_value, _combustion(snap))
         if why:
             return why
-        # GR2: the whole move goes the wrong way for the band
-        d = _direction(snap, _advisor["result"])
-        if d["flag"]:
-            return (f"Refused by direction check: {d['reason']}. Accept is blocked for this "
-                    "recommendation; Decline is still allowed.")
-        # GR6: the forecasts behind the advice have drifted
-        d = _drift(snap)
-        if d["flag"]:
-            return (f"Refused by model drift check: {d['reason']}. Accept is blocked until the "
-                    "forecasts are accurate again; Decline is still allowed.")
-        # GR7: the forecast under this recommendation is too uncertain
-        u = _uncertainty(_advisor["result"])
-        if u["flag"]:
-            return (f"Refused by forecast uncertainty: {u['reason']}. Accept is blocked for this "
-                    "recommendation; Decline is still allowed.")
-        # GR8: total heat change against the live heat too large
-        h = _heat_change(snap, _advisor["result"])
-        if h["flag"]:
-            return (f"Refused by heat-change cap: {h['reason']}. Accept is blocked for this "
-                    "recommendation; Decline is still allowed.")
+        # GR2 direction, GR6 drift, GR7 uncertainty, GR8 heat change are CAUTIONS
+        # (29 Oct): shown in amber on the advisor rows, they do not block Accept.
+        # Only safety (limits, live CO / O2, data checks) refuses it.
         # never judge an Accept on a cached result: re-check the data now
         return validation.refuse_accept(req.tag, _current_validation(max_age=0)["report"])
     except Exception as e:

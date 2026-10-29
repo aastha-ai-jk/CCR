@@ -170,6 +170,8 @@ main{display:flex;flex-direction:column;min-width:0;}
 .row--declined{border-left-color:var(--red);background:#1D1817;}
 .row.row--breach{border-color:var(--red);border-left:3px solid var(--red);background:#241A18;}
 .grnote{margin:0 0 10px;font-size:12.5px;color:var(--red);font-weight:600;}
+.row.row--caution{border-left:3px solid var(--amber);}
+.cautnote{margin:0 0 10px;font-size:12.5px;color:var(--amber);}
 .gralarm{display:flex;align-items:center;gap:12px;margin:0 0 12px;padding:11px 14px;
   border:1px solid var(--red);border-left:4px solid var(--red);border-radius:var(--r);
   background:#2A1A17;color:var(--ink-bright);font-size:13px;}
@@ -626,15 +628,17 @@ function blockText(p){
   if(g) bits.push("Guardrail: "+guardText(p,g));
   // GR1: live CO / O2 unsafe -> a move that ADDS fuel (or heat) is blocked
   if(COMB.length&&dirOf(p)==="up") bits.push("Combustion: live "+combText()+" — no fuel increase");
-  // GR2: the whole move goes the wrong way for the band
-  if(DIRCHK&&DIRCHK.flag) bits.push("Direction: "+DIRCHK.reason);
-  // GR6: forecasts drifting -> no advice can be trusted
-  if(DRIFT&&DRIFT.flag) bits.push("Model drift: "+DRIFT.reason);
-  // GR7: forecast under this recommendation too uncertain
-  if(UNCERT&&UNCERT.flag) bits.push("Uncertain forecast: "+UNCERT.reason);
-  // GR8: total heat change against the live heat too large
-  if(HEATCHK&&HEATCHK.flag) bits.push("Heat change: "+HEATCHK.reason);
   valOf(p).forEach(function(i){ if(!isFeedDown(i)) bits.push("Data check: "+i.tag+" "+i.check+" — "+i.detail); });
+  return bits.join(". ");
+}
+// CAUTIONS (29 Oct): advice-quality checks shown in amber on the open rows --
+// no banner, no beep, Accept still allowed. Safety stays red (blockText).
+function cautionText(){
+  var bits=[];
+  if(DIRCHK&&DIRCHK.flag) bits.push("Direction: "+DIRCHK.reason);           // GR2
+  if(DRIFT&&DRIFT.flag) bits.push("Model drift: "+DRIFT.reason);            // GR6
+  if(UNCERT&&UNCERT.flag) bits.push("Uncertain forecast: "+UNCERT.reason);  // GR7
+  if(HEATCHK&&HEATCHK.flag) bits.push("Heat change: "+HEATCHK.reason);      // GR8
   return bits.join(". ");
 }
 function guardText(p,g){
@@ -651,8 +655,9 @@ function rowHTML(p){
   var cls="row row--"+dir+(st.open?" is-open":"")+(st.declining?" is-declining":"");
   if(st.status==="accepted")cls+=" row--accepted";
   if(st.status==="declined")cls+=" row--declined";
-  var gb=blockText(p);
+  var gb=blockText(p), gc=!gb&&actionable(p)?cautionText():"";
   if(gb)cls+=" row--breach";
+  else if(gc)cls+=" row--caution";
   var deltaTxt=!actionable(p)?"—":(d>0?"+":"")+fmt(d,p.dec);
   var recTxt=p.recOk===false?"—":fmt(p.rec,p.dec);
   var tag = st.status==="accepted" ? '<span class="tag tag--acc">Accepted</span>'
@@ -676,6 +681,7 @@ function rowHTML(p){
 
   if(st.status==="open"){
     if(gb) h+='<p class="grnote">'+esc(gb)+'. Accept is blocked; Decline is still allowed.</p>';
+    else if(gc) h+='<p class="cautnote">Caution — '+esc(gc)+'. Check before accepting; Accept is still allowed.</p>';
     h+='<div class="actions">';
     h+= '<button class="btn btn--accept" data-act="accept"'+(!actionable(p)||gb||feedDown()?' disabled':'')+'>Accept</button>';
     h+= '<button class="btn btn--decline" data-act="declineStart"'+(!actionable(p)?' disabled':'')+'>Decline</button>';
@@ -1099,12 +1105,9 @@ function paintGuard(gr,val){
       +"recommendation and Accept is unavailable. It resumes on its own when the feed returns.";
     fn.hidden=false;
   }else fn.hidden=true;
-  // alarm key: breached tags + live CO/O2 breaches + direction + drift + validation errors (tag:check)
+  // alarm key: SAFETY only (29 Oct) - breached tags + live CO/O2 + data-check errors.
+  // Direction / drift / uncertainty / heat change are amber cautions on the rows.
   var ids=tags.concat(COMB.map(function(b){return "comb:"+b.tag;}),
-                      DIRCHK&&DIRCHK.flag?["direction"]:[],
-                      DRIFT&&DRIFT.flag?["drift"]:[],
-                      UNCERT&&UNCERT.flag?["uncertainty"]:[],
-                      HEATCHK&&HEATCHK.flag?["heat"]:[],
                       errs.map(function(i){return i.tag+":"+i.check;}));
   var key=ids.slice().sort().join(",");
   if(key!==grKey){ if(ids.some(function(t){return (","+grKey+",").indexOf(","+t+",")<0;})) grSilenced=false; grKey=key; }
@@ -1121,22 +1124,6 @@ function paintGuard(gr,val){
   if(COMB.length){
     html.push("<b>Live CO/O₂ outside safety limit</b> — "+esc(combText())
       +". No recommendation that adds fuel can be accepted; cuts are allowed");
-  }
-  if(DIRCHK&&DIRCHK.flag){
-    html.push("<b>Recommendation goes the wrong way</b> — "+esc(DIRCHK.reason)
-      +". This recommendation cannot be accepted");
-  }
-  if(DRIFT&&DRIFT.flag){
-    html.push("<b>Model drifting — forecasts unreliable</b> — "+esc(DRIFT.reason)
-      +". No recommendation can be accepted until it recovers");
-  }
-  if(UNCERT&&UNCERT.flag){
-    html.push("<b>Forecast too uncertain</b> — "+esc(UNCERT.reason)
-      +". This recommendation cannot be accepted");
-  }
-  if(HEATCHK&&HEATCHK.flag){
-    html.push("<b>Heat change too large ("+(HEATCHK.change_pct>0?"+":"")+fmt(HEATCHK.change_pct,1)+" %)</b> — "
-      +esc(HEATCHK.reason)+". This recommendation cannot be accepted");
   }
   if(errs.length){
     html.push("<b>Data check failed</b> — "+esc(errs.map(function(i){
