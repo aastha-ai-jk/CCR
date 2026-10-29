@@ -432,7 +432,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
       <p class="feednote" id="feedNote" hidden></p>
       <div class="gralarm" id="grAlarm" role="alert" hidden>
         <span class="gralarm__txt" id="grAlarmTxt"></span>
-        <button class="btn btn--ghost btn--sm" id="grSilence">Silence</button>
+        <button class="btn btn--ghost btn--sm" id="grSilence">Acknowledge</button>
       </div>
       <div class="list" id="list"></div>
     </section>
@@ -1074,21 +1074,11 @@ function paintLab(li){
 
 /* ---------------- guardrail alarm ---------------- */
 // Roof / floor breaches from /api/twin/advisor -> guardrails (backend/guardrails.py).
-// Banner + beep every 2 s until Silenced; a NEW breached parameter re-arms it.
-// The server refuses an Accept on its own anyway (HTTP 409).
-var GUARD={}, VAL=null, COMB=[], DIRCHK=null, DRIFT=null, UNCERT=null, HEATCHK=null, grKey="", grSilenced=false, grCtx=null;
+// Silent banner (no beep since 29 Oct) that flashes until Acknowledged; a NEW
+// breached parameter re-arms it. The server refuses an Accept on its own anyway (HTTP 409).
+var GUARD={}, VAL=null, COMB=[], DIRCHK=null, DRIFT=null, UNCERT=null, HEATCHK=null, grKey="", grSilenced=false;
 function combText(){
   return COMB.map(function(b){ return b.name+" "+fmt(b.value,b.tag.indexOf("_O2")>0?1:0)+" (limit "+b.rule+")"; }).join(", ");
-}
-function grBeep(){
-  try{
-    grCtx=grCtx||new (window.AudioContext||window.webkitAudioContext)();
-    if(grCtx.state==="suspended") grCtx.resume();
-    var o=grCtx.createOscillator(), g=grCtx.createGain();
-    o.type="square"; o.frequency.value=880; g.gain.value=0.08;
-    o.connect(g); g.connect(grCtx.destination);
-    o.start(); o.stop(grCtx.currentTime+0.25);
-  }catch(e){}
 }
 function paintGuard(gr,val){
   GUARD=(gr&&gr.params)||{};
@@ -1136,7 +1126,7 @@ function paintGuard(gr,val){
     +". Accept is blocked where affected; Decline is still allowed.";
   el.hidden=false;
   el.classList.toggle("is-on",!grSilenced);
-  document.getElementById("grSilence").textContent=grSilenced?"Silenced":"Silence";
+  document.getElementById("grSilence").textContent=grSilenced?"Acknowledged":"Acknowledge";
   document.getElementById("grSilence").disabled=grSilenced;
 }
 document.getElementById("grSilence").addEventListener("click",function(){
@@ -1144,7 +1134,6 @@ document.getElementById("grSilence").addEventListener("click",function(){
   paintGuard({params:GUARD,breached:Object.keys(GUARD).filter(function(t){return GUARD[t].breach;}),
               combustion:{breaches:COMB}, direction:DIRCHK, drift:DRIFT, uncertainty:UNCERT, heat:HEATCHK});
 });
-setInterval(function(){ if(grKey&&!grSilenced) grBeep(); },2000);
 
 function pollAdvisor(){
   getJSON("/api/twin/advisor").then(function(a){
