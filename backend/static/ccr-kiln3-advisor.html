@@ -139,7 +139,6 @@ main{display:flex;flex-direction:column;min-width:0;}
 .sec h2{margin:0;font-size:15px;font-weight:600;color:var(--ink-bright);}
 .sec p{margin:0;font-size:12.5px;color:var(--ink-faint);}
 .list{display:flex;flex-direction:column;gap:6px;}
-.advnote{margin:-4px 2px 11px;font-size:12.5px;color:var(--amber);}
 .clknote{margin:-6px 2px 12px;font-size:12.5px;color:var(--ink-dim);}
 .clknote b{font-weight:600;}
 .clknote.is-ok b{color:var(--green);}
@@ -233,7 +232,8 @@ main{display:flex;flex-direction:column;min-width:0;}
 .setbar__msg b{color:var(--ink-bright);font-weight:500;}
 .setbar__last{flex:1 1 100%;font-size:13px;color:var(--ink-dim);}
 .setbar__last b{color:var(--ink-bright);font-weight:500;}
-.setbar__last .btn--ghost{padding:0 0 0 8px;}
+.btn--undo{border:1px solid var(--line);color:var(--ink);}
+.btn--undo:hover{border-color:var(--amber);color:var(--amber);}
 .setbar__blk{font-size:13px;color:var(--red);font-weight:600;margin-left:6px;}
 .decl h3{margin:0 0 11px;font-size:13.5px;font-weight:600;color:var(--ink-bright);}
 .reasons{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:7px;}
@@ -314,7 +314,6 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
   .row__name b{font-size:16px;}
   .later{margin:0 0 8px;}
   .sec{margin:12px 2px 6px;}
-  .advnote{margin:0 2px 6px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .clknote{margin:0 2px 8px;}
   .gralarm{margin:0 0 8px;padding:8px 14px;}
   .list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:stretch;}
@@ -329,7 +328,7 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
   .impact{gap:18px;margin-top:10px;padding-top:9px;}
   .impact b{font-size:16px;}
   .grnote,.cautnote{font-size:13.5px;}
-  .btn--accept,.btn--decline{padding:10px 26px;font-size:15px;}
+  .btn--accept,.btn--decline,.btn--undo{padding:10px 26px;font-size:15px;}
   .setbar{margin-top:8px;padding:10px 16px;}
   /* decline form: reasons in one row, note box beside Log / Cancel */
   .decl{padding:8px 12px;display:grid;grid-template-columns:1fr auto;gap:7px 12px;align-items:center;}
@@ -435,7 +434,6 @@ td.num{color:var(--ink-dim);font-size:12.5px;}
         <h2>Setpoint recommendations</h2>
         <p id="recMeta">9 open · refreshed every 60 s</p>
       </div>
-      <p class="advnote" id="advNote">Goal: least calciner coal, then as much SAFR as the limits allow, keeping the calciner in band at T+10 min. Apply now — effect at T+10. Only calciner coal and SAFR are recommended; LAFR PC/TAD, kiln coal, kiln feed, preheater fan speed and kiln speed are held at their live values (plant decision). Advisory only.</p>
       <p class="clknote" id="clkNote" hidden></p>
       <p class="feednote" id="feedNote" hidden></p>
       <div class="gralarm" id="grAlarm" role="alert" hidden>
@@ -732,13 +730,16 @@ function setBarHTML(){
   if(ls){
     h+='<div class="setbar__last">Last decision: <b>'+esc(ls.action)+'</b> at <b>'+esc(ls.time)+'</b>'
       +(ls.action==="Declined"&&ls.reason&&ls.reason!=="—"?' — '+esc(ls.reason):'')
-      +' · logged to the twin <button class="btn btn--ghost" data-act="undo">Undo</button></div>';
+      +' · logged to the twin</div>';
   }
   if(!n) return h;
   var blk=setBlock(), all=n===PARAMS.length?"all":n+" open";
   h+='<div class="actions">';
   h+= '<button class="btn btn--accept" data-act="accept"'+(blk.length||busy?' disabled':'')+'>Accept '+all+'</button>';
   h+= '<button class="btn btn--decline" data-act="declineStart"'+(SET.declining||busy?' disabled':'')+'>Decline '+all+'</button>';
+  // Undo the last Accept all / Decline all (withdraws that whole set)
+  if(ls) h+='<button class="btn btn--undo" data-act="undo"'+(busy?' disabled':'')+'>Undo '
+    +(ls.action==="Accepted"?"accept":"decline")+' ('+esc(ls.time)+')</button>';
   h+= blk.length?'<span class="setbar__blk">Accept blocked by '+esc(blk.join(", "))+' — see the red '+(blk.length>1?'cards':'card')+'. Decline is still allowed.</span>'
                 :'<span class="actions__note">Advisory only — your decision is logged to the twin; nothing is written to the DCS.</span>';
   h+='</div>';
@@ -816,8 +817,6 @@ document.getElementById("setBar").addEventListener("click",function(ev){
   }
 });
 
-// one-screen layout cuts the goal note to one line: full text on hover
-(function(){ var an=document.getElementById("advNote"); an.title=an.textContent; })();
 
 // (29 Oct) the side menu with Shift dashboard / Admin dashboard links is gone;
 // the Shift dashboard view stays in the page (hidden) for later use.
