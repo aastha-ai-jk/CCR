@@ -81,6 +81,13 @@ def facts(r: dict) -> dict:
     failing = [f'{i.get("name")} {i.get("rule")}' for i in (r.get("interlocks") or [])
                if i.get("pass") is False]
     g = r.get("clinker_guard") or {}
+    hs = r.get("heat_split") or {}
+    sh = hs.get("shares") or {}
+    tot = sum(sh.values()) or 1.0
+    split = ({"safr_pct": round(100 * sh.get("261WF080_TPH", 0) / tot),
+              "coal_pct": round(100 * sh.get("467RL400_TPH", 0) / tot),
+              "applied": bool(hs.get("applied")), "safr_at_limit": bool(hs.get("safr_limited"))}
+             if sh else None)
     return {
         "horizon_min": r.get("horizon_min") or 5,
         "operating_state": r.get("operating_state"),
@@ -95,6 +102,8 @@ def facts(r: dict) -> dict:
         "all_limits_met": r.get("all_limits_met") is not False,
         "clinker_guard": g.get("status") if not g.get("active") else f'active: {g.get("direction")}',
         "objective": "least calciner coal, then as much AFR as the limits allow",
+        # extra heat split SAFR / coal (plant 29 Oct); None = not configured
+        "heat_split": split,
         "levers": levers,
     }
 
@@ -129,6 +138,12 @@ def template(f: dict) -> dict:
            + (" (estimated)" if f["tsr_is_estimate"] else "")
            if f.get("tsr_now_pct") is not None and f.get("tsr_recommended_pct") is not None else "")
 
+    sp = f.get("heat_split") or {}
+    split_txt = ""
+    if sp.get("applied"):
+        split_txt = (f"Extra heat is split {sp['safr_pct']} % SAFR / {sp['coal_pct']} % coal"
+                     + ("; SAFR is at its limit, so coal takes the rest." if sp.get("safr_at_limit") else "."))
+
     rows = {}
     reach = f.get("reaches_band_in_min")
     rows["calc_out"] = (
@@ -153,6 +168,8 @@ def template(f: dict) -> dict:
                 aim = (f"More AFR in place of coal: {tsr}." if up and tsr else
                        f"Less AFR on this stream to keep temperature and limits on course"
                        + (f"; {tsr}." if tsr else "."))
+            if up and split_txt:
+                aim = f"{aim} {split_txt}"
         rows[pid] = f"{move} {aim} {pred} {safety}{limits}".strip()
     return rows
 

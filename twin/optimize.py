@@ -34,6 +34,7 @@ KILN_SIDE = [KILN_COAL, KILN_FEED, "423FN010_ST", "433MD140_ST1"]
 # calciner coal and SAFR; LAFR PC / TAD are held at their live values too.
 # Fixed levers remain model inputs (and LAFR stays in heat / TSR) at live values.
 ADVISOR_LEVERS = [COAL, "261WF080_TPH"]
+SPLIT_ORDER = ["261WF080_TPH", COAL]    # heat split: SAFR takes its share first, coal the rest
 FIXED_LEVERS = [KILN_COAL, KILN_FEED, "423FN010_ST", "433MD140_ST1", "LAFR_FT", "K3V10_F1"]
 # The advisor's prediction horizon (min): the recommendation must put the
 # calciner in band at T+ADVISOR_HORIZON (and keep it there at T+30).
@@ -382,6 +383,41 @@ def optimize(conditions: dict, n_trials: int = 200,
             ex += abs(h - base_heat) / base_heat * 100.0
         return ex
 
+    # Heat split (plant 29 Oct, optimizer.heat_split): when total calciner heat
+    # goes UP, the extra kcal come share-wise from each lever (SAFR 0.6, coal
+    # 0.4). The lever named first in SPLIT_ORDER that hits its bound / step cap
+    # passes the rest to the next (coal takes what SAFR cannot). Heat cuts are
+    # not split: the least-coal objective cuts coal first, as before.
+    split = {t: float(v) for t, v in (_opt_settings().get("heat_split") or {}).items()
+             if not t.startswith("_") and v is not None and t in opt_levers}
+    split_on = len(split) >= 2 and sum(split.values()) > 0
+    unit_heat = {t: economics._heat_per_h({t: 1.0}, econ)[0].get(t, 0.0) for t in split}
+    split_on = split_on and all(u > 0 for u in unit_heat.values())
+
+    def _snap(t: str, v: float) -> float:
+        lo, hi = strict[t]
+        v = min(max(v, lo), hi)
+        s = (steps or {}).get(t)
+        if s:
+            v = min(max(round(v / s) * s, lo), hi)
+        return round(v, 6)
+
+    def split_heat(lv: dict) -> tuple[dict, bool]:
+        """lv with a heat RISE re-split by the plant shares; (levers, limited)."""
+        dh = sum((lv[t] - base_vals[t]) * unit_heat[t] for t in split)
+        if not split_on or dh <= 0:
+            return lv, False
+        out, rest, limited = dict(lv), dh, False
+        order = sorted(split, key=lambda t: t != SPLIT_ORDER[0])   # SAFR first, coal last
+        for i, t in enumerate(order):
+            want = rest if i == len(order) - 1 else dh * split[t] / sum(split.values())
+            target = base_vals[t] + want / unit_heat[t]
+            out[t] = _snap(t, target)
+            if i < len(order) - 1 and target > strict[t][1] + 1e-6:
+                limited = True                     # at its max / step cap: next lever takes the rest
+            rest -= (out[t] - base_vals[t]) * unit_heat[t]
+        return out, limited
+
     def objective(trial: "optuna.Trial") -> float:
         levers = {t: (trial.suggest_float(t, *bounds[t], step=(steps or {}).get(t))
                       if (steps or {}).get(t) and bounds[t][1] > bounds[t][0]
@@ -391,6 +427,9 @@ def optimize(conditions: dict, n_trials: int = 200,
         if not trial.user_attrs.get("incumbent") and any(
                 not (strict[t][0] - 1e-6 <= levers[t] <= strict[t][1] + 1e-6) for t in opt_levers):
             raise optuna.TrialPruned()
+        if not trial.user_attrs.get("incumbent"):
+            levers, limited = split_heat(levers)
+            trial.set_user_attr("split_limited", limited)
         core = twin_model.predict_core(levers, conditions)
         if core is None:
             raise optuna.TrialPruned()
@@ -655,6 +694,10 @@ def optimize(conditions: dict, n_trials: int = 200,
         "clinker_guard": guard,
         "lever_limits": _limit_info(opt_levers),
         "afr_rules": {"max_tsr_pct": max_tsr, "max_heat_change_pct": max_heat_pct},
+        # heat split (plant 29 Oct): applied when this advice adds heat
+        "heat_split": {"shares": split if split_on else None,
+                       "applied": bool(split_on and sum((rec[t] - base_vals[t]) * unit_heat[t] for t in split) > 0),
+                       "safr_limited": bool(best.user_attrs.get("split_limited"))},
         # False = no option met band + interlocks + limits; the recommendation
         # is the closest one, and the screen must say so
         "all_limits_met": bool(feasible),

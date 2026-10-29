@@ -118,6 +118,11 @@
     },
     "heat_balance": {
       "max_change_pct": 10
+    },
+    "heat_split": {
+      "_about": "Plant 2026-10-29: when total calciner heat goes UP, the extra heat (kcal) comes this share from each lever (SAFR 60 %, coal 40 %). If SAFR is at its limit or its step cap, coal takes the rest. Heat CUTS are not split (coal first, as before). Remove or set null to switch off.",
+      "261WF080_TPH": 0.6,
+      "467RL400_TPH": 0.4
     }
   },
 
