@@ -37,7 +37,8 @@
   "_plant_inputs": "Values below marked 2026-10-27 come from the plant questionnaire docs/CCR_Kiln3_Advisor_Plant_Inputs_Required.xlsx (filled 27 Oct 2026; sign-off pending).",
 
   "process": {
-    "clinker_factor": 0.62,
+    "_about": "clinker_factor = clinker t per kiln feed t. Plant 2026-10-29: feed-to-clinker factor 1.7 -> 1/1.7 = 0.588 (was 0.62).",
+    "clinker_factor": 0.588,
     "kiln_running_min_feed_tph": 461
   },
 
