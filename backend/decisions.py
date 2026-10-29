@@ -131,18 +131,13 @@ def list_day(day: str | None = None, limit: int = 500) -> dict:
                 "ORDER BY id DESC LIMIT :n", {"d": day, "n": int(limit)})
     rows = rows.drop(columns=["context_json"]) if len(rows) else rows
     recs = rows.where(pd.notna(rows), None).to_dict("records") if len(rows) else []
-    # A decision covers ITS recommendation only: until that recommendation's
-    # target time (advice time + horizon). After it the row reopens on the
-    # advisor with the fresh recommendation; the decision itself stays logged.
-    now = dt.datetime.now()
+    # A decision closes ITS recommendation only: the row reopens on the advisor
+    # at once with the next recommendation (plant, 29 Oct; was: held until the
+    # advice's T+10 target time). The decision itself stays logged.
     status: dict[str, dict] = {}
     for r in reversed(recs):                         # oldest -> newest
-        made = pd.to_datetime(r.get("advisory_ts") or r["decided_at"], errors="coerce")
-        if pd.isna(made):
-            made = pd.Timestamp(r["decided_at"])
-        until = made.to_pydatetime() + dt.timedelta(minutes=int(r.get("horizon_min") or analysis.DELTA))
-        until = max(until, dt.datetime.fromisoformat(r["decided_at"]) + dt.timedelta(minutes=1))
-        st = "open" if r["action"] == "undone" or now >= until else r["action"]
+        until = dt.datetime.fromisoformat(r["decided_at"])
+        st = "open"
         status[r["tag"]] = {"status": st, "decided_at": r["decided_at"], "reason": r["reason"],
                             "note": r["note"], "param_id": r["param_id"],
                             "valid_until": until.isoformat(timespec="seconds")}

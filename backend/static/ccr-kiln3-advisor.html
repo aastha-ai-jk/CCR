@@ -231,6 +231,9 @@ main{display:flex;flex-direction:column;min-width:0;}
   margin:0;z-index:30;box-shadow:0 10px 36px rgba(0,0,0,.6);}
 .setbar__msg{flex:1;font-size:14px;color:var(--ink-dim);}
 .setbar__msg b{color:var(--ink-bright);font-weight:500;}
+.setbar__last{flex:1 1 100%;font-size:13px;color:var(--ink-dim);}
+.setbar__last b{color:var(--ink-bright);font-weight:500;}
+.setbar__last .btn--ghost{padding:0 0 0 8px;}
 .setbar__blk{font-size:13px;color:var(--red);font-weight:600;margin-left:6px;}
 .decl h3{margin:0 0 11px;font-size:13.5px;font-weight:600;color:var(--ink-bright);}
 .reasons{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:7px;}
@@ -715,17 +718,23 @@ function setBlock(){
   if(feedDown()) bits.push("live feed down");
   return bits;
 }
+// the last Accept / Decline: the trail entries that share its action and minute
+function lastSet(){
+  var e=log.length?log[log.length-1]:null; if(!e) return null;
+  var ids=log.filter(function(x){return x.action===e.action&&x.time===e.time&&x.day===e.day;})
+             .map(function(x){return x.id;});
+  return {action:e.action,time:e.time,reason:e.reason,ids:ids};
+}
 function setBarHTML(){
-  var open=openRecs(), n=open.length, h='';
-  if(!n){
-    var e=log.length?log[log.length-1]:null, until=null;
-    PARAMS.forEach(function(p){ var u=state[p.id].validUntil; if(u&&(!until||u<until)) until=u; });
-    h+='<div class="setbar__msg">'+(e?(e.action==="Accepted"?"Recommendations accepted":"Recommendations declined")
-      +' at <b>'+esc(e.time)+'</b> — logged to the twin (not written to the DCS).':'All recommendations decided.')
-      +(until?' Fresh recommendation at <b>'+pad(until.getHours())+':'+pad(until.getMinutes())+'</b>.':'')+'</div>';
-    h+='<button class="btn btn--ghost" data-act="undo">Undo</button>';
-    return h;
+  // the cards reopen at once after a decision (29 Oct): the next recommendation
+  // shows straight away; the last decision stays visible here with Undo
+  var open=openRecs(), n=open.length, h='', ls=lastSet();
+  if(ls){
+    h+='<div class="setbar__last">Last decision: <b>'+esc(ls.action)+'</b> at <b>'+esc(ls.time)+'</b>'
+      +(ls.action==="Declined"&&ls.reason&&ls.reason!=="—"?' — '+esc(ls.reason):'')
+      +' · logged to the twin <button class="btn btn--ghost" data-act="undo">Undo</button></div>';
   }
+  if(!n) return h;
   var blk=setBlock(), all=n===PARAMS.length?"all":n+" open";
   h+='<div class="actions">';
   h+= '<button class="btn btn--accept" data-act="accept"'+(blk.length||busy?' disabled':'')+'>Accept '+all+'</button>';
@@ -756,7 +765,8 @@ function postSet(recs,action,reason,note){
           st.status="open"; st.reason=null; st.note="";
           for(var i=log.length-1;i>=0;i--){ if(log[i].id===p.id){ log.splice(i,1); break; } }
         }else{
-          st.status=action; st.reason=reason||null; st.note=note||"";
+          // logged; the card reopens at once with the next recommendation
+          st.status="open"; st.reason=null; st.note="";
           log.push(logEntry(row));
         }
       });
@@ -799,8 +809,9 @@ document.getElementById("setBar").addEventListener("click",function(ev){
     return;
   }
   if(act==="undo"){
-    var done=PARAMS.filter(function(p){return state[p.id].status!=="open";});
-    run(postSet(done,"undone"),"Undo logged — the recommendations are open again");
+    var ls=lastSet(); if(!ls) return;
+    var done=PARAMS.filter(function(p){return ls.ids.indexOf(p.id)>=0;});
+    run(postSet(done,"undone"),"Undo logged — the "+ls.action.toLowerCase()+" decision at "+ls.time+" is withdrawn");
     return;
   }
 });
