@@ -1199,11 +1199,23 @@ def get_declined_reached(day: str | None = None):
         raise HTTPException(status_code=422, detail=str(e))
 
 
-@app.get("/api/advisor/history")
-def get_advisor_history(days: int = Query(30, ge=1, le=365)):
-    """Date-wise totals per parameter: new recommendations, accepted, declined, undone."""
+@app.get("/api/admin/accepted-reached")
+def get_accepted_reached(day: str | None = None):
+    """Admin: accepted lever recommendations on one date, each checked for whether
+    the plant reached the recommended value (± tolerance) at the target time."""
+    from fastapi import HTTPException
     from backend import decisions
-    return _json_safe(decisions.history(days))
+    try:
+        return _json_safe(decisions.accepted_reached(day))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get("/api/admin/summary")
+def get_admin_summary(days: int = Query(30, ge=1, le=365)):
+    """Admin: date-wise recommendation sets issued, accepted, declined and no action."""
+    from backend import decisions
+    return _json_safe(decisions.summary(days))
 
 
 @app.get("/api/decisions/days")

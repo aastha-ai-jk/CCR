@@ -127,19 +127,24 @@ export interface OperatorDecision {
 }
 export interface DeclinedReachedRow {
   id: number; decided_at: string; operator: string | null; param_id: string | null;
+  action: "accepted" | "declined";
   tag: string; param_name: string | null; unit: string | null;
   reason: string | null; note: string | null; operating_state: string | null;
   current_value: number | null; recommended_value: number;
   recommended_at: string; target_at: string; horizon_min: number;   // advice made at, for (made + horizon)
   status: "reached" | "not_reached" | "pending" | "no_data";       // reached = decline not correct
   tolerance: number; actual_at?: string; actual_value?: number; diff?: number;
-  series?: { t: string; v: number }[];      // actual run, 30-s means, 10 min before advice -> 10 min after target
 }
 export interface DeclinedReachedResult {
   day: string; horizon_min: number; tolerances: Record<string, number>; declines: number;
   counts: { reached: number; not_reached: number; pending: number; no_data: number };
   rows: DeclinedReachedRow[];
 }
+// same check for accepts: reached = the plant got to the accepted value
+export type AcceptedReachedResult = Omit<DeclinedReachedResult, "declines"> & { accepts: number };
+
+// admin Recommendation Summary: one row per day, all parameters together
+export interface SummaryRow { day: string; total: number; accepted: number; declined: number; no_action: number }
 
 export interface AccuracyStats { n: number; mae: number; bias: number; within_5: number; p90_abs: number }
 export interface AccuracyResult {
@@ -212,6 +217,9 @@ export const api = {
   twinFuture: () => get<TwinFuture>("/api/twin/future"),
   declinedReached: (day?: string) =>
     get<DeclinedReachedResult>(`/api/admin/declined-reached${day ? `?day=${encodeURIComponent(day)}` : ""}`),
+  acceptedReached: (day?: string) =>
+    get<AcceptedReachedResult>(`/api/admin/accepted-reached${day ? `?day=${encodeURIComponent(day)}` : ""}`),
+  summary: (days = 30) => get<SummaryRow[]>(`/api/admin/summary?days=${days}`),
   accuracy: (days = 7) => get<AccuracyResult>(`/api/admin/accuracy?days=${days}`),
   decisionDays: () => get<{ day: string; n: number; accepted: number; declined: number }[]>("/api/decisions/days"),
   decisions: (day?: string) =>

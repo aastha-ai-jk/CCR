@@ -263,51 +263,44 @@ def advisory_summary(day: str | None = None) -> dict:
         return {"day": day, "computed": 0, "issued": 0}
 
 
-HISTORY_TEMP_TAG = "423CI400_TT_4"
-HISTORY_STEP = 0.1          # t/h: a lever recommendation that moved by at least this is "new"
-
-
-def history(n_days: int = 30) -> list[dict]:
-    """Date-wise totals for the advisor screen's History panel (newest first):
-    per parameter, NEW recommendations made (a lever counts when its advised
-    value moved by >= HISTORY_STEP versus the previous advisory; the calciner
-    temperature counts every new set) and the operator's accepted / declined /
-    undone clicks. Live data only."""
+def summary(n_days: int = 30) -> list[dict]:
+    """Admin Recommendation Summary, one row for every date in the window
+    (newest first, zeros included), all parameters together: new recommendation sets issued, sets accepted / declined (Accept
+    all / Decline all act on the whole set; a decision later undone is left
+    out) and no action (issued, never decided). Live data only."""
     start = (dt.date.today() - dt.timedelta(days=max(1, int(n_days)) - 1)).isoformat()
     out: dict[str, dict] = {}
 
-    def day_row(day: str) -> dict:
-        return out.setdefault(day, {"day": day, "issued": 0, "params": {}})
-
-    def cell(day: str, tag: str) -> dict:
-        return day_row(day)["params"].setdefault(
-            tag, {"recommended": 0, "accepted": 0, "declined": 0, "undone": 0})
+    def row(day: str) -> dict:
+        return out.setdefault(day, {"day": day, "total": 0, "accepted": 0, "declined": 0, "no_action": 0})
 
     try:
-        adv = db.q("SELECT day, recommended_json, issued FROM advisor_log "
-                   "WHERE day >= :s AND data_source != 'historical' ORDER BY id", {"s": start})
+        adv = db.q("SELECT day, SUM(issued) AS n FROM advisor_log "
+                   "WHERE day >= :s AND data_source != 'historical' GROUP BY day", {"s": start})
     except Exception:                                # table not created yet
-        adv = pd.DataFrame(columns=["day", "recommended_json", "issued"])
-    prev: dict = {}
+        adv = pd.DataFrame(columns=["day", "n"])
     for r in adv.itertuples():
-        try:
-            rec = json.loads(r.recommended_json or "{}")
-        except ValueError:
-            continue
-        if int(r.issued or 0):
-            day_row(r.day)["issued"] += 1
-            cell(r.day, HISTORY_TEMP_TAG)["recommended"] += 1
-        for tag, v in rec.items():
-            c = cell(r.day, tag)
-            if tag not in prev or abs(float(v) - float(prev[tag])) >= HISTORY_STEP - 1e-9:
-                c["recommended"] += 1
-            prev[tag] = v
+        row(r.day)["total"] = int(r.n or 0)
     _ensure()
-    dec = db.q("SELECT day, tag, action, COUNT(*) AS n FROM operator_decisions "
-               "WHERE day >= :s GROUP BY day, tag, action", {"s": start})
+    dec = db.q("SELECT day, advisory_ts, decided_at, tag, action FROM operator_decisions "
+               "WHERE day >= :s ORDER BY id", {"s": start})
+    standing: dict[tuple, str] = {}                  # (day, set, tag) -> action still standing
     for r in dec.itertuples():
-        if r.action in ("accepted", "declined", "undone"):
-            cell(r.day, r.tag)[r.action] += int(r.n)
+        k = (r.day, r.advisory_ts or r.decided_at, r.tag)
+        if r.action in ("accepted", "declined"):
+            standing[k] = r.action
+        elif r.action == "undone":
+            standing.pop(k, None)
+    sets: dict[tuple, set] = {}
+    for (day, st, _), act in standing.items():
+        sets.setdefault((day, st), set()).add(act)
+    for (day, _), acts in sets.items():
+        row(day)["accepted" if "accepted" in acts else "declined"] += 1
+    for o in out.values():
+        o["total"] = max(o["total"], o["accepted"] + o["declined"])
+        o["no_action"] = o["total"] - o["accepted"] - o["declined"]
+    for i in range(max(1, int(n_days))):            # every day in the window, zeros included
+        row((dt.date.today() - dt.timedelta(days=i)).isoformat())
     return [out[d] for d in sorted(out, reverse=True)]
 
 
@@ -320,8 +313,6 @@ def history(n_days: int = 30) -> list[dict]:
 # (plant_settings.json advisor.decline_check_tol overrides per tag).
 CHECK_TOL = {"467RL400_TPH": 2.5, "261WF080_TPH": 1.5, analysis.CV: 5.0}
 READING_MAX_GAP_S = 120                # the nearest reading must be this close to the target time
-PROOF_BEFORE_MIN = 10                  # evidence chart: 10 min before the recommendation ...
-PROOF_AFTER_MIN = 10                   # ... to 10 min after the target time
 
 
 def _lever_series(tag: str, start: dt.datetime, end: dt.datetime) -> pd.Series:
@@ -368,6 +359,19 @@ def declined_but_reached(day: str | None = None) -> dict:
     """Every decline on one date (calciner coal, SAFR, calciner outlet temp),
     each checked at its recommendation's target time. Declines later undone are
     left out (the decision was withdrawn)."""
+    out = _checked(day, "declined")
+    return {**out, "declines": len(out["rows"])}
+
+
+def accepted_reached(day: str | None = None) -> dict:
+    """Every accept on one date, checked the same way: did the plant reach the
+    recommended value (± tolerance) at the target time? Undone accepts left out."""
+    out = _checked(day, "accepted")
+    return {**out, "accepts": len(out["rows"])}
+
+
+def _checked(day: str | None, action: str) -> dict:
+    """Decisions of one action on one date, each checked at its target time."""
     import config
     from twin.optimize import ADVISOR_HORIZON, ADVISOR_LEVERS
     _ensure()
@@ -383,7 +387,7 @@ def declined_but_reached(day: str | None = None) -> dict:
     recs = rows.where(pd.notna(rows), None).to_dict("records") if len(rows) else []
     out = []
     for i, r in enumerate(recs):
-        if (r["action"] != "declined" or r["tag"] not in (*ADVISOR_LEVERS, analysis.CV)
+        if (r["action"] != action or r["tag"] not in (*ADVISOR_LEVERS, analysis.CV)
                 or r["recommended_value"] is None):
             continue
         nxt = next((x for x in recs[i + 1:] if x["tag"] == r["tag"]), None)
@@ -395,26 +399,35 @@ def declined_but_reached(day: str | None = None) -> dict:
         h = int(r["horizon_min"] or ADVISOR_HORIZON)
         target = made + dt.timedelta(minutes=h)
         tol = float(tols.get(r["tag"], 0.05 * abs(float(r["recommended_value"]))))
-        raw = _lever_series(r["tag"], made - dt.timedelta(minutes=PROOF_BEFORE_MIN),
-                            target + dt.timedelta(minutes=PROOF_AFTER_MIN))
+        gap = dt.timedelta(seconds=READING_MAX_GAP_S)
+        raw = _lever_series(r["tag"], target - gap, target + gap)
         row = {**r, "recommended_at": made.isoformat(timespec="seconds"), "horizon_min": h,
                "target_at": target.isoformat(timespec="seconds"),
                **check_decline(float(r["recommended_value"]), target, raw, now, tol)}
-        # evidence chart: 30-s means (the verdict itself uses the single reading)
-        m = raw.resample("30s").mean().dropna() if len(raw) else raw
-        row["series"] = [{"t": t.isoformat(timespec="seconds"), "v": round(float(v), 3)}
-                         for t, v in m.items()]
         out.append(row)
     n = {k: sum(1 for x in out if x["status"] == k)
          for k in ("reached", "not_reached", "pending", "no_data")}
     return {"day": day, "horizon_min": ADVISOR_HORIZON, "tolerances": tols,
-            "declines": len(out), "counts": n, "rows": out}
+            "counts": n, "rows": out}
 
 
 def days() -> list[dict]:
-    """Every date that has decisions, with counts — the date-wise index."""
+    """Every date that has decisions, with counts — the date-wise index.
+    accepted / declined leave out decisions later undone (same rule as the
+    admin checks), so the day buttons match the admin tiles."""
     _ensure()
-    d = db.q("SELECT day, COUNT(*) AS n, "
-             "SUM(action = 'accepted') AS accepted, SUM(action = 'declined') AS declined "
-             "FROM operator_decisions GROUP BY day ORDER BY day DESC")
-    return d.to_dict("records")
+    d = db.q("SELECT day, tag, action FROM operator_decisions ORDER BY id")
+    out: dict[str, dict] = {}
+    last: dict[tuple, str] = {}                  # (day, tag) -> action still standing
+    for r in d.to_dict("records"):
+        o = out.setdefault(r["day"], {"day": r["day"], "n": 0, "accepted": 0, "declined": 0})
+        o["n"] += 1
+        k = (r["day"], r["tag"])
+        if r["action"] == "undone":
+            if last.get(k) in ("accepted", "declined"):
+                o[last[k]] -= 1
+            last[k] = "undone"
+        elif r["action"] in ("accepted", "declined"):
+            o[r["action"]] += 1
+            last[k] = r["action"]
+    return sorted(out.values(), key=lambda x: x["day"], reverse=True)
