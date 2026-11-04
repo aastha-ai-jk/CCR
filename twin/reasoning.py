@@ -190,6 +190,8 @@ def _allowed(f: dict) -> list[float]:
                 vals.append(abs(f["predicted_temp_c"] - f[k]))
     if f.get("tsr_now_pct") is not None and f.get("tsr_recommended_pct") is not None:
         vals.append(abs(f["tsr_recommended_pct"] - f["tsr_now_pct"]))
+    hs = f.get("heat_split") or {}                   # the 60/40 SAFR/coal split is a fact
+    vals += [float(hs[k]) for k in ("safr_pct", "coal_pct") if hs.get(k) is not None]
     for lv in f["levers"].values():
         vals += [lv["current"], lv["recommended"], abs(lv["change"])]
     st = re.findall(r"\d+", f.get("operating_state") or "")
