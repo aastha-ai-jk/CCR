@@ -14,10 +14,9 @@ import { Panel, Stat, Badge, Loading } from "@/components/ui";
 const GOOD_C = 10;
 const DP: Record<string, number> = { "467RL400_TPH": 2, "261WF080_TPH": 2, "423CI400_TT_4": 1 };
 const SHORT: Record<string, string> = { "467RL400_TPH": "coal", "261WF080_TPH": "SAFR", "423CI400_TT_4": "PC temp" };
-const today = () => {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-};
+const isoDay = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const today = () => isoDay(new Date());
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const dayLabel = (s: string) => `${Number(s.slice(8, 10))} ${MONTHS[Number(s.slice(5, 7)) - 1]} ${s.slice(0, 4)}`
   + (s === today() ? " · today" : "");
@@ -169,16 +168,62 @@ function SummaryPanel({ day, onPick }: { day: string; onPick: (d: string) => voi
 // decision. Positive = accepted + declined-but-not-correct (the advice was right);
 // negative = declined and justified. Success % = positive / (positive + negative);
 // declines still waiting for their target time count in neither.
+// "Last 7 days total" sums the same per-day checks over today and the 6 days before.
+type Perf = { accepted: number; declines: number; notCorrect: number; justified: number };
+const perfOf = (dec: DeclinedReachedResult, acc: AcceptedReachedResult): Perf => ({
+  accepted: acc.accepts, declines: dec.declines,
+  notCorrect: dec.counts.reached, justified: dec.counts.not_reached,
+});
+const lastDays = (n: number) => Array.from({ length: n }, (_, i) => {
+  const d = new Date(); d.setDate(d.getDate() - i);
+  return isoDay(d);
+});
+
 function PerformancePanel({ dec, acc }: { dec: DeclinedReachedResult; acc: AcceptedReachedResult }) {
-  const accepted = acc.accepts, notCorrect = dec.counts.reached, justified = dec.counts.not_reached;
-  const total = accepted + dec.declines;
+  const [mode, setMode] = useState<"day" | "week">("day");
+  const [week, setWeek] = useState<Perf | null>(null);
+  useEffect(() => {
+    if (mode !== "week") return;
+    let alive = true;
+    setWeek(null);
+    Promise.all(lastDays(7).map((d) => Promise.all([api.declinedReached(d), api.acceptedReached(d)])))
+      .then((res) => {
+        if (!alive) return;
+        setWeek(res.map(([d, a]) => perfOf(d, a)).reduce((s, p) => ({
+          accepted: s.accepted + p.accepted, declines: s.declines + p.declines,
+          notCorrect: s.notCorrect + p.notCorrect, justified: s.justified + p.justified,
+        })));
+      })
+      .catch(() => { if (alive) setWeek({ accepted: 0, declines: 0, notCorrect: 0, justified: 0 }); });
+    return () => { alive = false; };
+  }, [mode]);
+
+  const p = mode === "day" ? perfOf(dec, acc) : week;
+  const tabs = (
+    <div className="flex items-center gap-3">
+      <div className="flex rounded-md border border-[var(--line)] overflow-hidden text-xs">
+        {([["day", dec.day], ["week", "Last 7 days total"]] as const).map(([m, label]) => (
+          <button key={m} onClick={() => setMode(m)}
+            className={`px-2.5 py-1 ${mode === m ? "bg-[var(--panel-2)] text-[var(--ink)] font-semibold" : "text-[var(--muted)]"}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <span className="text-xs text-[var(--muted)]">per parameter decision</span>
+    </div>
+  );
+  if (!p) return <Panel title="Advisory Performance" right={tabs}><Loading /></Panel>;
+
+  const { accepted, notCorrect, justified } = p;
+  const total = accepted + p.declines;
   const pos = accepted + notCorrect, neg = justified;
   const success = pos + neg ? Math.round((pos / (pos + neg)) * 100) : null;
   return (
-    <Panel title="Advisory Performance"
-      right={<span className="text-xs text-[var(--muted)]">{dec.day} · per parameter decision</span>}>
+    <Panel title="Advisory Performance" right={tabs}>
       {total === 0 ? (
-        <div className="text-sm text-[var(--muted)]">No accepted or declined recommendations on this day.</div>
+        <div className="text-sm text-[var(--muted)]">
+          No accepted or declined recommendations {mode === "day" ? "on this day" : "in the last 7 days"}.
+        </div>
       ) : (
         <div className="grid lg:grid-cols-[1fr_260px] gap-4 items-center">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
