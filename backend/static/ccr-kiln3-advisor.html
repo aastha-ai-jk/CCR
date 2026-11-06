@@ -1167,7 +1167,7 @@ document.getElementById("grSilence").addEventListener("click",function(){
 });
 
 function pollAdvisor(){
-  getJSON("/api/twin/advisor").then(function(a){
+  getJSON("/api/twin/advisor?screen=1").then(function(a){   // screen=1: counts as shown
     var live=a.live||{}, rec=a.recommended||{}, h=a.horizon_min||5;
     var predT=a.predicted&&a.predicted.temp&&a.predicted.temp.mean;
     // A recommendation is only valid for its own 5-min window, and only

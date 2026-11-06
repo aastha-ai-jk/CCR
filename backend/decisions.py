@@ -200,7 +200,9 @@ def setpoints(values: dict, now: dt.datetime | None = None) -> dict:
 # Every advisory the optimiser computes is logged in ``advisor_log``. ``issued``
 # marks a NEW recommendation: some lever moved by more than ISSUE_TOL_FRAC of
 # its range versus the previous one (the screen refreshes every minute, mostly
-# with the same advice — those are not counted as new).
+# with the same advice — those are not counted as new). ``shown`` = 1 once the
+# CCR advisor screen has displayed that advice (NULL on rows logged before the
+# column existed); the admin counts only new advice that was shown.
 ISSUE_TOL_FRAC = 0.005
 _ADV_DDL = """
 CREATE TABLE IF NOT EXISTS advisor_log (
@@ -211,23 +213,34 @@ CREATE TABLE IF NOT EXISTS advisor_log (
   operating_state TEXT, band_lo REAL, band_hi REAL,
   predicted_temp REAL,
   recommended_json TEXT,          -- {tag: value} for the advisor levers
-  issued INTEGER NOT NULL         -- 1 = new recommendation, 0 = same as previous
+  issued INTEGER NOT NULL,        -- 1 = new recommendation, 0 = same as previous
+  shown INTEGER                   -- 1 = displayed on the CCR screen (NULL: before tracking)
 )
 """
+# new advice that reached the CCR screen (older rows, untracked: every new advice)
+_SHOWN_SQL = "SUM(CASE WHEN shown IS NULL THEN issued ELSE issued * shown END)"
 _last_rec: dict = {}
 
 
-def log_advisory(r: dict) -> None:
-    """Record one optimiser result; never raises (logging must not break the advisor)."""
+def _ensure_adv(con) -> None:
+    con.execute(text(_ADV_DDL))
+    con.execute(text("CREATE INDEX IF NOT EXISTS ix_advisor_log_day ON advisor_log(day)"))
+    cols = {row[1] for row in con.execute(text("PRAGMA table_info(advisor_log)"))}
+    if "shown" not in cols:
+        con.execute(text("ALTER TABLE advisor_log ADD COLUMN shown INTEGER"))
+
+
+def log_advisory(r: dict) -> int | None:
+    """Record one optimiser result and return its row id; never raises
+    (logging must not break the advisor)."""
     global _last_rec
     try:
         rec = r.get("recommended") or {}
         if not rec:
-            return
+            return None
         lim = r.get("lever_limits") or {}
         with db.engine().begin() as con:
-            con.execute(text(_ADV_DDL))
-            con.execute(text("CREATE INDEX IF NOT EXISTS ix_advisor_log_day ON advisor_log(day)"))
+            _ensure_adv(con)
             if not _last_rec:                        # after a restart: compare with the last row
                 last = con.execute(text("SELECT recommended_json FROM advisor_log "
                                         "ORDER BY id DESC LIMIT 1")).fetchone()
@@ -239,14 +252,24 @@ def log_advisory(r: dict) -> None:
                 for t, v in rec.items())
             tb = r.get("target_band") or {}
             pt = ((r.get("predicted") or {}).get("temp") or {}).get("mean")
-            con.execute(text(
+            row = con.execute(text(
                 "INSERT INTO advisor_log (day, ts, data_source, operating_state, band_lo, "
-                "band_hi, predicted_temp, recommended_json, issued) VALUES "
-                "(:day, :ts, :src, :st, :lo, :hi, :pt, :rec, :iss)"),
+                "band_hi, predicted_temp, recommended_json, issued, shown) VALUES "
+                "(:day, :ts, :src, :st, :lo, :hi, :pt, :rec, :iss, 0)"),
                 {"day": dt.date.today().isoformat(), "ts": r.get("ts"), "src": r.get("source"),
                  "st": r.get("operating_state"), "lo": tb.get("low"), "hi": tb.get("high"),
                  "pt": pt, "rec": json.dumps(rec), "iss": int(issued)})
         _last_rec = dict(rec)
+        return row.lastrowid
+    except Exception:
+        return None
+
+
+def mark_shown(log_id: int) -> None:
+    """The CCR screen has displayed the advice logged as ``log_id``; never raises."""
+    try:
+        with db.engine().begin() as con:
+            con.execute(text("UPDATE advisor_log SET shown = 1 WHERE id = :i"), {"i": int(log_id)})
     except Exception:
         pass
 
@@ -256,7 +279,7 @@ def advisory_summary(day: str | None = None) -> dict:
     day = day or dt.date.today().isoformat()
     dt.date.fromisoformat(day)
     try:
-        d = db.q("SELECT COUNT(*) AS computed, COALESCE(SUM(issued), 0) AS issued "
+        d = db.q(f"SELECT COUNT(*) AS computed, COALESCE({_SHOWN_SQL}, 0) AS issued "
                  "FROM advisor_log WHERE day = :d AND data_source != 'historical'", {"d": day})
         return {"day": day, "computed": int(d["computed"][0]), "issued": int(d["issued"][0])}
     except Exception:                                # table not created yet
@@ -265,7 +288,7 @@ def advisory_summary(day: str | None = None) -> dict:
 
 def summary(n_days: int = 30) -> list[dict]:
     """Admin Recommendation Summary, one row for every date in the window
-    (newest first, zeros included), all parameters together: new recommendation sets issued, sets accepted / declined (Accept
+    (newest first, zeros included), all parameters together: new recommendation sets shown on the CCR screen, sets accepted / declined (Accept
     all / Decline all act on the whole set; a decision later undone is left
     out) and no action (issued, never decided). Live data only."""
     start = (dt.date.today() - dt.timedelta(days=max(1, int(n_days)) - 1)).isoformat()
@@ -275,7 +298,7 @@ def summary(n_days: int = 30) -> list[dict]:
         return out.setdefault(day, {"day": day, "total": 0, "accepted": 0, "declined": 0, "no_action": 0})
 
     try:
-        adv = db.q("SELECT day, SUM(issued) AS n FROM advisor_log "
+        adv = db.q(f"SELECT day, {_SHOWN_SQL} AS n FROM advisor_log "
                    "WHERE day >= :s AND data_source != 'historical' GROUP BY day", {"s": start})
     except Exception:                                # table not created yet
         adv = pd.DataFrame(columns=["day", "n"])

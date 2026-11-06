@@ -497,7 +497,7 @@ def _advisor_run() -> None:
         from twin import reasoning                # "why" text: template, + LLM when enabled
         reasoning.attach(r)
         from backend import decisions               # advisor_log: computed / new-recommendation count
-        decisions.log_advisory(r)
+        r["log_id"] = decisions.log_advisory(r)
         _advisor.update(result=r, computed_at=time.time())
     except Exception as e:                       # never kill the thread silently
         _advisor.update(result={"available": False, "error": repr(e)},
@@ -507,12 +507,13 @@ def _advisor_run() -> None:
 
 
 @app.get("/api/twin/advisor")
-def twin_advisor():
+def twin_advisor(screen: int = 0):
     """Latest advisory setpoints for the advisor levers (ADVISORY ONLY), plus
     the live current value of each lever. Kicks off a background
     re-optimisation at once when there is no advice yet, when the plant has moved
     noticeably since the last one (ADVISOR_TRIGGER, at most every
-    ADVISOR_MIN_GAP_SEC), or when it is older than refresh_sec."""
+    ADVISOR_MIN_GAP_SEC), or when it is older than refresh_sec. ``screen=1``
+    (the CCR advisor page) marks the advice as shown, for the admin count."""
     from twin.optimize import ADVISOR_LEVERS, FIXED_LEVERS
     s = _snapshot()
     with _advisor_lock:
@@ -529,6 +530,10 @@ def twin_advisor():
                 "uom": None if pd.isna(cat.loc[t, "uom"]) else str(cat.loc[t, "uom"]),
                 "current": s["values"].get(t)} for t in ADVISOR_LEVERS}
     r = _advisor["result"]
+    if screen and r and r.get("log_id") and not r.get("shown"):
+        r["shown"] = True
+        from backend import decisions
+        decisions.mark_shown(r["log_id"])
     out = {"live": live, "live_ts": s["ts"], "live_source": s["source"],
            "computing": _advisor["busy"], "horizon_min": analysis.DELTA,
            "fixed_levers": FIXED_LEVERS}
