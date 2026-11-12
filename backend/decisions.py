@@ -217,9 +217,29 @@ CREATE TABLE IF NOT EXISTS advisor_log (
   shown INTEGER                   -- 1 = displayed on the CCR screen (NULL: before tracking)
 )
 """
-# new advice that reached the CCR screen (older rows, untracked: every new advice)
-_SHOWN_SQL = "SUM(CASE WHEN shown IS NULL THEN issued ELSE issued * shown END)"
 _last_rec: dict = {}
+
+
+def _counted(start: str) -> dict[str, int]:
+    """day -> recommendations counted for the admin: advice shown on the CCR
+    screen that differs from the last counted one by more than the check
+    tolerance (CHECK_TOL: coal 2.5, SAFR 1.5, calciner temp 5) on any lever or
+    the predicted calciner temp. Smaller moves are the same advice still standing."""
+    adv = db.q("SELECT day, recommended_json, predicted_temp, issued, shown FROM advisor_log "
+               "WHERE day >= :s AND data_source != 'historical' ORDER BY id", {"s": start})
+    out: dict[str, int] = {}
+    anchor: dict = {}
+    for r in adv.itertuples():
+        if not (r.shown == 1 or (pd.isna(r.shown) and r.issued)):
+            continue
+        cur = dict(json.loads(r.recommended_json or "{}"))
+        if pd.notna(r.predicted_temp):
+            cur[analysis.CV] = float(r.predicted_temp)
+        if not anchor or any(t in anchor and abs(float(v) - float(anchor[t])) > CHECK_TOL.get(t, 0.0)
+                             for t, v in cur.items() if t in CHECK_TOL):
+            out[r.day] = out.get(r.day, 0) + 1
+            anchor = {**anchor, **cur}
+    return out
 
 
 def _ensure_adv(con) -> None:
@@ -279,9 +299,10 @@ def advisory_summary(day: str | None = None) -> dict:
     day = day or dt.date.today().isoformat()
     dt.date.fromisoformat(day)
     try:
-        d = db.q(f"SELECT COUNT(*) AS computed, COALESCE({_SHOWN_SQL}, 0) AS issued "
-                 "FROM advisor_log WHERE day = :d AND data_source != 'historical'", {"d": day})
-        return {"day": day, "computed": int(d["computed"][0]), "issued": int(d["issued"][0])}
+        d = db.q("SELECT COUNT(*) AS computed FROM advisor_log "
+                 "WHERE day = :d AND data_source != 'historical'", {"d": day})
+        return {"day": day, "computed": int(d["computed"][0]),
+                "issued": _counted(day).get(day, 0)}
     except Exception:                                # table not created yet
         return {"day": day, "computed": 0, "issued": 0}
 
@@ -298,12 +319,11 @@ def summary(n_days: int = 30) -> list[dict]:
         return out.setdefault(day, {"day": day, "total": 0, "accepted": 0, "declined": 0, "no_action": 0})
 
     try:
-        adv = db.q(f"SELECT day, {_SHOWN_SQL} AS n FROM advisor_log "
-                   "WHERE day >= :s AND data_source != 'historical' GROUP BY day", {"s": start})
+        counted = _counted(start)
     except Exception:                                # table not created yet
-        adv = pd.DataFrame(columns=["day", "n"])
-    for r in adv.itertuples():
-        row(r.day)["total"] = int(r.n or 0)
+        counted = {}
+    for day, n in counted.items():
+        row(day)["total"] = n
     _ensure()
     dec = db.q("SELECT day, advisory_ts, decided_at, tag, action FROM operator_decisions "
                "WHERE day >= :s ORDER BY id", {"s": start})
