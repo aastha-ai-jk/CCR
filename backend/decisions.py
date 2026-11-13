@@ -220,25 +220,38 @@ CREATE TABLE IF NOT EXISTS advisor_log (
 _last_rec: dict = {}
 
 
-def _counted(start: str) -> dict[str, int]:
-    """day -> recommendations counted for the admin: advice shown on the CCR
-    screen that differs from the last counted one by more than the check
-    tolerance (CHECK_TOL: coal 2.5, SAFR 1.5, calciner temp 5) on any lever or
-    the predicted calciner temp. Smaller moves are the same advice still standing."""
-    adv = db.q("SELECT day, recommended_json, predicted_temp, issued, shown FROM advisor_log "
+SLOT_MIN = 10   # one recommendation per parameter per 10-min slot: at most 144 x 3 = 432 a day
+
+
+def _slot(ts) -> int | None:
+    """10-min slot of the day (0..143) of a timestamp; None when unreadable."""
+    t = pd.to_datetime(ts, format="mixed", errors="coerce")
+    return None if pd.isna(t) else (t.hour * 60 + t.minute) // SLOT_MIN
+
+
+def _counted(start: str) -> set[tuple]:
+    """(day, slot, tag) recommendations counted for the admin, per parameter
+    (calciner coal, SAFR, predicted calciner temp): advice shown on the CCR
+    screen whose value differs from that parameter's last counted one by more
+    than the check tolerance (CHECK_TOL: coal 2.5, SAFR 1.5, calciner temp 5).
+    A parameter counts at most once per 10-min slot (SLOT_MIN), so a day holds
+    at most 432. Smaller moves are the same advice still standing."""
+    adv = db.q("SELECT day, ts, recommended_json, predicted_temp, issued, shown FROM advisor_log "
                "WHERE day >= :s AND data_source != 'historical' ORDER BY id", {"s": start})
-    out: dict[str, int] = {}
+    adv["ts"] = pd.to_datetime(adv["ts"], format="mixed", errors="coerce")
+    out: set[tuple] = set()
     anchor: dict = {}
     for r in adv.itertuples():
-        if not (r.shown == 1 or (pd.isna(r.shown) and r.issued)):
+        if not (r.shown == 1 or (pd.isna(r.shown) and r.issued)) or pd.isna(r.ts):
             continue
         cur = dict(json.loads(r.recommended_json or "{}"))
         if pd.notna(r.predicted_temp):
             cur[analysis.CV] = float(r.predicted_temp)
-        if not anchor or any(t in anchor and abs(float(v) - float(anchor[t])) > CHECK_TOL.get(t, 0.0)
-                             for t, v in cur.items() if t in CHECK_TOL):
-            out[r.day] = out.get(r.day, 0) + 1
-            anchor = {**anchor, **cur}
+        s = (r.ts.hour * 60 + r.ts.minute) // SLOT_MIN
+        for t, v in cur.items():
+            if t in CHECK_TOL and (t not in anchor or abs(float(v) - anchor[t]) > CHECK_TOL[t]):
+                out.add((r.day, s, t))
+                anchor[t] = float(v)
     return out
 
 
@@ -302,16 +315,19 @@ def advisory_summary(day: str | None = None) -> dict:
         d = db.q("SELECT COUNT(*) AS computed FROM advisor_log "
                  "WHERE day = :d AND data_source != 'historical'", {"d": day})
         return {"day": day, "computed": int(d["computed"][0]),
-                "issued": _counted(day).get(day, 0)}
+                "issued": sum(1 for k in _counted(day) if k[0] == day)}
     except Exception:                                # table not created yet
         return {"day": day, "computed": 0, "issued": 0}
 
 
 def summary(n_days: int = 30) -> list[dict]:
     """Admin Recommendation Summary, one row for every date in the window
-    (newest first, zeros included), all parameters together: new recommendation sets shown on the CCR screen, sets accepted / declined (Accept
-    all / Decline all act on the whole set; a decision later undone is left
-    out) and no action (issued, never decided). Live data only."""
+    (newest first, zeros included), counted PER PARAMETER (calciner coal, SAFR,
+    calciner temp) and at most once per parameter per 10-min slot, so a day
+    holds at most 432: new recommendations shown on the CCR screen, accepted /
+    declined (one Accept all click counts once for each of its parameters; a
+    decision later undone is left out) and no action (shown, never decided).
+    Live data only."""
     start = (dt.date.today() - dt.timedelta(days=max(1, int(n_days)) - 1)).isoformat()
     out: dict[str, dict] = {}
 
@@ -321,26 +337,25 @@ def summary(n_days: int = 30) -> list[dict]:
     try:
         counted = _counted(start)
     except Exception:                                # table not created yet
-        counted = {}
-    for day, n in counted.items():
-        row(day)["total"] = n
+        counted = set()
     _ensure()
     dec = db.q("SELECT day, advisory_ts, decided_at, tag, action FROM operator_decisions "
                "WHERE day >= :s ORDER BY id", {"s": start})
-    standing: dict[tuple, str] = {}                  # (day, set, tag) -> action still standing
+    standing: dict[tuple, str] = {}                  # (day, slot, tag) -> action still standing
     for r in dec.itertuples():
-        k = (r.day, r.advisory_ts or r.decided_at, r.tag)
+        if r.tag not in CHECK_TOL:
+            continue
+        s = _slot(r.advisory_ts) if r.advisory_ts else None
+        k = (r.day, _slot(r.decided_at) if s is None else s, r.tag)
         if r.action in ("accepted", "declined"):
             standing[k] = r.action
         elif r.action == "undone":
             standing.pop(k, None)
-    sets: dict[tuple, set] = {}
-    for (day, st, _), act in standing.items():
-        sets.setdefault((day, st), set()).add(act)
-    for (day, _), acts in sets.items():
-        row(day)["accepted" if "accepted" in acts else "declined"] += 1
+    for day, _, _ in counted | set(standing):        # a decided slot is always a recommendation
+        row(day)["total"] += 1
+    for (day, _, _), act in standing.items():
+        row(day)[act] += 1
     for o in out.values():
-        o["total"] = max(o["total"], o["accepted"] + o["declined"])
         o["no_action"] = o["total"] - o["accepted"] - o["declined"]
     for i in range(max(1, int(n_days))):            # every day in the window, zeros included
         row((dt.date.today() - dt.timedelta(days=i)).isoformat())

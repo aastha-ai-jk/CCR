@@ -109,9 +109,10 @@ export default function Admin() {
   );
 }
 
-// Section 1: recommendation sets per day for the last 7 days (+ total), all
-// parameters together. Accept all / Decline all act on the whole set; no action
-// = issued but never decided. Click a row to open that day below.
+// Section 1: recommendations per day for the last 7 days (+ total), per
+// parameter (coal, SAFR, calciner temp), at most once per parameter per 10 min
+// (max 432 a day). One Accept all click counts for each parameter; no action
+// = shown but never decided. Click a row to open that day below.
 function SummaryPanel({ day, onPick }: { day: string; onPick: (d: string) => void }) {
   const [rows, setRows] = useState<SummaryRow[] | null>(null);
   useEffect(() => {
@@ -125,7 +126,7 @@ function SummaryPanel({ day, onPick }: { day: string; onPick: (d: string) => voi
     { total: 0, accepted: 0, declined: 0, no_action: 0 });
   return (
     <Panel title="Recommendation Summary"
-      right={<span className="text-xs text-[var(--muted)]">last 7 days · all parameters together · click a day to open it below</span>}>
+      right={<span className="text-xs text-[var(--muted)]">last 7 days · per parameter · max 1 per parameter per 10 min (432 a day) · click a day to open it below</span>}>
       {!rows ? <Loading /> : rows.length === 0 ? (
         <div className="text-sm text-[var(--muted)]">No recommendations in the last 7 days.</div>
       ) : (
