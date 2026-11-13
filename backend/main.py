@@ -530,10 +530,6 @@ def twin_advisor(screen: int = 0):
                 "uom": None if pd.isna(cat.loc[t, "uom"]) else str(cat.loc[t, "uom"]),
                 "current": s["values"].get(t)} for t in ADVISOR_LEVERS}
     r = _advisor["result"]
-    if screen and r and r.get("log_id") and not r.get("shown"):
-        r["shown"] = True
-        from backend import decisions
-        decisions.mark_shown(r["log_id"])
     out = {"live": live, "live_ts": s["ts"], "live_source": s["source"],
            "computing": _advisor["busy"], "horizon_min": analysis.DELTA,
            "fixed_levers": FIXED_LEVERS}
@@ -553,7 +549,35 @@ def twin_advisor(screen: int = 0):
     out["guardrails"]["uncertainty"] = _uncertainty(r)        # GR7: P10-P90 range
     out["guardrails"]["heat"] = _heat_change(s, r)            # GR8: total heat change
     out["validation"] = _current_validation()["report"]
+    if screen and r and r.get("log_id"):
+        blocked = _accept_blocked(_fresh_values(s), _advisor_recommended(r),
+                                  out["guardrails"], out["validation"])
+        if not r.get("shown") or (blocked and not r.get("blocked")):
+            r["shown"], r["blocked"] = True, bool(r.get("blocked") or blocked)
+            from backend import decisions
+            decisions.mark_shown(r["log_id"], blocked)
     return _json_safe(out)
+
+
+def _accept_blocked(live: dict, rec: dict, g: dict, val: dict | None) -> bool:
+    """Server copy of the advisor page's "Accept blocked" rule (setBlock in
+    static/ccr-kiln3-advisor.html), for the admin count: a parameter without a
+    current value or recommendation, a red guardrail, live CO / O2 unsafe on a
+    raise, or a data-check error on a parameter / all / the live feed."""
+    from twin.optimize import ADVISOR_LEVERS
+    tags = (*ADVISOR_LEVERS, analysis.CV)
+    for i in (val or {}).get("issues") or []:
+        if i.get("severity") == "error" and (i.get("check") == "freshness"
+                                             or i.get("scope") == "all" or i.get("scope") in tags):
+            return True
+    comb = bool((g.get("combustion") or {}).get("breaches"))
+    for t in tags:
+        lv, rv = live.get(t), rec.get(t)
+        if not isinstance(lv, (int, float)) or not isinstance(rv, (int, float)):
+            return True
+        if ((g.get("params") or {}).get(t) or {}).get("breach") or (comb and rv > lv):
+            return True
+    return False
 
 
 # Data validation (backend/validation.py): every input reading and every
@@ -1223,9 +1247,28 @@ def get_accepted_reached(day: str | None = None):
 
 @app.get("/api/admin/summary")
 def get_admin_summary(days: int = Query(30, ge=1, le=365)):
-    """Admin: date-wise recommendation sets issued, accepted, declined and no action."""
+    """Admin: date-wise recommendations shown, accepted, declined (split into
+    not correct / justified) and no action."""
     from backend import decisions
-    return _json_safe(decisions.summary(days))
+    return _json_safe(decisions.summary_checked(days))
+
+
+@app.get("/api/admin/performance")
+def get_admin_performance(scope: str = Query("total", pattern="^(total|week)$")):
+    """Admin: Advisory Performance summed since 2 Nov (total) or over the last 7 days (week)."""
+    from backend import decisions
+    return _json_safe(decisions.performance(scope))
+
+
+@app.get("/api/admin/actions")
+def get_admin_actions(scope: str = Query("total", pattern="^(total|week|day)$"), day: str | None = None):
+    """Admin: recommendations shown, acted on and not acted on (Accept blocked or available)."""
+    from fastapi import HTTPException
+    from backend import decisions
+    try:
+        return _json_safe(decisions.actions(scope, day))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 @app.get("/api/decisions/days")

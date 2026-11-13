@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { api, AccuracyResult, AcceptedReachedResult, DeclinedReachedResult, DeclinedReachedRow, SummaryRow } from "@/lib/api";
+import { api, AccuracyResult, AcceptedReachedResult, ActionsResult, DeclinedReachedResult, DeclinedReachedRow, SummaryRow } from "@/lib/api";
 import { Panel, Stat, Badge, Loading } from "@/components/ui";
 
 // Administrative dashboard — day-wise check of operator DECLINES and ACCEPTS.
@@ -77,7 +77,11 @@ export default function Admin() {
         </label>
       </header>
 
+      <PerformancePanel day={day} dec={data} acc={accData} />
+
       <SummaryPanel day={day} onPick={setDay} />
+
+      <ActionsPanel day={day} />
 
       {err && <Panel><div className="text-sm text-[var(--bad)]">Could not load: {err}</div></Panel>}
       {!data && !err && <Loading />}
@@ -102,17 +106,16 @@ export default function Admin() {
         </>
       )}
 
-      {data && accData && <PerformancePanel dec={data} acc={accData} />}
-
       <AccuracyPanel day={day} />
     </div>
   );
 }
 
-// Section 1: recommendations per day for the last 7 days (+ total), per
-// parameter (coal, SAFR, calciner temp), at most once per parameter per 10 min
-// (max 432 a day). One Accept all click counts for each parameter; no action
-// = shown but never decided. Click a row to open that day below.
+// Section 2: operator actions per day for the last 7 days (+ total), per
+// parameter (coal, SAFR, calciner temp), at most once per parameter per 10 min.
+// Total = accepted + declined; declines are split by the target-time check into
+// not correct (plant reached the advice anyway) and justified. Declines still
+// waiting for their target time are in neither split. Click a row to open that day below.
 function SummaryPanel({ day, onPick }: { day: string; onPick: (d: string) => void }) {
   const [rows, setRows] = useState<SummaryRow[] | null>(null);
   useEffect(() => {
@@ -121,23 +124,36 @@ function SummaryPanel({ day, onPick }: { day: string; onPick: (d: string) => voi
     const t = setInterval(load, 60000);
     return () => clearInterval(t);
   }, []);
-  const tot = (rows ?? []).reduce((a, r) => ({ total: a.total + r.total, accepted: a.accepted + r.accepted,
-    declined: a.declined + r.declined, no_action: a.no_action + r.no_action }),
-    { total: 0, accepted: 0, declined: 0, no_action: 0 });
+  const tot = (rows ?? []).reduce((a, r) => ({ accepted: a.accepted + r.accepted, declined: a.declined + r.declined,
+    not_correct: a.not_correct + r.not_correct, justified: a.justified + r.justified }),
+    { accepted: 0, declined: 0, not_correct: 0, justified: 0 });
+  const cols = (r: { accepted: number; declined: number; not_correct: number; justified: number }) => (
+    <>
+      <td className="text-center mono">{r.accepted + r.declined}</td>
+      <td className={`text-center mono ${r.accepted ? "text-[var(--ok)]" : "text-[var(--muted)]"}`}>{r.accepted}</td>
+      <td className={`text-center mono ${r.declined ? "text-[var(--bad)]" : "text-[var(--muted)]"}`}>{r.declined}</td>
+      <td className={`text-center mono ${r.not_correct ? "text-[var(--warn)]" : "text-[var(--muted)]"}`}>{r.not_correct}</td>
+      <td className="text-center mono text-[var(--muted)]">{r.justified}</td>
+    </>
+  );
   return (
     <Panel title="Recommendation Summary"
-      right={<span className="text-xs text-[var(--muted)]">last 7 days · per parameter · max 1 per parameter per 10 min (432 a day) · click a day to open it below</span>}>
+      right={<span className="text-xs text-[var(--muted)]">last 7 days · per parameter · max 1 per parameter per 10 min · click a day to open it below</span>}>
       {!rows ? <Loading /> : rows.length === 0 ? (
         <div className="text-sm text-[var(--muted)]">No recommendations in the last 7 days.</div>
       ) : (
         <table className="w-full text-sm table-fixed">
           <thead>
+            <tr className="text-[11px] uppercase tracking-wide text-[var(--muted)]">
+              <th rowSpan={2} className="py-2 text-left font-medium border-b border-[var(--line)]">Date</th>
+              <th rowSpan={2} className="font-medium text-center border-b border-[var(--line)]">Total recommendation</th>
+              <th rowSpan={2} className="font-medium text-center border-b border-[var(--line)]">Accepted</th>
+              <th colSpan={3} className="pt-2 pb-1 font-medium text-center border-b border-[var(--line)]">Declined</th>
+            </tr>
             <tr className="text-[11px] uppercase tracking-wide text-[var(--muted)] border-b border-[var(--line)]">
-              <th className="py-2 text-left font-medium">Date</th>
-              <th className="font-medium text-center">Total recommendation</th>
-              <th className="font-medium text-center">Accepted</th>
-              <th className="font-medium text-center">Declined</th>
-              <th className="font-medium text-center">No action</th>
+              <th className="py-1 font-medium text-center">Total</th>
+              <th className="font-medium text-center">Not correct</th>
+              <th className="font-medium text-center">Justified</th>
             </tr>
           </thead>
           <tbody>
@@ -145,18 +161,12 @@ function SummaryPanel({ day, onPick }: { day: string; onPick: (d: string) => voi
               <tr key={r.day} onClick={() => onPick(r.day)}
                 className={`cursor-pointer hover:bg-[var(--panel-2)] ${r.day === day ? "bg-[var(--panel-2)]" : ""}`}>
                 <td className="py-1.5">{dayLabel(r.day)}</td>
-                <td className="text-center mono">{r.total}</td>
-                <td className={`text-center mono ${r.accepted ? "text-[var(--ok)]" : "text-[var(--muted)]"}`}>{r.accepted}</td>
-                <td className={`text-center mono ${r.declined ? "text-[var(--bad)]" : "text-[var(--muted)]"}`}>{r.declined}</td>
-                <td className="text-center mono text-[var(--muted)]">{r.no_action}</td>
+                {cols(r)}
               </tr>
             ))}
             <tr className="border-t border-[var(--line)] font-semibold">
               <td className="py-2">Total</td>
-              <td className="text-center mono">{tot.total}</td>
-              <td className="text-center mono text-[var(--ok)]">{tot.accepted}</td>
-              <td className="text-center mono text-[var(--bad)]">{tot.declined}</td>
-              <td className="text-center mono text-[var(--muted)]">{tot.no_action}</td>
+              {cols(tot)}
             </tr>
           </tbody>
         </table>
@@ -165,45 +175,38 @@ function SummaryPanel({ day, onPick }: { day: string; onPick: (d: string) => voi
   );
 }
 
-// Section 3: advisory performance on the chosen day, counted per parameter
-// decision. Positive = accepted + declined-but-not-correct (the advice was right);
+// Section 1: advisory performance, counted per parameter decision.
+// Positive = accepted + declined-but-not-correct (the advice was right);
 // negative = declined and justified. Success % = positive / (positive + negative);
 // declines still waiting for their target time count in neither.
-// "Last 7 days total" sums the same per-day checks over today and the 6 days before.
+// "Total" (default) sums the per-day checks since the start (2 Nov, backend
+// PERF_START); "Last 7 days" over today and the 6 days before; or the chosen day.
 type Perf = { accepted: number; declines: number; notCorrect: number; justified: number };
 const perfOf = (dec: DeclinedReachedResult, acc: AcceptedReachedResult): Perf => ({
   accepted: acc.accepts, declines: dec.declines,
   notCorrect: dec.counts.reached, justified: dec.counts.not_reached,
 });
-const lastDays = (n: number) => Array.from({ length: n }, (_, i) => {
-  const d = new Date(); d.setDate(d.getDate() - i);
-  return isoDay(d);
-});
 
-function PerformancePanel({ dec, acc }: { dec: DeclinedReachedResult; acc: AcceptedReachedResult }) {
-  const [mode, setMode] = useState<"day" | "week">("day");
-  const [week, setWeek] = useState<Perf | null>(null);
+function PerformancePanel({ day, dec, acc }: { day: string; dec: DeclinedReachedResult | null; acc: AcceptedReachedResult | null }) {
+  const [mode, setMode] = useState<"total" | "week" | "day">("total");
+  const [period, setPeriod] = useState<Perf | null>(null);
   useEffect(() => {
-    if (mode !== "week") return;
+    if (mode === "day") return;
     let alive = true;
-    setWeek(null);
-    Promise.all(lastDays(7).map((d) => Promise.all([api.declinedReached(d), api.acceptedReached(d)])))
-      .then((res) => {
-        if (!alive) return;
-        setWeek(res.map(([d, a]) => perfOf(d, a)).reduce((s, p) => ({
-          accepted: s.accepted + p.accepted, declines: s.declines + p.declines,
-          notCorrect: s.notCorrect + p.notCorrect, justified: s.justified + p.justified,
-        })));
-      })
-      .catch(() => { if (alive) setWeek({ accepted: 0, declines: 0, notCorrect: 0, justified: 0 }); });
-    return () => { alive = false; };
+    const load = () => api.performance(mode)
+      .then((r) => { if (alive) setPeriod({ accepted: r.accepted, declines: r.declines,
+        notCorrect: r.not_correct, justified: r.justified }); })
+      .catch(() => { if (alive) setPeriod({ accepted: 0, declines: 0, notCorrect: 0, justified: 0 }); });
+    setPeriod(null); load();
+    const t = setInterval(load, 300000);
+    return () => { alive = false; clearInterval(t); };
   }, [mode]);
 
-  const p = mode === "day" ? perfOf(dec, acc) : week;
+  const p = mode === "day" ? (dec && acc ? perfOf(dec, acc) : null) : period;
   const tabs = (
     <div className="flex items-center gap-3">
       <div className="flex rounded-md border border-[var(--line)] overflow-hidden text-xs">
-        {([["day", dec.day], ["week", "Last 7 days total"]] as const).map(([m, label]) => (
+        {([["total", "Total"], ["week", "Last 7 days"], ["day", day]] as const).map(([m, label]) => (
           <button key={m} onClick={() => setMode(m)}
             className={`px-2.5 py-1 ${mode === m ? "bg-[var(--panel-2)] text-[var(--ink)] font-semibold" : "text-[var(--muted)]"}`}>
             {label}
@@ -223,7 +226,7 @@ function PerformancePanel({ dec, acc }: { dec: DeclinedReachedResult; acc: Accep
     <Panel title="Advisory Performance" right={tabs}>
       {total === 0 ? (
         <div className="text-sm text-[var(--muted)]">
-          No accepted or declined recommendations {mode === "day" ? "on this day" : "in the last 7 days"}.
+          No accepted or declined recommendations {mode === "day" ? "on this day" : mode === "week" ? "in the last 7 days" : "yet"}.
         </div>
       ) : (
         <div className="grid lg:grid-cols-[1fr_260px] gap-4 items-center">
@@ -240,6 +243,56 @@ function PerformancePanel({ dec, acc }: { dec: DeclinedReachedResult; acc: Accep
           <OutcomePie pos={pos} neg={neg} />
         </div>
       )}
+    </Panel>
+  );
+}
+
+// Section 3: what happened to the recommendations shown on the CCR screen
+// (same counting as the summary: per parameter, max once per 10 min). No action
+// is split into Accept blocked (a red guardrail / data check / no current value
+// — only Decline was possible) and available but not acted on. Advice shown
+// before blocking was recorded (13 Nov) is "not recorded".
+function ActionsPanel({ day }: { day: string }) {
+  const [mode, setMode] = useState<"total" | "week" | "day">("total");
+  const [a, setA] = useState<ActionsResult | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () => api.actions(mode, mode === "day" ? day : undefined)
+      .then((r) => { if (alive) setA(r); }).catch(() => { if (alive) setA(null); });
+    setA(null); load();
+    const t = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(t); };
+  }, [mode, day]);
+  const tabs = (
+    <div className="flex items-center gap-3">
+      <div className="flex rounded-md border border-[var(--line)] overflow-hidden text-xs">
+        {([["total", "Total"], ["week", "Last 7 days"], ["day", day]] as const).map(([m, label]) => (
+          <button key={m} onClick={() => setMode(m)}
+            className={`px-2.5 py-1 ${mode === m ? "bg-[var(--panel-2)] text-[var(--ink)] font-semibold" : "text-[var(--muted)]"}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <span className="text-xs text-[var(--muted)]">per parameter</span>
+    </div>
+  );
+  if (!a) return <Panel title="Action Performed" right={tabs}><Loading /></Panel>;
+  const acted = a.accepted + a.declined;
+  const pct = (n: number) => (a.total ? `${Math.round((n / a.total) * 100)}% of shown` : "—");
+  return (
+    <Panel title="Action Performed" right={tabs}>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <Stat label="Recommendations shown" value={a.total} sub="appeared on the CCR screen" />
+        <Stat label="Action performed" value={acted} tone={acted ? "ok" : "ink"}
+          sub={`${a.accepted} accepted + ${a.declined} declined · ${pct(acted)}`} />
+        <Stat label="No action performed" value={a.no_action} tone={a.no_action ? "warn" : "ink"} sub={pct(a.no_action)} />
+        <Stat label="No action · Accept blocked" value={a.blocked}
+          sub="guardrail / data check — only Decline possible" />
+        <Stat label="No action · available" value={a.available} tone={a.available ? "warn" : "ink"}
+          sub="could be accepted or declined" />
+        {a.not_recorded > 0 && <Stat label="No action · not recorded" value={a.not_recorded}
+          sub="shown before blocking was tracked (13 Nov)" />}
+      </div>
     </Panel>
   );
 }

@@ -144,7 +144,18 @@ export interface DeclinedReachedResult {
 export type AcceptedReachedResult = Omit<DeclinedReachedResult, "declines"> & { accepts: number };
 
 // admin Recommendation Summary: one row per day, all parameters together
-export interface SummaryRow { day: string; total: number; accepted: number; declined: number; no_action: number }
+export interface SummaryRow { day: string; total: number; accepted: number; declined: number; no_action: number;
+  not_correct: number; justified: number }
+
+// admin Advisory Performance summed over a period (total since 2 Nov, or last 7 days)
+export interface PerformanceResult { scope: "total" | "week"; start: string; end: string;
+  accepted: number; declines: number; not_correct: number; justified: number }
+
+// admin Action Performed: recommendations shown, acted on, and not acted on
+// (Accept blocked / available but no action / not recorded before tracking)
+export interface ActionsResult { scope: "total" | "week" | "day"; start: string; end: string;
+  total: number; accepted: number; declined: number; no_action: number;
+  blocked: number; available: number; not_recorded: number }
 
 export interface AccuracyStats { n: number; mae: number; bias: number; within_5: number; p90_abs: number }
 export interface AccuracyResult {
@@ -220,6 +231,9 @@ export const api = {
   acceptedReached: (day?: string) =>
     get<AcceptedReachedResult>(`/api/admin/accepted-reached${day ? `?day=${encodeURIComponent(day)}` : ""}`),
   summary: (days = 30) => get<SummaryRow[]>(`/api/admin/summary?days=${days}`),
+  performance: (scope: "total" | "week") => get<PerformanceResult>(`/api/admin/performance?scope=${scope}`),
+  actions: (scope: "total" | "week" | "day", day?: string) =>
+    get<ActionsResult>(`/api/admin/actions?scope=${scope}${day ? `&day=${encodeURIComponent(day)}` : ""}`),
   accuracy: (days = 7) => get<AccuracyResult>(`/api/admin/accuracy?days=${days}`),
   decisionDays: () => get<{ day: string; n: number; accepted: number; declined: number }[]>("/api/decisions/days"),
   decisions: (day?: string) =>

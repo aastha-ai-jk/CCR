@@ -214,7 +214,8 @@ CREATE TABLE IF NOT EXISTS advisor_log (
   predicted_temp REAL,
   recommended_json TEXT,          -- {tag: value} for the advisor levers
   issued INTEGER NOT NULL,        -- 1 = new recommendation, 0 = same as previous
-  shown INTEGER                   -- 1 = displayed on the CCR screen (NULL: before tracking)
+  shown INTEGER,                  -- 1 = displayed on the CCR screen (NULL: before tracking)
+  blocked INTEGER                 -- 1 = Accept was blocked while shown (NULL: before tracking)
 )
 """
 _last_rec: dict = {}
@@ -246,7 +247,7 @@ def _standing(recs: list[dict]) -> dict[tuple, int]:
     return out
 
 
-def _counted(start: str) -> set[tuple]:
+def _counted(start: str) -> tuple[set[tuple], dict[tuple, int | None]]:
     """(day, slot, tag) recommendations counted for the admin, per parameter
     (calciner coal, SAFR, predicted calciner temp): advice shown on the CCR
     screen whose value differs from that parameter's last counted one by more
@@ -254,11 +255,16 @@ def _counted(start: str) -> set[tuple]:
     A parameter counts at most once per 10-min slot (SLOT_MIN), so a day holds
     at most 432. Smaller moves are the same advice still standing. Every day
     starts fresh (its first advice counts), so a day's count does not depend
-    on how far back the window reaches."""
-    adv = db.q("SELECT day, ts, recommended_json, predicted_temp, issued, shown FROM advisor_log "
+    on how far back the window reaches. Also returns (day, slot) -> 1 when
+    Accept was blocked at some point the advice was shown in that slot, 0 when
+    never, None when not recorded (rows before the ``blocked`` column)."""
+    adv = db.q("SELECT * FROM advisor_log "
                "WHERE day >= :s AND data_source != 'historical' ORDER BY id", {"s": start})
     adv["ts"] = pd.to_datetime(adv["ts"], format="mixed", errors="coerce")
+    if "blocked" not in adv.columns:
+        adv["blocked"] = None
     out: set[tuple] = set()
+    blocked: dict[tuple, int | None] = {}
     anchor: dict = {}
     day = None
     for r in adv.itertuples():
@@ -270,11 +276,15 @@ def _counted(start: str) -> set[tuple]:
         if pd.notna(r.predicted_temp):
             cur[analysis.CV] = float(r.predicted_temp)
         s = (r.ts.hour * 60 + r.ts.minute) // SLOT_MIN
+        if pd.notna(r.blocked):
+            blocked[(r.day, s)] = max(int(r.blocked), blocked.get((r.day, s)) or 0)
+        else:
+            blocked.setdefault((r.day, s), None)
         for t, v in cur.items():
             if t in CHECK_TOL and (t not in anchor or abs(float(v) - anchor[t]) > CHECK_TOL[t]):
                 out.add((r.day, s, t))
                 anchor[t] = float(v)
-    return out
+    return out, blocked
 
 
 def _ensure_adv(con) -> None:
@@ -283,6 +293,8 @@ def _ensure_adv(con) -> None:
     cols = {row[1] for row in con.execute(text("PRAGMA table_info(advisor_log)"))}
     if "shown" not in cols:
         con.execute(text("ALTER TABLE advisor_log ADD COLUMN shown INTEGER"))
+    if "blocked" not in cols:
+        con.execute(text("ALTER TABLE advisor_log ADD COLUMN blocked INTEGER"))
 
 
 def log_advisory(r: dict) -> int | None:
@@ -320,11 +332,15 @@ def log_advisory(r: dict) -> int | None:
         return None
 
 
-def mark_shown(log_id: int) -> None:
-    """The CCR screen has displayed the advice logged as ``log_id``; never raises."""
+def mark_shown(log_id: int, blocked: bool = False) -> None:
+    """The CCR screen has displayed the advice logged as ``log_id``, with Accept
+    blocked or not (once blocked while shown, it stays marked); never raises."""
     try:
         with db.engine().begin() as con:
-            con.execute(text("UPDATE advisor_log SET shown = 1 WHERE id = :i"), {"i": int(log_id)})
+            _ensure_adv(con)
+            con.execute(text("UPDATE advisor_log SET shown = 1, blocked = CASE WHEN :b = 1 "
+                             "THEN 1 ELSE COALESCE(blocked, 0) END WHERE id = :i"),
+                        {"i": int(log_id), "b": int(bool(blocked))})
     except Exception:
         pass
 
@@ -337,7 +353,7 @@ def advisory_summary(day: str | None = None) -> dict:
         d = db.q("SELECT COUNT(*) AS computed FROM advisor_log "
                  "WHERE day = :d AND data_source != 'historical'", {"d": day})
         return {"day": day, "computed": int(d["computed"][0]),
-                "issued": sum(1 for k in _counted(day) if k[0] == day)}
+                "issued": sum(1 for k in _counted(day)[0] if k[0] == day)}
     except Exception:                                # table not created yet
         return {"day": day, "computed": 0, "issued": 0}
 
@@ -348,18 +364,20 @@ def summary(n_days: int = 30) -> list[dict]:
     calciner temp) and at most once per parameter per 10-min slot, so a day
     holds at most 432: new recommendations shown on the CCR screen, accepted /
     declined (one Accept all click counts once for each of its parameters; a
-    decision later undone is left out) and no action (shown, never decided).
+    decision later undone is left out) and no action (shown, never decided),
+    split into blocked (Accept was blocked), available and not_recorded.
     Live data only."""
     start = (dt.date.today() - dt.timedelta(days=max(1, int(n_days)) - 1)).isoformat()
     out: dict[str, dict] = {}
 
     def row(day: str) -> dict:
-        return out.setdefault(day, {"day": day, "total": 0, "accepted": 0, "declined": 0, "no_action": 0})
+        return out.setdefault(day, {"day": day, "total": 0, "accepted": 0, "declined": 0, "no_action": 0,
+                                    "blocked": 0, "available": 0, "not_recorded": 0})
 
     try:
-        counted = _counted(start)
+        counted, blocked = _counted(start)
     except Exception:                                # table not created yet
-        counted = set()
+        counted, blocked = set(), {}
     _ensure()
     dec = db.q("SELECT id, day, advisory_ts, decided_at, tag, action FROM operator_decisions "
                "WHERE day >= :s ORDER BY id", {"s": start})
@@ -370,6 +388,9 @@ def summary(n_days: int = 30) -> list[dict]:
         row(day)["total"] += 1
     for (day, _, _), i in standing.items():
         row(day)[act[i]] += 1
+    for day, slot, tag in counted - set(standing):   # no action: Accept blocked or not
+        b = blocked.get((day, slot))
+        row(day)["not_recorded" if b is None else "blocked" if b else "available"] += 1
     for o in out.values():
         o["no_action"] = o["total"] - o["accepted"] - o["declined"]
     for i in range(max(1, int(n_days))):            # every day in the window, zeros included
@@ -483,6 +504,66 @@ def _checked(day: str | None, action: str) -> dict:
          for k in ("reached", "not_reached", "pending", "no_data")}
     return {"day": day, "horizon_min": ADVISOR_HORIZON, "tolerances": tols,
             "counts": n, "rows": out}
+
+
+PERF_START = dt.date(2026, 11, 2)    # first day of the admin "Total" (as the daily report)
+_perf_cache: dict[str, dict] = {}    # settled days (before yesterday) never change
+
+
+def _perf_day(day: str) -> dict:
+    if day in _perf_cache:
+        return _perf_cache[day]
+    a, d = _checked(day, "accepted"), _checked(day, "declined")
+    p = {"accepted": len(a["rows"]), "declines": len(d["rows"]),
+         "not_correct": d["counts"]["reached"], "justified": d["counts"]["not_reached"]}
+    if day < (dt.date.today() - dt.timedelta(days=1)).isoformat():
+        _perf_cache[day] = p
+    return p
+
+
+def performance(scope: str = "total") -> dict:
+    """Admin Advisory Performance summed over a period: ``total`` = since
+    PERF_START, ``week`` = today and the 6 days before. Same per-day checks
+    (and 10-min rule) as the day view."""
+    today = dt.date.today()
+    start = PERF_START if scope == "total" else today - dt.timedelta(days=6)
+    out = {"scope": scope, "start": start.isoformat(), "end": today.isoformat(),
+           "accepted": 0, "declines": 0, "not_correct": 0, "justified": 0}
+    d = start
+    while d <= today:
+        for k, v in _perf_day(d.isoformat()).items():
+            out[k] += v
+        d += dt.timedelta(days=1)
+    return out
+
+
+def summary_checked(n_days: int = 7) -> list[dict]:
+    """``summary`` rows plus each day's declines split by the target-time check:
+    not_correct (plant reached the advice anyway) and justified (it did not)."""
+    rows = summary(n_days)
+    for r in rows:
+        p = _perf_day(r["day"])
+        r["not_correct"], r["justified"] = p["not_correct"], p["justified"]
+    return rows
+
+
+def actions(scope: str = "total", day: str | None = None) -> dict:
+    """Admin Action Performed: recommendations shown, acted on (accepted +
+    declined) and not acted on (Accept blocked / available but no action /
+    not recorded), summed over ``total`` (since PERF_START), ``week`` (today
+    and the 6 days before) or one ``day``. Same counting as ``summary``."""
+    today = dt.date.today()
+    if scope == "day":
+        start = end = dt.date.fromisoformat(day or today.isoformat())
+    else:
+        start, end = (PERF_START if scope == "total" else today - dt.timedelta(days=6)), today
+    keys = ("total", "accepted", "declined", "no_action", "blocked", "available", "not_recorded")
+    out = {"scope": scope, "start": start.isoformat(), "end": end.isoformat(), **{k: 0 for k in keys}}
+    for r in summary((today - start).days + 1):
+        if start.isoformat() <= r["day"] <= end.isoformat():
+            for k in keys:
+                out[k] += r[k]
+    return out
 
 
 def days() -> list[dict]:
