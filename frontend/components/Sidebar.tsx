@@ -1,10 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, SlidersHorizontal, Factory, ShieldCheck, Lightbulb } from "lucide-react";
-
-// The CCR advisor screen is served by the backend API itself (/advisor).
-const ADVISOR_URL = `${process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000"}/advisor`;
+import { Activity, SlidersHorizontal, Factory, ShieldCheck } from "lucide-react";
 
 const NAV = [
   { href: "/", label: "Live Overview", icon: Activity },
@@ -33,10 +30,6 @@ export default function Sidebar() {
             </Link>
           );
         })}
-        <a href={ADVISOR_URL} target="_blank" rel="noopener"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors text-[var(--muted)] hover:text-[var(--ink)] hover:bg-[var(--panel-2)]">
-          <Lightbulb size={17} />CCR Advisor ↗
-        </a>
       </nav>
       <div className="mt-auto p-4 text-[10px] text-[var(--muted)] border-t border-[var(--line)]">
         JK Cement · Digital Twin v0.1<br />Data: Aug 2025 – Jul 2026
