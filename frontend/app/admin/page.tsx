@@ -248,10 +248,9 @@ function PerformancePanel({ day, dec, acc }: { day: string; dec: DeclinedReached
 }
 
 // Section 3: what happened to the recommendations shown on the CCR screen
-// (same counting as the summary: per parameter, max once per 10 min). No action
-// is split into Accept blocked (a red guardrail / data check / no current value
-// — only Decline was possible) and available but not acted on. Advice shown
-// before blocking was recorded (13 Nov) is "not recorded".
+// (same counting as the summary: per parameter, max once per 10 min): acted on
+// (accepted + declined) or not. The backend also records whether Accept was
+// blocked (advisor_log.blocked; /api/admin/actions blocked / available), not shown here.
 function ActionsPanel({ day }: { day: string }) {
   const [mode, setMode] = useState<"total" | "week" | "day">("total");
   const [a, setA] = useState<ActionsResult | null>(null);
@@ -284,14 +283,8 @@ function ActionsPanel({ day }: { day: string }) {
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <Stat label="Recommendations shown" value={a.total} sub="appeared on the CCR screen" />
         <Stat label="Action performed" value={acted} tone={acted ? "ok" : "ink"}
-          sub={`${a.accepted} accepted + ${a.declined} declined · ${pct(acted)}`} />
+          sub={`${a.accepted} accepted + ${a.declined} declined`} />
         <Stat label="No action performed" value={a.no_action} tone={a.no_action ? "warn" : "ink"} sub={pct(a.no_action)} />
-        <Stat label="No action · Accept blocked" value={a.blocked}
-          sub="guardrail / data check — only Decline possible" />
-        <Stat label="No action · available" value={a.available} tone={a.available ? "warn" : "ink"}
-          sub="could be accepted or declined" />
-        {a.not_recorded > 0 && <Stat label="No action · not recorded" value={a.not_recorded}
-          sub="shown before blocking was tracked (13 Nov)" />}
       </div>
     </Panel>
   );
