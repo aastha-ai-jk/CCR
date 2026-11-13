@@ -229,6 +229,23 @@ def _slot(ts) -> int | None:
     return None if pd.isna(t) else (t.hour * 60 + t.minute) // SLOT_MIN
 
 
+def _standing(recs: list[dict]) -> dict[tuple, int]:
+    """(day, slot, tag) -> id of the decision still standing there: the last
+    accept / decline of that parameter in that 10-min slot, none once undone.
+    ``recs`` in id order. Every admin panel counts decisions through this."""
+    out: dict[tuple, int] = {}
+    for r in recs:
+        if r["tag"] not in CHECK_TOL:
+            continue
+        s = _slot(r["advisory_ts"]) if r.get("advisory_ts") else None
+        k = (r["day"], _slot(r["decided_at"]) if s is None else s, r["tag"])
+        if r["action"] in ("accepted", "declined"):
+            out[k] = r["id"]
+        elif r["action"] == "undone":
+            out.pop(k, None)
+    return out
+
+
 def _counted(start: str) -> set[tuple]:
     """(day, slot, tag) recommendations counted for the admin, per parameter
     (calciner coal, SAFR, predicted calciner temp): advice shown on the CCR
@@ -339,22 +356,15 @@ def summary(n_days: int = 30) -> list[dict]:
     except Exception:                                # table not created yet
         counted = set()
     _ensure()
-    dec = db.q("SELECT day, advisory_ts, decided_at, tag, action FROM operator_decisions "
+    dec = db.q("SELECT id, day, advisory_ts, decided_at, tag, action FROM operator_decisions "
                "WHERE day >= :s ORDER BY id", {"s": start})
-    standing: dict[tuple, str] = {}                  # (day, slot, tag) -> action still standing
-    for r in dec.itertuples():
-        if r.tag not in CHECK_TOL:
-            continue
-        s = _slot(r.advisory_ts) if r.advisory_ts else None
-        k = (r.day, _slot(r.decided_at) if s is None else s, r.tag)
-        if r.action in ("accepted", "declined"):
-            standing[k] = r.action
-        elif r.action == "undone":
-            standing.pop(k, None)
+    recs = dec.where(pd.notna(dec), None).to_dict("records") if len(dec) else []
+    act = {r["id"]: r["action"] for r in recs}
+    standing = _standing(recs)
     for day, _, _ in counted | set(standing):        # a decided slot is always a recommendation
         row(day)["total"] += 1
-    for (day, _, _), act in standing.items():
-        row(day)[act] += 1
+    for (day, _, _), i in standing.items():
+        row(day)[act[i]] += 1
     for o in out.values():
         o["no_action"] = o["total"] - o["accepted"] - o["declined"]
     for i in range(max(1, int(n_days))):            # every day in the window, zeros included
@@ -416,14 +426,16 @@ def check_decline(rec: float, target: dt.datetime, series: pd.Series, now: dt.da
 def declined_but_reached(day: str | None = None) -> dict:
     """Every decline on one date (calciner coal, SAFR, calciner outlet temp),
     each checked at its recommendation's target time. Declines later undone are
-    left out (the decision was withdrawn)."""
+    left out (the decision was withdrawn); one per parameter per 10-min slot,
+    the same rule as the Recommendation Summary."""
     out = _checked(day, "declined")
     return {**out, "declines": len(out["rows"])}
 
 
 def accepted_reached(day: str | None = None) -> dict:
     """Every accept on one date, checked the same way: did the plant reach the
-    recommended value (± tolerance) at the target time? Undone accepts left out."""
+    recommended value (± tolerance) at the target time? Undone accepts left out;
+    one per parameter per 10-min slot, as in the Recommendation Summary."""
     out = _checked(day, "accepted")
     return {**out, "accepts": len(out["rows"])}
 
@@ -437,19 +449,18 @@ def _checked(day: str | None, action: str) -> dict:
     dt.date.fromisoformat(day)
     adv = config.plant_settings().get("advisor") or {}
     tols = {**CHECK_TOL, **{k: float(v) for k, v in (adv.get("decline_check_tol") or {}).items()}}
-    rows = db.q("SELECT id, decided_at, operator, param_id, tag, param_name, unit, action, "
+    rows = db.q("SELECT id, day, decided_at, operator, param_id, tag, param_name, unit, action, "
                 "reason, note, current_value, recommended_value, operating_state, "
                 "advisory_ts, horizon_min FROM operator_decisions WHERE day = :d ORDER BY id",
                 {"d": day})
     now = dt.datetime.now()
     recs = rows.where(pd.notna(rows), None).to_dict("records") if len(rows) else []
+    keep = set(_standing(recs).values())             # same 10-min rule as the summary
     out = []
-    for i, r in enumerate(recs):
-        if (r["action"] != action or r["tag"] not in (*ADVISOR_LEVERS, analysis.CV)
+    for r in recs:
+        if (r["action"] != action or r["id"] not in keep
+                or r["tag"] not in (*ADVISOR_LEVERS, analysis.CV)
                 or r["recommended_value"] is None):
-            continue
-        nxt = next((x for x in recs[i + 1:] if x["tag"] == r["tag"]), None)
-        if nxt and nxt["action"] == "undone":
             continue
         decided = dt.datetime.fromisoformat(r["decided_at"])
         made = pd.to_datetime(r["advisory_ts"], errors="coerce") if r["advisory_ts"] else None
