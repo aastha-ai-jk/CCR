@@ -252,15 +252,20 @@ def _counted(start: str) -> set[tuple]:
     screen whose value differs from that parameter's last counted one by more
     than the check tolerance (CHECK_TOL: coal 2.5, SAFR 1.5, calciner temp 5).
     A parameter counts at most once per 10-min slot (SLOT_MIN), so a day holds
-    at most 432. Smaller moves are the same advice still standing."""
+    at most 432. Smaller moves are the same advice still standing. Every day
+    starts fresh (its first advice counts), so a day's count does not depend
+    on how far back the window reaches."""
     adv = db.q("SELECT day, ts, recommended_json, predicted_temp, issued, shown FROM advisor_log "
                "WHERE day >= :s AND data_source != 'historical' ORDER BY id", {"s": start})
     adv["ts"] = pd.to_datetime(adv["ts"], format="mixed", errors="coerce")
     out: set[tuple] = set()
     anchor: dict = {}
+    day = None
     for r in adv.itertuples():
         if not (r.shown == 1 or (pd.isna(r.shown) and r.issued)) or pd.isna(r.ts):
             continue
+        if r.day != day:
+            day, anchor = r.day, {}
         cur = dict(json.loads(r.recommended_json or "{}"))
         if pd.notna(r.predicted_temp):
             cur[analysis.CV] = float(r.predicted_temp)
