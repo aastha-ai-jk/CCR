@@ -12,6 +12,9 @@ import { Panel, Stat, Badge, Loading } from "@/components/ui";
 
 // T+10 avg error colour limit (°C): good up to GOOD_C, red above
 const GOOD_C = 10;
+// Model accuracy section hidden 13 Nov 2026 (after the 8-12 Nov retrain bug);
+// set true again around 23 Nov 2026.
+const SHOW_ACCURACY = false;
 const DP: Record<string, number> = { "467RL400_TPH": 2, "261WF080_TPH": 2, "423CI400_TT_4": 1 };
 const SHORT: Record<string, string> = { "467RL400_TPH": "coal", "261WF080_TPH": "SAFR", "423CI400_TT_4": "PC temp" };
 const isoDay = (d: Date) =>
@@ -106,7 +109,7 @@ export default function Admin() {
         </>
       )}
 
-      <AccuracyPanel day={day} />
+      {SHOW_ACCURACY && <AccuracyPanel day={day} />}
     </div>
   );
 }
