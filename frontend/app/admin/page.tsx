@@ -94,7 +94,7 @@ export default function Admin() {
           <Panel title="Declined Decision Report"
             right={<span className="text-xs text-[var(--muted)]">Plant reading at the target time within {tolText}</span>}>
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-              <Stat label="Declined recommendations" value={data.declines} sub={`${data.day} · coal, SAFR, PC temp`} />
+              <Stat label="Declined recommendations" value={data.declines} sub={`${data.day} · ${data.day >= "2026-11-16" ? "SAFR, PC temp" : "coal, SAFR, PC temp"}`} />
               <Stat label="Decline not correct" value={data.counts.reached} tone={data.counts.reached ? "warn" : "ink"}
                 sub={checked ? `${Math.round((data.counts.reached / checked) * 100)}% of checked declines` : "—"} />
               <Stat label="Decline justified" value={data.counts.not_reached} tone={data.counts.not_reached ? "ok" : "ink"}
@@ -115,7 +115,7 @@ export default function Admin() {
 }
 
 // Section 2: operator actions per day for the last 7 days (+ total), per
-// parameter (coal, SAFR, calciner temp), at most once per parameter per 10 min.
+// parameter (SAFR, calciner temp; coal only up to 15 Nov), at most once per parameter per 10 min.
 // Total = accepted + declined; declines are split by the target-time check into
 // not correct (plant reached the advice anyway) and justified. Declines still
 // waiting for their target time are in neither split. Click a row to open that day below.
@@ -141,7 +141,7 @@ function SummaryPanel({ day, onPick }: { day: string; onPick: (d: string) => voi
   );
   return (
     <Panel title="Recommendation Summary"
-      right={<span className="text-xs text-[var(--muted)]">last 7 days · per parameter · max 1 per parameter per 10 min · click a day to open it below</span>}>
+      right={<span className="text-xs text-[var(--muted)]">last 7 days · per parameter (coal not counted from 16 Nov) · max 1 per parameter per 10 min · click a day to open it below</span>}>
       {!rows ? <Loading /> : rows.length === 0 ? (
         <div className="text-sm text-[var(--muted)]">No recommendations in the last 7 days.</div>
       ) : (

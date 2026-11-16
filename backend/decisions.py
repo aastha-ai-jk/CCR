@@ -222,6 +222,18 @@ _last_rec: dict = {}
 
 
 SLOT_MIN = 10   # one recommendation per parameter per 10-min slot: at most 144 x 3 = 432 a day
+# Plant 16 Nov: calciner coal is now an instantaneous value (re-searched every
+# advisor run), so it is no longer counted from this date: SAFR + calciner temp
+# only, at most 144 x 2 = 288 a day. Days before keep coal (432 cap).
+COAL_TAG = "467RL400_TPH"
+COAL_UNCOUNTED_FROM = "2026-11-16"
+
+
+def _counts(tag: str, day) -> bool:
+    """Does this parameter count in the admin dashboard on this day?"""
+    if tag not in CHECK_TOL:
+        return False
+    return not (tag == COAL_TAG and str(day) >= COAL_UNCOUNTED_FROM)
 
 
 def _slot(ts) -> int | None:
@@ -236,7 +248,7 @@ def _standing(recs: list[dict]) -> dict[tuple, int]:
     ``recs`` in id order. Every admin panel counts decisions through this."""
     out: dict[tuple, int] = {}
     for r in recs:
-        if r["tag"] not in CHECK_TOL:
+        if not _counts(r["tag"], r["day"]):
             continue
         s = _slot(r["advisory_ts"]) if r.get("advisory_ts") else None
         k = (r["day"], _slot(r["decided_at"]) if s is None else s, r["tag"])
@@ -253,7 +265,7 @@ def _counted(start: str) -> tuple[set[tuple], dict[tuple, int | None]]:
     screen whose value differs from that parameter's last counted one by more
     than the check tolerance (CHECK_TOL: coal 2.5, SAFR 1.5, calciner temp 5).
     A parameter counts at most once per 10-min slot (SLOT_MIN), so a day holds
-    at most 432. Smaller moves are the same advice still standing. Every day
+    at most 432 (288 from COAL_UNCOUNTED_FROM: coal no longer counted). Smaller moves are the same advice still standing. Every day
     starts fresh (its first advice counts), so a day's count does not depend
     on how far back the window reaches. Also returns (day, slot) -> 1 when
     Accept was blocked at some point the advice was shown in that slot, 0 when
@@ -281,7 +293,7 @@ def _counted(start: str) -> tuple[set[tuple], dict[tuple, int | None]]:
         else:
             blocked.setdefault((r.day, s), None)
         for t, v in cur.items():
-            if t in CHECK_TOL and (t not in anchor or abs(float(v) - anchor[t]) > CHECK_TOL[t]):
+            if _counts(t, r.day) and (t not in anchor or abs(float(v) - anchor[t]) > CHECK_TOL[t]):
                 out.add((r.day, s, t))
                 anchor[t] = float(v)
     return out, blocked
@@ -578,6 +590,8 @@ def days() -> list[dict]:
         o = out.setdefault(r["day"], {"day": r["day"], "n": 0, "accepted": 0, "declined": 0})
         o["n"] += 1
         k = (r["day"], r["tag"])
+        if not _counts(r["tag"], r["day"]):
+            continue                              # same parameters as the admin tiles
         if r["action"] == "undone":
             if last.get(k) in ("accepted", "declined"):
                 o[last[k]] -= 1

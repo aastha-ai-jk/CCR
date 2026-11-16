@@ -497,7 +497,7 @@ tickClock(); setInterval(tickClock,1000);
 /* ---------------- parameters ---------------- */
 var PARAMS=[
  {id:"calc_out",name:"Calciner outlet temperature",loc:"Calciner outlet · 423CI400_TT_4",unit:"°C",cur:872.6,rec:878.0,dec:1,impact:[]},
- {id:"calc_coal",name:"Calciner coal firing",loc:"Calciner coal feeder · 467RL400_TPH",unit:"TPH",cur:18.4,rec:19.1,dec:1,impact:[]},
+ {id:"calc_coal",name:"Calciner coal firing · instantaneous",loc:"Calciner coal feeder · 467RL400_TPH · updates every run",unit:"TPH",cur:18.4,rec:19.1,dec:1,impact:[]},
  {id:"safr",name:"SAFR feed rate",loc:"Solid AFR, calciner · 261WF080_TPH",unit:"TPH",cur:6.5,rec:7.2,dec:1,impact:[]}
 ];
 
@@ -1194,7 +1194,7 @@ function pollAdvisor(){
     if(fresh){
       advMeta="recommended for "+(clockAt(a.ts,h)||"next "+h+" min")
         +" · computed at "+(clockAt(a.ts,0)||"—")
-        +(a.held&&a.held_since&&a.held_since!==a.ts?" · advice held since "+(clockAt(a.held_since,0)||"—")+" (still the best option)":"")
+        +(a.held&&a.held_since&&a.held_since!==a.ts?" · SAFR held since "+(clockAt(a.held_since,0)||"—")+(a.coal_instant?", coal instantaneous":" (still the best option)"):"")
         +(a.computing?" · updating…":"")
         +(a.all_limits_met===false?" · no setting meets every limit — closest option shown":"");
     }else if(a.available){

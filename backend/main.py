@@ -5,6 +5,7 @@ Run:  python -m uvicorn backend.main:app --reload --port 8000
 from __future__ import annotations
 
 import datetime as _dt
+import logging
 import threading
 import time
 
@@ -16,6 +17,8 @@ from pydantic import BaseModel
 
 import config
 from backend import db, analysis
+
+log = logging.getLogger("ccr.main")
 
 app = FastAPI(title="Calcination Combustion Control API", version="0.1")
 app.add_middleware(
@@ -408,8 +411,10 @@ _advisor_lock = threading.Lock()
 # inputs of the last advisory (any of these by more than its threshold), at
 # most every ADVISOR_MIN_GAP_SEC, and at least every refresh_sec regardless.
 ADVISOR_MIN_GAP_SEC = 15
+COAL_REFRESH_SEC = 15      # instantaneous coal: coal-only re-search between full runs
+# Calciner coal is not a trigger since 16 Nov: its moves are followed by the
+# 15-s coal-only refresh (_coal_run), which needs the full run to be idle.
 ADVISOR_TRIGGER = {analysis.CV: 2.0,              # calciner outlet temp, degC
-                   "467RL400_TPH": 0.3,           # calciner coal, t/h
                    "261WF080_TPH": 0.5,           # SAFR, t/h
                    "LAFR_FT": 50.0, "K3V10_F1": 50.0,   # LAFR (held, still a model input), l/h
                    config.KILN_FEED_TAG: 5.0}     # kiln feed, t/h
@@ -426,24 +431,119 @@ def _advisor_inputs_moved(values: dict) -> bool:
     return False
 
 
+def _instant_coal(r: dict, inputs: dict, twin_opt) -> dict:
+    """Instantaneous coal firing (plant, 16 Nov): when the set is HELD (A8), SAFR
+    stays at the held value but coal is searched afresh on the latest data, with
+    the same rules (least coal, band at T+horizon, ±10 % move cap, limits). The
+    T+10 temperature, band check and economics then follow the new coal, so the
+    screen shows one consistent set. A fresh (not held) set is already
+    instantaneous. Any failure keeps the held set."""
+    COAL, SAFR = twin_opt.COAL, "261WF080_TPH"
+    rec = r.get("recommended") or {}
+    if not r.get("held") or rec.get(COAL) is None or rec.get(SAFR) is None:
+        return r
+    try:
+        c = twin_opt.optimize({**inputs, SAFR: float(rec[SAFR])}, levers=[COAL],
+                              steps={COAL: (_adv_setting("step", {}) or {}).get(COAL, 0.1)},
+                              n_trials=int(_adv_setting("coal_trials", 30)),
+                              clinker=_guard_lab(), objective_mode="least_coal",
+                              horizon=int(_adv_setting("horizon_min", twin_opt.ADVISOR_HORIZON)),
+                              max_move_pct=float(_adv_setting("max_move_pct", 10.0)))
+        if c.get("error") or (c.get("recommended") or {}).get(COAL) is None:
+            return r
+        out = dict(r)
+        out["recommended"] = {**rec, COAL: c["recommended"][COAL]}
+        for k in ("predicted", "trajectory", "reach_min", "band_confidence", "in_band",
+                  "all_limits_met", "limits_excess", "interlocks", "quality"):
+            out[k] = c.get(k)
+        base_t = (r.get("baseline") or {}).get("temp")
+        new_t = ((c.get("predicted") or {}).get("temp") or {}).get("mean")
+        # "current" = the inputs of THIS search (a 15-s coal refresh has newer ones)
+        base_lv = {**((r.get("baseline") or {}).get("levers") or {}),
+                   **{t: round(float(inputs[t]), 2) for t in (COAL, SAFR) if inputs.get(t) is not None}}
+        out["baseline"] = {**(r.get("baseline") or {}), "levers": base_lv}
+        out["delta"] = {**(r.get("delta") or {}),
+                        "coal": round(float(c["recommended"][COAL]) - float(base_lv[COAL]), 2),
+                        "temp": None if base_t is None or new_t is None else round(new_t - base_t, 1)}
+        out["objective"] = {**(r.get("objective") or {}), "coal": c["recommended"][COAL]}
+        out["heat"] = {**(r.get("heat") or {}),
+                       "recommended_kcal_h": (c.get("heat") or {}).get("recommended_kcal_h")}
+        eco_r, eco_b = (c.get("economics") or {}).get("recommended"), (r.get("economics") or {}).get("baseline")
+        if eco_r and eco_b:
+            out["economics"] = {**r["economics"], "recommended": eco_r, "savings": {
+                "coal_tph": round(eco_b["coal_tph"] - eco_r["coal_tph"], 2),
+                "cost_per_ton": round(eco_b["cost_per_ton"] - eco_r["cost_per_ton"], 1),
+                "tsr_pts": round(eco_r["tsr_pct"] - eco_b["tsr_pct"], 2),
+                "specific_heat_kcal_kg": round(eco_b["specific_heat_kcal_kg"] - eco_r["specific_heat_kcal_kg"], 1),
+                "is_estimate": eco_r.get("is_estimate")}}
+        out["coal_instant"] = True
+        out["hold_reason"] = (r.get("hold_reason") or "kept") + "; coal re-searched (instantaneous)"
+        return out
+    except Exception:
+        log.warning("instantaneous coal search failed; held set kept", exc_info=True)
+        return r
+
+
+def _advisor_inputs() -> tuple[dict, dict, dict]:
+    """Live snapshot + model inputs for an advisor run. "Current" value of each
+    advised lever = its 2-minute mean, not the noisy 2-s reading (SAFR
+    weigh-feeder jumps 1-2 t/h between samples): anchors the ±10 % move cap
+    (A10) and the held-advice check (A8)."""
+    s, snap, conditions, levers = _live_inputs()
+    try:
+        from backend.decisions import _lever_series
+        from twin.optimize import ADVISOR_LEVERS
+        t_now = _dt.datetime.fromisoformat(str(s["ts"]))
+        for t in ADVISOR_LEVERS:
+            m = _lever_series(t, t_now - _dt.timedelta(seconds=int(_adv_setting("current_avg_sec", 120))), t_now)
+            if len(m) >= 3:
+                conditions[t] = levers[t] = float(m.mean())
+    except Exception:
+        pass                                          # fall back to the instant reading
+    return s, conditions, levers
+
+
+def _coal_run() -> None:
+    """Instantaneous coal (plant, 16 Nov): between full advisor runs, every
+    coal_refresh_sec (15 s) re-search ONLY coal on the latest data, SAFR kept at
+    the advice on screen. The full run (every refresh_sec, or when the plant
+    moves) still decides SAFR with the A8 hold."""
+    try:
+        from twin import optimize as twin_opt
+        prev = _advisor.get("result") or {}
+        if not prev.get("recommended"):
+            return
+        s, conditions, levers = _advisor_inputs()
+        feed = s["values"].get(config.KILN_FEED_TAG)
+        if (feed is None or float(feed) < config.KILN_FEED_MIN_TPH
+                or prev.get("source") != s["source"]):
+            return                                    # the full run handles these
+        r = _instant_coal({**prev, "held": True}, {**conditions, **levers}, twin_opt)
+        if not r.get("coal_instant"):
+            return
+        r["ts"], r["source"] = s["ts"], s["source"]
+        r["held_since"] = prev.get("held_since") or prev.get("ts")
+        r["lab_inputs"] = dict(_LAB_INFO["info"])
+        from twin import reasoning
+        reasoning.attach(r)
+        with _advisor_lock:
+            if _advisor.get("result") is not prev or _advisor["busy"]:
+                return                                # a full run replaced it meanwhile
+            from backend import decisions
+            r["log_id"] = decisions.log_advisory(r)
+            _advisor["result"] = r
+    except Exception:
+        log.warning("coal refresh failed", exc_info=True)
+    finally:
+        _advisor["coal_at"] = time.time()
+        _advisor["coal_busy"] = False
+
+
 def _advisor_run() -> None:
     try:
         from twin import optimize as twin_opt
-        s, snap, conditions, levers = _live_inputs()
+        s, conditions, levers = _advisor_inputs()
         _advisor["inputs"] = {t: s["values"].get(t) for t in ADVISOR_TRIGGER}
-        # "Current" value of each advised lever = its 2-minute mean, not the
-        # noisy 2-s reading (SAFR weigh-feeder jumps 1-2 t/h between samples):
-        # anchors the ±10 % move cap (A10) and the held-advice check (A8).
-        try:
-            from backend.decisions import _lever_series
-            from twin.optimize import ADVISOR_LEVERS
-            t_now = _dt.datetime.fromisoformat(str(s["ts"]))
-            for t in ADVISOR_LEVERS:
-                m = _lever_series(t, t_now - _dt.timedelta(seconds=int(_adv_setting("current_avg_sec", 120))), t_now)
-                if len(m) >= 3:
-                    conditions[t] = levers[t] = float(m.mean())
-        except Exception:
-            pass                                      # fall back to the instant reading
         # Kiln stopped / not in load: no fuel advice (control actions only apply
         # above KILN_FEED_MIN_TPH, per the combustion control logic).
         feed = s["values"].get(config.KILN_FEED_TAG)
@@ -491,6 +591,7 @@ def _advisor_run() -> None:
                               horizon=int(_adv_setting("horizon_min", twin_opt.ADVISOR_HORIZON)),
                               # A10: at most ±10 % of the live value per recommendation
                               max_move_pct=float(_adv_setting("max_move_pct", 10.0)))
+        r = _instant_coal(r, {**conditions, **levers}, twin_opt)
         r["ts"], r["source"] = s["ts"], s["source"]
         r["held_since"] = held_since if r.get("held") and incumbent else s["ts"]
         r["lab_inputs"] = dict(_LAB_INFO["info"])      # which lab values voted, and their age
@@ -522,7 +623,17 @@ def twin_advisor(screen: int = 0):
                or age > float(_adv_setting("refresh_sec", ADVISOR_REFRESH_SEC))
                or (age > float(_adv_setting("min_gap_sec", ADVISOR_MIN_GAP_SEC))
                    and _advisor_inputs_moved(s["values"])))
-        if due and not _advisor["busy"]:
+        # Instantaneous coal (16 Nov) goes first: a coal-only refresh whenever the
+        # coal on screen is older than coal_refresh_sec (15 s); the full run (SAFR
+        # + coal, A8 hold) takes the next free moment. Never both at once.
+        coal_due = (bool((_advisor["result"] or {}).get("recommended"))
+                    and time.time() - max(_advisor["computed_at"], _advisor.get("coal_at", 0.0))
+                    > float(_adv_setting("coal_refresh_sec", COAL_REFRESH_SEC)))
+        idle = not _advisor["busy"] and not _advisor.get("coal_busy")
+        if idle and coal_due:
+            _advisor["coal_busy"] = True
+            threading.Thread(target=_coal_run, daemon=True).start()
+        elif idle and due:
             _advisor["busy"] = True
             threading.Thread(target=_advisor_run, daemon=True).start()
     cat = db.tag_catalog().set_index("tag")

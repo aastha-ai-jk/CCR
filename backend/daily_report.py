@@ -68,10 +68,11 @@ def render(rep: dict) -> tuple[str, str, str]:
                  _pct(b["accepted"] + b["declined"], b["total"]))
         lines.append(" | ".join(str(c) for c in cells))
         trs.append("<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>")
-    note = ("Counted per parameter (calciner coal, SAFR, calciner temp): a new recommendation "
+    note = ("Counted per parameter (SAFR, calciner temp; calciner coal only up to 15 Nov 2026, "
+            "it is an instantaneous value since 16 Nov): a new recommendation "
             "is advice shown on the CCR screen that changed meaningfully (coal > 2.5 t/h, "
             "SAFR > 1.5 t/h, calciner temp > 5 C), at most once per parameter per 10 min "
-            "(max 432 a day). One Accept all click counts for each parameter. "
+            "(max 288 a day; 432 up to 15 Nov). One Accept all click counts for each parameter. "
             "Response rate = (accepted + declined) / total. Advisory only.")
     day_trs = "".join(
         f"<tr><td>{dt.date.fromisoformat(r['day']):%d %b %Y}</td><td>{r['total']}</td>"
