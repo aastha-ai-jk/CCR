@@ -431,6 +431,15 @@ def _advisor_inputs_moved(values: dict) -> bool:
     return False
 
 
+COAL_MAX_MOVE_PCT = 5.0     # plant 17 Nov: calciner coal moves at most ±5 % per advice
+
+
+def _coal_move_pct(twin_opt) -> dict:
+    """Per-lever move cap: calciner coal ±5 % of its live value (SAFR keeps the
+    general ±10 %). plant_settings advisor.coal_max_move_pct overrides."""
+    return {twin_opt.COAL: float(_adv_setting("coal_max_move_pct", COAL_MAX_MOVE_PCT))}
+
+
 def _instant_coal(r: dict, inputs: dict, twin_opt) -> dict:
     """Instantaneous coal firing (plant, 16 Nov): when the set is HELD (A8), SAFR
     stays at the held value but coal is searched afresh on the latest data, with
@@ -448,7 +457,8 @@ def _instant_coal(r: dict, inputs: dict, twin_opt) -> dict:
                               n_trials=int(_adv_setting("coal_trials", 30)),
                               clinker=_guard_lab(), objective_mode="least_coal",
                               horizon=int(_adv_setting("horizon_min", twin_opt.ADVISOR_HORIZON)),
-                              max_move_pct=float(_adv_setting("max_move_pct", 10.0)))
+                              max_move_pct=float(_adv_setting("max_move_pct", 10.0)),
+                              lever_move_pct=_coal_move_pct(twin_opt))
         if c.get("error") or (c.get("recommended") or {}).get(COAL) is None:
             return r
         out = dict(r)
@@ -590,7 +600,9 @@ def _advisor_run() -> None:
                               objective_mode="least_coal",   # plant aim; settings can override
                               horizon=int(_adv_setting("horizon_min", twin_opt.ADVISOR_HORIZON)),
                               # A10: at most ±10 % of the live value per recommendation
-                              max_move_pct=float(_adv_setting("max_move_pct", 10.0)))
+                              # (calciner coal ±5 %, plant 17 Nov)
+                              max_move_pct=float(_adv_setting("max_move_pct", 10.0)),
+                              lever_move_pct=_coal_move_pct(twin_opt))
         r = _instant_coal(r, {**conditions, **levers}, twin_opt)
         r["ts"], r["source"] = s["ts"], s["source"]
         r["held_since"] = held_since if r.get("held") and incumbent else s["ts"]

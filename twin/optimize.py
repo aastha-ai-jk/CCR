@@ -251,7 +251,8 @@ def optimize(conditions: dict, n_trials: int = 200,
              levers: list[str] | None = None, clinker: dict | None = None,
              objective_mode: str | None = None, horizon: int | None = None,
              max_move_pct: float | None = None, steps: dict | None = None,
-             incumbent: dict | None = None, hold: dict | None = None) -> dict:
+             incumbent: dict | None = None, hold: dict | None = None,
+             lever_move_pct: dict | None = None) -> dict:
     """Run the Optuna search and return the contract's advisory dict.
 
     ``levers`` picks which MVs to search (default: the four calciner fuel
@@ -265,6 +266,8 @@ def optimize(conditions: dict, n_trials: int = 200,
     count in heat, TSR and cost.
     ``max_move_pct``: cap each searched lever's move at ± this % of its live
     value (advisor: 10 %), on top of the trust region and plant max steps.
+    ``lever_move_pct`` ({tag: pct}): a tighter cap for single levers (advisor:
+    calciner coal 5 %, plant 17 Nov); the others keep ``max_move_pct``.
     ``steps`` ({tag: step}): candidates on a practical grid (e.g. 0.1 t/h).
     ``incumbent`` ({tag: value}): the advice currently shown. It is re-scored
     on the latest data and KEPT unless the best new option is clearly better
@@ -329,10 +332,11 @@ def optimize(conditions: dict, n_trials: int = 200,
             # the operating envelope for some tags), floored at ±1 unit
             frac = _TRUST_FRAC_KILN if t in KILN_SIDE else _TRUST_FRAC
             r = min((hi - lo) * frac, max(abs(c), 1.0))
-        if max_move_pct is not None:
-            # advisor: one recommendation moves a lever at most ±max_move_pct % of
-            # its live value (floor 0.1 so a lever at ~0 can still be advised)
-            r = min(r, max(abs(c) * float(max_move_pct) / 100.0, 0.1))
+        pct = (lever_move_pct or {}).get(t, max_move_pct)
+        if pct is not None:
+            # advisor: one recommendation moves a lever at most ±pct % of its live
+            # value (floor 0.1 so a lever at ~0 can still be advised); coal 5 %
+            r = min(r, max(abs(c) * float(pct) / 100.0, 0.1))
         b_lo, b_hi = max(lo, c - r), min(hi, c + r)
         s = (steps or {}).get(t)
         if s:                                   # practical grid, e.g. 0.1 t/h
