@@ -528,6 +528,15 @@ def _coal_run() -> None:
         if (feed is None or float(feed) < config.KILN_FEED_MIN_TPH
                 or prev.get("source") != s["source"]):
             return                                    # the full run handles these
+        # Stale SAFR (18 Nov): the plant's SAFR is now >hold.max_dev_pct (10 %) away
+        # from the SAFR on screen -> no coal-only refresh around it; ask for a
+        # full run (SAFR + coal afresh) at the next poll instead.
+        SAFR = "261WF080_TPH"
+        rs, ls = (prev.get("recommended") or {}).get(SAFR), levers.get(SAFR)
+        max_dev = float((_adv_setting("hold", {}) or {}).get("max_dev_pct", 10.0))
+        if rs is not None and ls is not None and                 abs(float(rs) - float(ls)) > max(abs(float(ls)) * max_dev / 100.0, 0.1):
+            _advisor["computed_at"] = 0.0
+            return
         r = _instant_coal({**prev, "held": True}, {**conditions, **levers}, twin_opt)
         if not r.get("coal_instant"):
             return
@@ -593,7 +602,10 @@ def _advisor_run() -> None:
                               incumbent=incumbent,
                               steps=_adv_setting("step", {"467RL400_TPH": 0.1, "261WF080_TPH": 0.1}),
                               hold=_adv_setting("hold", {"temp_c": 2.0, "coal_tph": 0.5,
-                                                         "max_dev_pct": 20.0}),
+                                                         # 18 Nov: 10 (was 20) - drop a held
+                                                         # set once the plant is >10 % away,
+                                                         # so a stale SAFR is not kept
+                                                         "max_dev_pct": 10.0}),
                               n_trials=int(_adv_setting("trials", ADVISOR_TRIALS)),
                               levers=twin_opt.ADVISOR_LEVERS,
                               clinker=_guard_lab(),

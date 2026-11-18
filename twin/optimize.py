@@ -387,10 +387,10 @@ def optimize(conditions: dict, n_trials: int = 200,
             ex += abs(h - base_heat) / base_heat * 100.0
         return ex
 
-    # Heat split (plant 29 Oct, optimizer.heat_split): when total calciner heat
-    # goes UP, the extra kcal come share-wise from each lever (SAFR 0.6, coal
-    # 0.4). The lever named first in SPLIT_ORDER that hits its bound / step cap
-    # passes the rest to the next (coal takes what SAFR cannot). Heat cuts are
+    # Heat split (plant 29 Oct, optimizer.heat_split; 18 Nov: SAFR 0.15, coal
+    # 0.85): when total calciner heat goes UP, the extra kcal come share-wise
+    # from each lever. The lever with the bigger share goes first; if it hits its
+    # bound / step cap it passes the rest to the next. Heat cuts are
     # not split: the least-coal objective cuts coal first, as before.
     split = {t: float(v) for t, v in (_opt_settings().get("heat_split") or {}).items()
              if not t.startswith("_") and v is not None and t in opt_levers}
@@ -412,7 +412,11 @@ def optimize(conditions: dict, n_trials: int = 200,
         if not split_on or dh <= 0:
             return lv, False
         out, rest, limited = dict(lv), dh, False
-        order = sorted(split, key=lambda t: t != SPLIT_ORDER[0])   # SAFR first, coal last
+        # the lever with the BIGGER share goes first; the next takes whatever it
+        # cannot (bound / step cap). 15:85 (plant 18 Nov) -> coal first, SAFR the
+        # rest; ties fall back to SPLIT_ORDER.
+        order = sorted(split, key=lambda t: (-split[t], SPLIT_ORDER.index(t)
+                                             if t in SPLIT_ORDER else 99))
         for i, t in enumerate(order):
             want = rest if i == len(order) - 1 else dh * split[t] / sum(split.values())
             target = base_vals[t] + want / unit_heat[t]
