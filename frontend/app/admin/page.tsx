@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { api, AccuracyResult, AcceptedReachedResult, ActionsResult, DeclinedReachedResult, DeclinedReachedRow, SummaryRow } from "@/lib/api";
 import { Panel, Stat, Badge, Loading } from "@/components/ui";
+import ParamTrends from "@/components/ParamTrends";
 
 // Administrative dashboard — day-wise check of operator DECLINES and ACCEPTS.
 // A recommendation made at time R is for R + horizon (T+10). At that target time
@@ -110,6 +111,8 @@ export default function Admin() {
       )}
 
       {SHOW_ACCURACY && <AccuracyPanel day={day} />}
+
+      <ParamTrends />
     </div>
   );
 }
