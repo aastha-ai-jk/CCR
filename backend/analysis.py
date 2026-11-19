@@ -9,6 +9,7 @@ behind the same API.
 """
 from __future__ import annotations
 
+import threading
 from functools import lru_cache
 
 import numpy as np
@@ -106,8 +107,21 @@ def _classify_state(key: str, value: float | None) -> int | None:
     return 1 if value >= bands[0][1] else 3
 
 
-@lru_cache(maxsize=1)
+# Single-flight: lru_cache alone lets every request that arrives before the
+# first build finishes start its own full-history read; after a restart the
+# pollers (overview / twin future / forecast / advisory) did that 15 at once,
+# took every pooled DB connection and starved all other requests. The lock
+# makes the others wait for the one build without holding a connection.
+_matrix_lock = threading.Lock()
+
+
 def _matrix():
+    with _matrix_lock:
+        return _matrix_build()
+
+
+@lru_cache(maxsize=1)
+def _matrix_build():
     """Matched forward-Δ training set (in-load, gap-safe, sampled).
 
     Confounders C = [current temp, temp trend, PLC state vars]; manipulated

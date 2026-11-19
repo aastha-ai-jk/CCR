@@ -202,7 +202,7 @@ export const api = {
   roadmap: () => get<Milestone[]>("/api/roadmap"),
   overview: () => get("/api/overview"),
   latest: () => get("/api/latest"),
-  series: (tags: string[], p: { start?: string; end?: string; bucket?: string; in_load?: boolean; window?: "day" | "week" | "month" } = {}) => {
+  series: (tags: string[], p: { start?: string; end?: string; bucket?: string; in_load?: boolean; window?: "hour" | "day" | "week" | "month" } = {}) => {
     const q = new URLSearchParams({ tags: tags.join(",") });
     if (p.start) q.set("start", p.start);
     if (p.end) q.set("end", p.end);
