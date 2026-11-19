@@ -124,11 +124,17 @@ def roadmap():
 @app.get("/api/series")
 def series(tags: str = Query(...), start: str | None = None, end: str | None = None,
            bucket: str = "5min", in_load: bool = False, window: str | None = None):
+    # Charts on every open page ask for the same ranges; share one read for 30 s.
+    return _admin_cached(("series", tags, start, end, bucket, in_load, window),
+                         lambda: _series(tags, start, end, bucket, in_load, window), ttl=30)
+
+
+def _series(tags, start, end, bucket, in_load, window):
     tlist = db.safe_tags(tags.split(","))
     if not tlist:
         return {"tags": [], "points": []}
 
-    # A "window" (day|week|month) anchors to the NEWEST data across the
+    # A "window" (hour|day|week|month) anchors to the NEWEST data across the
     # historian AND the live feed (the historian only grows on the weekly
     # ingest — anchoring to it alone left the "live" overview days stale) and
     # picks a bucket so each range shows ~200-300 points. Explicit start/end
@@ -140,9 +146,10 @@ def series(tags: str = Query(...), start: str | None = None, end: str | None = N
         except Exception:
             pass
         end_dt = max(pd.to_datetime(a, format="mixed") for a in anchors if a)
-        spec = {"day": (1, "5min"), "week": (7, "30min"), "month": (30, "3h")}
-        days, wbucket = spec.get(window, (7, "30min"))
-        start = (end_dt - pd.Timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        spec = {"hour": (pd.Timedelta(hours=1), "1min"), "day": (pd.Timedelta(days=1), "5min"),
+                "week": (pd.Timedelta(days=7), "30min"), "month": (pd.Timedelta(days=30), "3h")}
+        span, wbucket = spec.get(window, spec["week"])
+        start = (end_dt - span).strftime("%Y-%m-%d %H:%M:%S")
         end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
         bucket = wbucket
 
@@ -1356,6 +1363,33 @@ def get_advisor_summary(day: str | None = None):
         raise HTTPException(status_code=422, detail=str(e))
 
 
+# Admin results are shared for _ADMIN_TTL_S seconds and computed by one request
+# at a time per key. Each admin panel re-polls every 60 s (and retries) whether or
+# not its last request finished, so several open admin pages used to run the same
+# advisor_log / decision checks side by side; once the backend fell behind they
+# piled up and starved every other endpoint. Failures are not cached.
+_ADMIN_TTL_S = 30
+_admin_cache: dict = {}
+_admin_locks: dict = {}
+_admin_locks_guard = threading.Lock()
+
+
+def _admin_cached(key: tuple, fn, ttl: float | None = None):
+    with _admin_locks_guard:
+        lock = _admin_locks.setdefault(key, threading.Lock())
+    with lock:
+        hit = _admin_cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] < (_ADMIN_TTL_S if ttl is None else ttl):
+            return hit[1]
+        val = fn()
+        now = time.monotonic()
+        _admin_cache[key] = (now, val)
+        if len(_admin_cache) > 256:              # drop entries past the longest TTL (600 s)
+            for k in [k for k, (t, _) in list(_admin_cache.items()) if now - t > 600]:
+                _admin_cache.pop(k, None)
+        return val
+
+
 @app.get("/api/admin/declined-reached")
 def get_declined_reached(day: str | None = None):
     """Admin: declined lever recommendations on one date, each checked for whether
@@ -1363,7 +1397,7 @@ def get_declined_reached(day: str | None = None):
     from fastapi import HTTPException
     from backend import decisions
     try:
-        return _json_safe(decisions.declined_but_reached(day))
+        return _json_safe(_admin_cached(("declined", day), lambda: decisions.declined_but_reached(day)))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -1375,7 +1409,7 @@ def get_accepted_reached(day: str | None = None):
     from fastapi import HTTPException
     from backend import decisions
     try:
-        return _json_safe(decisions.accepted_reached(day))
+        return _json_safe(_admin_cached(("accepted", day), lambda: decisions.accepted_reached(day)))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -1385,14 +1419,14 @@ def get_admin_summary(days: int = Query(30, ge=1, le=365)):
     """Admin: date-wise recommendations shown, accepted, declined (split into
     not correct / justified) and no action."""
     from backend import decisions
-    return _json_safe(decisions.summary_checked(days))
+    return _json_safe(_admin_cached(("summary", days), lambda: decisions.summary_checked(days)))
 
 
 @app.get("/api/admin/performance")
 def get_admin_performance(scope: str = Query("total", pattern="^(total|week)$")):
     """Admin: Advisory Performance summed since 2 Nov (total) or over the last 7 days (week)."""
     from backend import decisions
-    return _json_safe(decisions.performance(scope))
+    return _json_safe(_admin_cached(("performance", scope), lambda: decisions.performance(scope)))
 
 
 @app.get("/api/admin/actions")
@@ -1401,7 +1435,7 @@ def get_admin_actions(scope: str = Query("total", pattern="^(total|week|day)$"),
     from fastapi import HTTPException
     from backend import decisions
     try:
-        return _json_safe(decisions.actions(scope, day))
+        return _json_safe(_admin_cached(("actions", scope, day), lambda: decisions.actions(scope, day)))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
