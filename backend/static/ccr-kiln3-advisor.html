@@ -633,9 +633,9 @@ function valOf(p){
 }
 function blockText(p){
   var g=guardOf(p), bits=[];
-  if(g) bits.push("Guardrail: "+guardText(p,g));
+  if(g) bits.push("GR4 · Operating limit: "+guardText(p,g));
   // GR1: live CO / O2 unsafe -> a move that ADDS fuel (or heat) is blocked
-  if(COMB.length&&dirOf(p)==="up") bits.push("Combustion: live "+combText()+" — no fuel increase");
+  if(COMB.length&&dirOf(p)==="up") bits.push("GR1 · Live CO/O₂: "+combText()+" — no fuel increase");
   valOf(p).forEach(function(i){ if(!isFeedDown(i)) bits.push("Data check: "+i.tag+" "+i.check+" — "+i.detail); });
   return bits.join(". ");
 }
@@ -643,10 +643,10 @@ function blockText(p){
 // no banner, no beep, Accept still allowed. Safety stays red (blockText).
 function cautionText(){
   var bits=[];
-  if(DIRCHK&&DIRCHK.flag) bits.push("Direction: "+DIRCHK.reason);           // GR2
-  if(DRIFT&&DRIFT.flag) bits.push("Model drift: "+DRIFT.reason);            // GR6
-  if(UNCERT&&UNCERT.flag) bits.push("Uncertain forecast: "+UNCERT.reason);  // GR7
-  if(HEATCHK&&HEATCHK.flag) bits.push("Heat change: "+HEATCHK.reason);      // GR8
+  if(DIRCHK&&DIRCHK.flag) bits.push("GR2 · Direction: "+DIRCHK.reason);           // GR2
+  if(DRIFT&&DRIFT.flag) bits.push("GR6 · Model drift: "+DRIFT.reason);            // GR6
+  if(UNCERT&&UNCERT.flag) bits.push("GR7 · Uncertain forecast: "+UNCERT.reason);  // GR7
+  if(HEATCHK&&HEATCHK.flag) bits.push("GR8 · Heat change: "+HEATCHK.reason);      // GR8
   return bits.join(". ");
 }
 function guardText(p,g){
@@ -1064,16 +1064,16 @@ function paintClinker(g){
   var txt;
   if(g.active){
     el.className="clknote is-guard";
-    txt="<b>Quality guard on</b> — "+esc(g.reasons.join("; "))+" (lab "+esc(lab)+"). "
+    txt="<b>Quality guard on</b> — "+esc(g.reasons.map(function(r){return (/DOC/.test(r)?"GR3 · ":"GR5 · ")+r;}).join("; "))+" (lab "+esc(lab)+"). "
       +({no_heat_cut:"Recommendations will not cut total calciner heat.",
          no_heat_rise:"Recommendations will not raise total calciner heat.",
          hold_heat:"Conflicting signals: total heat held steady."}[g.direction]||"");
   }else if(g.status==="in_zone"){
     el.className="clknote is-ok";
-    txt="<b>Clinker and hot meal in quality zone</b> — "+esc(vals.join(", "))+" (lab "+esc(lab)+").";
+    txt="<b>GR3 / GR5 · Clinker and hot meal in quality zone</b> — "+esc(vals.join(", "))+" (lab "+esc(lab)+").";
   }else{
     el.className="clknote";
-    txt="Clinker guard inactive — no lab result in the last "+g.max_age_h+" h"
+    txt="GR3 / GR5 · Clinker guard inactive — no lab result in the last "+g.max_age_h+" h"
       +(vals.length?" (latest: "+esc(vals.join(", "))+", "+esc(lab)+")":"")+".";
   }
   el.innerHTML=txt; el.hidden=false;
@@ -1163,10 +1163,10 @@ function paintGuard(gr,val){
       var p=PARAMS.filter(function(x){return TAGS[x.id]===t;})[0];
       return p?p.name+" — "+guardText(p,GUARD[t]):t;
     });
-    html.push("<b>Guardrail breach</b> — "+esc(names.join(" · ")));
+    html.push("<b>GR4 · Operating limit breach</b> — "+esc(names.join(" · ")));
   }
   if(COMB.length){
-    html.push("<b>Live CO/O₂ outside safety limit</b> — "+esc(combText())
+    html.push("<b>GR1 · Live CO/O₂ outside safety limit</b> — "+esc(combText())
       +". No recommendation that adds fuel can be accepted; cuts are allowed");
   }
   if(errs.length){
