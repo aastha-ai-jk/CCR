@@ -79,6 +79,11 @@ def record(body: dict, advisory: dict | None, snapshot: dict) -> dict:
     note = (body.get("note") or "").strip()[:MAX_NOTE] or None
     if action == "declined" and not reason:
         raise ValueError("a decline needs a reason")
+    if action in ("accepted", "declined"):
+        until = locked_until(tag)
+        if until:
+            raise ValueError(f"last decision on {tag} is still settling: next recommendation "
+                             f"at {until[11:16]}")
 
     now = dt.datetime.now()
     adv = advisory if advisory and "recommended" in advisory else {}
@@ -121,6 +126,59 @@ def record(body: dict, advisory: dict | None, snapshot: dict) -> dict:
     return row
 
 
+# Decision lock (plant, 19 Nov; reverses the 29 Oct "reopen at once"): after an
+# Accept / Decline the parameter stays closed until its target time (decision +
+# lock_min, default the 10-min horizon) so the effect of the last move shows in
+# the temperature before the next one -- avoids stacking moves (over-correction).
+# Undo reopens it at once. plant_settings advisor.decision_lock_min overrides.
+def lock_min() -> float:
+    try:
+        import config
+        v = (config.plant_settings().get("advisor") or {}).get("decision_lock_min")
+        if v is not None:
+            return float(v)
+        from twin.optimize import ADVISOR_HORIZON
+        return float(ADVISOR_HORIZON)
+    except Exception:
+        return 10.0
+
+
+def _status(recs: list[dict], now: dt.datetime | None = None) -> dict[str, dict]:
+    """Latest status per tag from today's rows (newest first): accepted / declined
+    while inside the lock, else open; an undo withdraws the decision before it."""
+    now = now or dt.datetime.now()
+    lock = dt.timedelta(minutes=lock_min())
+    status: dict[str, dict] = {}
+    undone: dict[str, int] = {}
+    for r in recs:                                   # newest -> oldest
+        tag = r["tag"]
+        if tag in status:
+            continue
+        if r["action"] == "undone":
+            undone[tag] = undone.get(tag, 0) + 1
+            continue
+        if undone.get(tag):
+            undone[tag] -= 1
+            continue
+        until = dt.datetime.fromisoformat(r["decided_at"]) + lock
+        st = r["action"] if now < until else "open"
+        status[tag] = {"status": st, "decided_at": r["decided_at"], "reason": r["reason"],
+                       "note": r["note"], "param_id": r["param_id"],
+                       "valid_until": until.isoformat(timespec="seconds")}
+    return status
+
+
+def locked_until(tag: str) -> str | None:
+    """valid_until of a still-locked decision on this tag today, else None."""
+    _ensure()
+    day = dt.date.today().isoformat()
+    rows = db.q("SELECT tag, action, decided_at, reason, note, param_id FROM operator_decisions "
+                "WHERE day = :d AND tag = :t ORDER BY id DESC LIMIT 50", {"d": day, "t": tag})
+    recs = rows.where(pd.notna(rows), None).to_dict("records") if len(rows) else []
+    s = _status(recs).get(tag)
+    return s["valid_until"] if s and s["status"] != "open" else None
+
+
 def list_day(day: str | None = None, limit: int = 500) -> dict:
     """Decisions for one date (default today), newest first, plus counts and
     each parameter's latest status (accepted / declined / open)."""
@@ -131,16 +189,7 @@ def list_day(day: str | None = None, limit: int = 500) -> dict:
                 "ORDER BY id DESC LIMIT :n", {"d": day, "n": int(limit)})
     rows = rows.drop(columns=["context_json"]) if len(rows) else rows
     recs = rows.where(pd.notna(rows), None).to_dict("records") if len(rows) else []
-    # A decision closes ITS recommendation only: the row reopens on the advisor
-    # at once with the next recommendation (plant, 29 Oct; was: held until the
-    # advice's T+10 target time). The decision itself stays logged.
-    status: dict[str, dict] = {}
-    for r in reversed(recs):                         # oldest -> newest
-        until = dt.datetime.fromisoformat(r["decided_at"])
-        st = "open"
-        status[r["tag"]] = {"status": st, "decided_at": r["decided_at"], "reason": r["reason"],
-                            "note": r["note"], "param_id": r["param_id"],
-                            "valid_until": until.isoformat(timespec="seconds")}
+    status = _status(recs)
     counts = {a: sum(1 for r in recs if r["action"] == a) for a in ACTIONS}
     return {"day": day, "n": len(recs), "counts": counts,
             "status": status, "rows": recs}

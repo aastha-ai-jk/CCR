@@ -694,7 +694,7 @@ function rowHTML(p){
     h+='<div class="logged"><span>'+(st.status==="accepted"
         ? 'Accepted at <b>'+esc(e?e.time:"—")+'</b>'
         : 'Declined at <b>'+esc(e?e.time:"—")+'</b> — <b>'+esc(st.reason||"")+'</b>'+(st.note?'. Note: '+esc(st.note):''))+
-       '</span></div>';
+       '</span><span> · next recommendation at <b>'+hhmm(st.validUntil)+'</b></span></div>';
   }
   h+='</div></div>';
   return h;
@@ -715,13 +715,30 @@ function setBlock(){
   if(feedDown()) bits.push("live feed down");
   return bits;
 }
+// Lock after a decision (19 Nov): Accept / Decline stay disabled until the
+// decision's target time; the server enforces the same lock (HTTP 422).
+var LOCK_MIN=10;
+function hhmm(d){ return d?pad(d.getHours())+":"+pad(d.getMinutes()):"—"; }
+function nextAt(){
+  var t=null; PARAMS.forEach(function(p){ var u=state[p.id].validUntil;
+    if(state[p.id].status!=="open"&&u&&(!t||u<t)) t=u; });
+  return t;
+}
 // Undo: only for the operator's OWN click on this screen, for UNDO_SEC after it
 // (29 Oct, plant). The cards reopen at once with the next recommendation.
 var UNDO_SEC=120;
 function undoable(){ return SET.lastClick&&Date.now()-SET.lastClick.at<UNDO_SEC*1000?SET.lastClick:null; }
 function setBarHTML(){
   var open=openRecs(), n=open.length, h='', ls=undoable();
-  if(!n) return h;
+  if(!n){
+    h+='<div class="actions">';
+    h+= '<button class="btn btn--accept" disabled>Accept all</button>';
+    h+= '<button class="btn btn--decline" disabled>Decline all</button>';
+    if(ls) h+='<button class="btn btn--undo" data-act="undo"'+(busy?' disabled':'')+'>Undo</button>';
+    h+= '<span class="actions__note">Letting the last decision take effect — next recommendation at <b>'+hhmm(nextAt())+'</b>.</span>';
+    h+='</div>';
+    return h;
+  }
   var blk=setBlock(), all=n===PARAMS.length?"all":n+" open";
   h+='<div class="actions">';
   h+= '<button class="btn btn--accept" data-act="accept"'+(blk.length||busy?' disabled':'')+'>Accept '+all+'</button>';
@@ -753,8 +770,11 @@ function postSet(recs,action,reason,note){
           st.status="open"; st.reason=null; st.note="";
           for(var i=log.length-1;i>=0;i--){ if(log[i].id===p.id){ log.splice(i,1); break; } }
         }else{
-          // logged; the card reopens at once with the next recommendation
-          st.status="open"; st.reason=null; st.note="";
+          // logged; the card stays closed until its target time (decision +
+          // 10 min, 19 Nov) so the move shows in the temperature first;
+          // loadDecisions() then syncs the exact time from the server
+          st.status=action; st.reason=reason||null; st.note=note||"";
+          st.validUntil=new Date(Date.now()+LOCK_MIN*60000);
           log.push(logEntry(row));
         }
       });
@@ -779,6 +799,7 @@ document.getElementById("setBar").addEventListener("click",function(ev){
     promise.then(function(){
       toast(okMsg,kind);
       SET.lastClick=click||null;              // Undo shows for this click only
+      loadDecisions();                         // exact lock time from the server
       if(click) setTimeout(function(){ if(!SET.declining&&!busy) render(); },UNDO_SEC*1000+500);
     })
       .catch(function(e){ toast("Not saved: "+e.message,"dec"); })
