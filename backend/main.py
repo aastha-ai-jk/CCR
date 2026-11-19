@@ -677,7 +677,7 @@ def twin_advisor(screen: int = 0):
     # Hard roof / floor (backend/guardrails.py): live and recommended values,
     # current data only. Reported here; blocking Accept comes separately.
     from backend import guardrails
-    out["guardrails"] = guardrails.evaluate(_fresh_values(s), _advisor_recommended(r))
+    out["guardrails"] = guardrails.evaluate(_fresh_values(s), _advisor_recommended(r))  # GR4: parameter limits
     out["guardrails"]["combustion"] = _combustion(s)          # GR1: actual CO / O2
     out["guardrails"]["direction"] = _direction(s, r)         # GR2: heat vs band
     out["guardrails"]["drift"] = _drift(s)                    # GR6: model drift

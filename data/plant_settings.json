@@ -2,7 +2,7 @@
   "_about": "Plant-confirmed settings for the CCR Kiln-3 advisor. null = keep the current default (see plant_settings.README.md for each key's question number and default). Restart the backend after editing process / bands / state_rules / interlocks / quality; fuels, optimizer and advisor are re-read on every run.",
 
   "guardrails": {
-    "_about": "Hard roof / floor per advisor parameter (CCR operators via project lead 2026-10-21; temp floor 850->820 on 2026-10-23). Checked on the live value and the recommended value (temp: the predicted T+10). A value exactly AT a limit is allowed. null = no limit. Re-read on every request.",
+    "_about": "GR4 operating parameters: hard roof / floor per advisor parameter (CCR operators via project lead 2026-10-21; temp floor 850->820 on 2026-10-23). Checked on the live value and the recommended value (temp: the predicted T+10). A value exactly AT a limit is allowed. null = no limit. Re-read on every request.",
     "423CI400_TT_4": {"min": 820, "max": 951},
     "467RL400_TPH":  {"min": 15,  "max": 34.90},
     "261WF080_TPH":  {"min": 0,   "max": 26.50},
@@ -22,14 +22,14 @@
       "max": 96.0
     },
     "drift": {
-      "_about": "GR6: T+10 forecasts checked by the shadow runner over the last window_min (kiln running, at least min_points checks). Mean abs error above max_mae_c or mean bias beyond max_abs_bias_c -> model drifting, Accept blocked. Test MAE 6.9, persistence 9.1 (2026-10-26); tune once more live checks exist.",
+      "_about": "GR6: T+10 forecasts checked by the shadow runner over the last window_min (kiln running, at least min_points checks). Mean abs error above max_mae_c or mean bias beyond max_abs_bias_c -> model drifting, amber caution (does not block Accept since 2026-10-29). Test MAE 6.9, persistence 9.1 (2026-10-26); tune once more live checks exist.",
       "window_min": 60,
       "min_points": 30,
       "max_mae_c": 12.0,
       "max_abs_bias_c": 8.0
     },
     "uncertainty": {
-      "_about": "GR7: P10-P90 of the predicted T+10 temperature under the recommendation wider than max_width_c, or P90 above / P10 below the temperature roof / floor above -> Accept blocked. Seen so far: median 24, max 33 degC (25 live points, 2026-10-26).",
+      "_about": "GR7: P10-P90 of the predicted T+10 temperature under the recommendation wider than max_width_c, or P90 above / P10 below the temperature roof / floor above -> amber caution (does not block Accept since 2026-10-29). Seen so far: median 24, max 33 degC (25 live points, 2026-10-26).",
       "max_width_c": 35.0
     }
   },
@@ -81,7 +81,7 @@
   },
 
   "quality": {
-    "_about": "Plant 2026-10-27 (Q4.6-4.9). Hot meal SO3 / Cl max are shown as lab warnings.",
+    "_about": "GR5 clinker quality (free lime / liter weight zone) + lab warnings. Plant 2026-10-27 (Q4.6-4.9). Hot meal SO3 / Cl max are shown as lab warnings.",
     "free_lime_max": 1.8,
     "free_lime_min": 0,
     "liter_weight_min": 1100,

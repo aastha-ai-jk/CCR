@@ -1,4 +1,9 @@
-﻿"""Hard guardrails on the advisor's parameters (roof / floor).
+﻿"""Hard guardrails on the advisor's parameters (roof / floor) = GR4, operating
+parameters (kiln feed > 461 t/h is the advice gate in backend/main.py).
+
+Numbering (plant deck): GR1 live CO/O2, GR2 direction, GR3 hot meal DOC,
+GR4 operating parameter limits, GR5 clinker quality (twin.optimize.clinker_guard),
+GR6 model drift, GR7 uncertain forecast, GR8 total heat change.
 
 The limits live in data/plant_settings.json -> "guardrails", re-read on every
 call, so the CCR's confirmed values take effect without a restart:

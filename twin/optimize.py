@@ -185,7 +185,7 @@ def _quality_ok(quality: dict | None) -> bool:
 
 
 def clinker_guard(clinker: dict | None) -> dict:
-    """Lab-based clinker-quality guard (the free-lime / DOC models are too weak
+    """GR5: lab-based clinker-quality guard (the free-lime / DOC models are too weak
     to judge recommendations, R2 < 0). From the LATEST clinker lab result vs
     config.CLINKER_ZONE: under-burnt (free lime above max, liter weight below
     min) -> no cut in total calciner heat; over-burnt (free lime below min,
