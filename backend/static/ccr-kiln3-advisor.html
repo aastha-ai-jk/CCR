@@ -1102,7 +1102,7 @@ function impactOf(a,tag){
   return [["Change",ch],["TSR"+(e.recommended&&e.recommended.is_estimate?" (est.)":""),tsr],["Temp at T+"+h,temp]];
 }
 
-// Which lab values took part in the state vote (fresh, < 8 h) and which were
+// Which lab values took part in the state vote (fresh, < 4 h) and which were
 // left out as stale — live eLIMS clinker + hot meal (P1).
 function paintLab(li){
   var el=document.getElementById("labInfo"); if(!el) return;
@@ -1114,9 +1114,9 @@ function paintLab(li){
     var x=li[k], n=names[k];
     if(!x||x.value===null) return '<div class="lab lab--none"><span class="lab__n">'+n[0]+'</span><span class="lab__a">—</span>'
       +'<b class="lab__v num">—</b><i class="lab__s">no result</i></div>';
-    // ts = SAMPLE time (eLIMS time − fixed lag: clinker 2 h, hot meal 4 h); shown on hover
-    var t=String(x.ts||"").slice(11,16), tt=String(x.tested||"").slice(11,16);
-    var tip="sampled ≈"+t+" · "+(x.source||"")+(tt?" · eLIMS "+tt:"")+" · usable up to "+x.max_age_h+" h after sampling";
+    // ts = eLIMS time as-is (QC team, 19 Nov; the 2 h / 4 h shift is removed); shown on hover
+    var t=String(x.ts||"").slice(11,16);
+    var tip="eLIMS "+t+" · "+(x.source||"")+" · usable up to "+x.max_age_h+" h after the eLIMS time";
     // plant max (hot meal SO3 2 %, Cl 1 %): a warning only, no block
     var cls=x.above_max?"lab--max":x.used?"lab--used":"lab--old";
     var st=x.above_max?"above max "+fmt(x.max,1):x.used?"in use":"too old";

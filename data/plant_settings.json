@@ -17,7 +17,7 @@
       "margin_c": 5.0
     },
     "doc": {
-      "_about": "GR3: latest fresh hot meal DOC (sample < 8 h) below min = under-calcining -> the advisor will not cut total calciner heat; above max = over-calcining -> it will not raise heat. 92-96 % = plant questionnaire 2026-10-27 (was 94.0 project lead placeholder).",
+      "_about": "GR3: latest fresh hot meal DOC (eLIMS result < 4 h old) below min = under-calcining -> the advisor will not cut total calciner heat; above max = over-calcining -> it will not raise heat. 92-96 % = plant questionnaire 2026-10-27 (was 94.0 project lead placeholder).",
       "min": 92.0,
       "max": 96.0
     },

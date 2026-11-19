@@ -4,10 +4,10 @@ The state vote and the twin use free lime, liter weight, liquid phase (clinker)
 and hot-meal DOC. Each is taken from the newest result across the live eLIMS
 tables (lab_freelime_live, lab_hotmeal_live) and the older Excel-loaded tables
 (lab_clinker, lab_hotmeal), and is USED only if its SAMPLE is younger than
-the material's limit (clinker 6 h, hot meal 8 h; closes A5): a stale lab value is
-left out of the vote rather than steering the band with old data. eLIMS stamps
-results a fixed time after sampling (clinker 2 h, hot meal 4 h — QC team), so
-sample time = eLIMS time - lag.
+the material's limit (4 h after the eLIMS time; closes A5): a stale lab value
+is left out of the vote rather than steering the band with old data. Times are
+the eLIMS time as-is (QC team, 19 Nov 2026: the screen must show the eLIMS
+time; the earlier "sample time = eLIMS time - 2 h / 4 h" shift is removed).
 
     latest_lab(q, max_age_h) -> (conditions, info)
       conditions: {"free_lime", "liter_weight", "liquid", "doc"} — fresh values only
@@ -22,12 +22,13 @@ import pandas as pd
 
 LAB_MAX_AGE_H = 8.0      # legacy single limit (still honoured if passed as a number)
 
-# Fixed eLIMS lag (QC team, 26 Oct 2026): an eLIMS result's time stamp is this
-# many hours AFTER the sample was taken. Sample time = eLIMS time - lag; the
-# age of a lab value is counted from its SAMPLE time.
-ELIMS_LAG_H = {"clinker": 2.0, "hotmeal": 4.0}
-# Usable while the sample is younger than this (lag + about one-two lab cycles)
-MAX_AGE_H = {"clinker": 6.0, "hotmeal": 8.0}
+# eLIMS time shift (hours subtracted from the eLIMS time stamp). 0 since 19 Nov
+# 2026 (QC team: show the eLIMS time); was clinker 2 h / hot meal 4 h (26 Oct).
+# plant_settings advisor.elims_lag_h still overrides.
+ELIMS_LAG_H = {"clinker": 0.0, "hotmeal": 0.0}
+# Usable while younger than this, counted from the eLIMS time. Same real cut-off
+# as before (was 6 h / 8 h after the shifted sample time = 4 h after eLIMS).
+MAX_AGE_H = {"clinker": 4.0, "hotmeal": 4.0}
 
 # condition name -> (material, [(table, column, source label, is_elims)])
 _SOURCES = {

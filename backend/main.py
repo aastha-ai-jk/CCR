@@ -377,7 +377,7 @@ def _latest_clinker() -> dict | None:
                 got = db.q(sql.replace("free_lime, liter_weight", "free_lime, NULL AS liter_weight"))
             except Exception:
                 continue                           # table absent on this install
-        # eLIMS stamps clinker results 2 h after sampling: use the SAMPLE time
+        # eLIMS time minus ELIMS_LAG_H (0 since 19 Nov: the eLIMS time as-is)
         got["t"] = pd.to_datetime(got["ts"], format="mixed", errors="coerce") - pd.Timedelta(hours=lag)
         rows.append(got)
     if not rows:
