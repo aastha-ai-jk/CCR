@@ -216,6 +216,8 @@ main{display:flex;flex-direction:column;min-width:0;}
 .btn--ghost:hover{color:var(--ink-bright);text-decoration:underline;}
 .btn--sm{padding:7px 14px;font-size:13px;}
 .btn[disabled]{opacity:.4;cursor:not-allowed;}
+/* 10-min lock after a decision (19 Nov): both buttons solid red, not clickable */
+.btn.btn--locked,.btn.btn--locked:hover{background:var(--red);border:1px solid var(--red);color:#fff;opacity:1;cursor:not-allowed;}
 .actions__note{font-size:12.5px;color:var(--ink-faint);margin-left:auto;}
 
 /* decline form */
@@ -732,8 +734,8 @@ function setBarHTML(){
   var open=openRecs(), n=open.length, h='', ls=undoable();
   if(!n){
     h+='<div class="actions">';
-    h+= '<button class="btn btn--accept" disabled>Accept all</button>';
-    h+= '<button class="btn btn--decline" disabled>Decline all</button>';
+    h+= '<button class="btn btn--accept btn--locked" disabled>Accept all</button>';
+    h+= '<button class="btn btn--decline btn--locked" disabled>Decline all</button>';
     if(ls) h+='<button class="btn btn--undo" data-act="undo"'+(busy?' disabled':'')+'>Undo</button>';
     h+= '<span class="actions__note">Letting the last decision take effect — next recommendation at <b>'+hhmm(nextAt())+'</b>.</span>';
     h+='</div>';
