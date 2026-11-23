@@ -1,0 +1,25 @@
+# --- Data layer / ETL (Phase 0) ---
+pandas>=2.2
+openpyxl>=3.1
+pyarrow>=15
+SQLAlchemy>=2.0
+psycopg[binary]>=3.2       # PostgreSQL driver (v3, works on Python 3.13/3.14)
+python-dotenv>=1.0
+
+# --- Backend API (Phase 1) ---
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+
+# --- Analysis used by the app (correlation studio, surrogate twin) ---
+numpy>=1.26
+scipy>=1.13
+scikit-learn>=1.4
+
+# --- Advisor "why" text via LLM (optional; REASONING_PROVIDER=anthropic | openai) ---
+anthropic>=2.3
+openai>=3.0
+
+# NOTE: heavy twin-training libs (lightgbm, shap, optuna, torch) live in
+# requirements-ml.txt so the app environment stays light.

@@ -1,0 +1,651 @@
+"""CCR operator decisions on twin recommendations — the labelled trail for
+future training (what the twin advised, what the operator did, and why).
+
+Every Accept / Decline / Undo from the advisor screen is one row in
+``operator_decisions``; an Undo is its own row (``action='undone'``), never a
+delete, so the full history is kept. Rows are keyed by ``day`` (plant-local
+calendar date of the decision) for date-wise retrieval. The twin context at
+decision time (advisory setpoints, predictions, state, live lever values) is
+filled in server-side, not trusted from the browser.
+
+ADVISORY ONLY — recording a decision never writes anything to the plant.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+
+import pandas as pd
+from sqlalchemy import text
+
+from backend import analysis, db
+
+ACTIONS = ("accepted", "declined", "undone")
+MAX_REASON = 200
+MAX_NOTE = 1000
+
+_DDL = """
+CREATE TABLE IF NOT EXISTS operator_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  day TEXT NOT NULL,              -- YYYY-MM-DD, plant-local date of the decision
+  decided_at TEXT NOT NULL,       -- ISO local wall-clock time of the click
+  operator TEXT,
+  param_id TEXT, tag TEXT NOT NULL, param_name TEXT, unit TEXT,
+  action TEXT NOT NULL,           -- accepted | declined | undone
+  reason TEXT, note TEXT,         -- decline reason (required) + free-text note
+  current_value REAL,             -- value shown to the operator as Current
+  recommended_value REAL,         -- value shown to the operator as Recommended
+  advisory_ts TEXT,               -- plant snapshot time the advisory was computed from
+  data_source TEXT,               -- opc | replay | historical
+  horizon_min INTEGER,
+  live_temp REAL,                 -- calciner outlet temp at decision time
+  predicted_temp REAL,            -- twin t+horizon temp WITH all recommendations applied
+  operating_state TEXT, band_lo REAL, band_hi REAL,
+  context_json TEXT               -- full advisory + live lever snapshot (for training)
+)
+"""
+_IDX = "CREATE INDEX IF NOT EXISTS ix_operator_decisions_day ON operator_decisions(day)"
+_ready = False
+
+
+def _ensure() -> None:
+    global _ready
+    if _ready:
+        return
+    with db.engine().begin() as con:
+        con.execute(text(_DDL))
+        con.execute(text(_IDX))
+    _ready = True
+
+
+def _num(v):
+    try:
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def record(body: dict, advisory: dict | None, snapshot: dict) -> dict:
+    """Validate one decision, attach twin context, insert it. Returns the row."""
+    _ensure()
+    from twin.optimize import ADVISOR_LEVERS
+    tag = str(body.get("tag") or "")
+    if tag not in (*ADVISOR_LEVERS, analysis.CV):
+        raise ValueError(f"not a recommended parameter: {tag!r}")
+    action = str(body.get("action") or "")
+    if action not in ACTIONS:
+        raise ValueError(f"action must be one of {ACTIONS}")
+    reason = (body.get("reason") or "").strip()[:MAX_REASON] or None
+    note = (body.get("note") or "").strip()[:MAX_NOTE] or None
+    if action == "declined" and not reason:
+        raise ValueError("a decline needs a reason")
+    if action in ("accepted", "declined"):
+        until = locked_until(tag)
+        if until:
+            raise ValueError(f"last decision on {tag} is still settling: next recommendation "
+                             f"at {until[11:16]}")
+
+    now = dt.datetime.now()
+    adv = advisory if advisory and "recommended" in advisory else {}
+    band = adv.get("target_band") or {}
+    temp = (adv.get("predicted") or {}).get("temp") or {}
+    vals = snapshot.get("values", {})
+    context = {
+        "advisory": {k: adv.get(k) for k in (
+            "recommended", "baseline", "predicted", "operating_state", "target_band",
+            "in_band", "reach_min", "band_confidence", "mode", "economics") if k in adv},
+        "live": {t: vals.get(t) for t in (analysis.CV, *analysis.MV, *analysis.STATE_PLC)},
+        "live_ts": snapshot.get("ts"),
+    }
+    row = {
+        "day": now.date().isoformat(),
+        "decided_at": now.isoformat(timespec="seconds"),
+        "operator": (body.get("operator") or "").strip()[:60] or None,
+        "param_id": (body.get("param_id") or "")[:40] or None,
+        "tag": tag,
+        "param_name": (body.get("param_name") or "")[:80] or None,
+        "unit": (body.get("unit") or "")[:20] or None,
+        "action": action, "reason": reason, "note": note,
+        "current_value": _num(body.get("current_value")),
+        "recommended_value": _num(body.get("recommended_value")),
+        "advisory_ts": adv.get("ts"),
+        "data_source": adv.get("source") or snapshot.get("source"),
+        "horizon_min": adv.get("horizon_min") or analysis.DELTA,
+        "live_temp": _num(vals.get(analysis.CV)),
+        "predicted_temp": _num(temp.get("mean")),
+        "operating_state": adv.get("operating_state"),
+        "band_lo": _num(band.get("low")), "band_hi": _num(band.get("high")),
+        "context_json": json.dumps(context, default=str),
+    }
+    cols = ", ".join(row)
+    with db.engine().begin() as con:
+        res = con.execute(text(f"INSERT INTO operator_decisions ({cols}) "
+                               f"VALUES ({', '.join(':' + c for c in row)})"), row)
+        row["id"] = res.lastrowid
+    row.pop("context_json")
+    return row
+
+
+# Decision lock (plant, 19 Nov; reverses the 29 Oct "reopen at once"): after an
+# Accept / Decline the parameter stays closed until its target time (decision +
+# lock_min, default the 10-min horizon) so the effect of the last move shows in
+# the temperature before the next one -- avoids stacking moves (over-correction).
+# Undo reopens it at once. plant_settings advisor.decision_lock_min overrides.
+def lock_min() -> float:
+    try:
+        import config
+        v = (config.plant_settings().get("advisor") or {}).get("decision_lock_min")
+        if v is not None:
+            return float(v)
+        from twin.optimize import ADVISOR_HORIZON
+        return float(ADVISOR_HORIZON)
+    except Exception:
+        return 10.0
+
+
+def _status(recs: list[dict], now: dt.datetime | None = None) -> dict[str, dict]:
+    """Latest status per tag from today's rows (newest first): accepted / declined
+    while inside the lock, else open; an undo withdraws the decision before it."""
+    now = now or dt.datetime.now()
+    lock = dt.timedelta(minutes=lock_min())
+    status: dict[str, dict] = {}
+    undone: dict[str, int] = {}
+    for r in recs:                                   # newest -> oldest
+        tag = r["tag"]
+        if tag in status:
+            continue
+        if r["action"] == "undone":
+            undone[tag] = undone.get(tag, 0) + 1
+            continue
+        if undone.get(tag):
+            undone[tag] -= 1
+            continue
+        until = dt.datetime.fromisoformat(r["decided_at"]) + lock
+        st = r["action"] if now < until else "open"
+        status[tag] = {"status": st, "decided_at": r["decided_at"], "reason": r["reason"],
+                       "note": r["note"], "param_id": r["param_id"],
+                       "valid_until": until.isoformat(timespec="seconds")}
+    return status
+
+
+def locked_until(tag: str) -> str | None:
+    """valid_until of a still-locked decision on this tag today, else None."""
+    _ensure()
+    day = dt.date.today().isoformat()
+    rows = db.q("SELECT tag, action, decided_at, reason, note, param_id FROM operator_decisions "
+                "WHERE day = :d AND tag = :t ORDER BY id DESC LIMIT 50", {"d": day, "t": tag})
+    recs = rows.where(pd.notna(rows), None).to_dict("records") if len(rows) else []
+    s = _status(recs).get(tag)
+    return s["valid_until"] if s and s["status"] != "open" else None
+
+
+def list_day(day: str | None = None, limit: int = 500) -> dict:
+    """Decisions for one date (default today), newest first, plus counts and
+    each parameter's latest status (accepted / declined / open)."""
+    _ensure()
+    day = day or dt.date.today().isoformat()
+    dt.date.fromisoformat(day)                       # validates the format
+    rows = db.q("SELECT * FROM operator_decisions WHERE day = :d "
+                "ORDER BY id DESC LIMIT :n", {"d": day, "n": int(limit)})
+    rows = rows.drop(columns=["context_json"]) if len(rows) else rows
+    recs = rows.where(pd.notna(rows), None).to_dict("records") if len(rows) else []
+    status = _status(recs)
+    counts = {a: sum(1 for r in recs if r["action"] == a) for a in ACTIONS}
+    return {"day": day, "n": len(recs), "counts": counts,
+            "status": status, "rows": recs}
+
+
+# An accepted setpoint drives the twin (as if applied now) until the plant
+# reaches it (live within REACH_TOL_FRAC of the tag's engineering range), it is
+# undone / superseded by a newer decision, or EXPIRY_MIN passes.
+REACH_TOL_FRAC = 0.005
+EXPIRY_MIN = 30
+
+
+def setpoints(values: dict, now: dt.datetime | None = None) -> dict:
+    """tag -> accepted setpoint state for every lever whose latest decision in
+    the last EXPIRY_MIN minutes is 'accepted'. ``status`` is ``active`` (still
+    driving the twin), ``reached`` (plant is there — live takes over) or
+    ``expired``. Levers only: accepting the calciner-temp row sets nothing."""
+    import config
+    from twin.optimize import ADVISOR_LEVERS     # fixed levers never drive the twin
+    _ensure()
+    adv = config.plant_settings().get("advisor") or {}
+    tol_frac = float(adv.get("setpoint_reach_tol_frac") or REACH_TOL_FRAC)
+    expiry = float(adv.get("setpoint_expiry_min") or EXPIRY_MIN)
+    now = now or dt.datetime.now()
+    since = (now - dt.timedelta(minutes=expiry + 5)).isoformat(timespec="seconds")
+    rows = db.q("SELECT * FROM operator_decisions WHERE decided_at >= :s ORDER BY id DESC",
+                {"s": since})
+    cat = db.tag_catalog().set_index("tag")
+    out: dict[str, dict] = {}
+    seen: set[str] = set()
+    for r in rows.to_dict("records"):                # newest first
+        tag = r["tag"]
+        if tag in seen:
+            continue
+        seen.add(tag)
+        if r["action"] != "accepted" or tag not in ADVISOR_LEVERS or r["recommended_value"] is None:
+            continue
+        age = (now - dt.datetime.fromisoformat(r["decided_at"])).total_seconds() / 60.0
+        lo, hi = cat.loc[tag, "y_min"], cat.loc[tag, "y_max"]
+        span = float(hi - lo) if pd.notna(lo) and pd.notna(hi) and hi > lo else 1.0
+        tol = tol_frac * span
+        live = _num(values.get(tag))
+        rec = float(r["recommended_value"])
+        if live is not None and abs(live - rec) <= tol:
+            status = "reached"
+        elif age > expiry:
+            status = "expired"
+        else:
+            status = "active"
+        out[tag] = {"tag": tag, "name": r["param_name"], "unit": r["unit"],
+                    "accepted": rec, "live": live, "tolerance": round(tol, 4),
+                    "decided_at": r["decided_at"], "age_min": round(age, 1),
+                    "status": status, "decision_id": int(r["id"])}
+    return out
+
+
+# Every advisory the optimiser computes is logged in ``advisor_log``. ``issued``
+# marks a NEW recommendation: some lever moved by more than ISSUE_TOL_FRAC of
+# its range versus the previous one (the screen refreshes every minute, mostly
+# with the same advice — those are not counted as new). ``shown`` = 1 once the
+# CCR advisor screen has displayed that advice (NULL on rows logged before the
+# column existed); the admin counts only new advice that was shown.
+ISSUE_TOL_FRAC = 0.005
+_ADV_DDL = """
+CREATE TABLE IF NOT EXISTS advisor_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  day TEXT NOT NULL,              -- YYYY-MM-DD, plant-local date of the advisory
+  ts TEXT,                        -- plant snapshot time the advisory was computed from
+  data_source TEXT,               -- opc | edge | replay | historical
+  operating_state TEXT, band_lo REAL, band_hi REAL,
+  predicted_temp REAL,
+  recommended_json TEXT,          -- {tag: value} for the advisor levers
+  issued INTEGER NOT NULL,        -- 1 = new recommendation, 0 = same as previous
+  shown INTEGER,                  -- 1 = displayed on the CCR screen (NULL: before tracking)
+  blocked INTEGER                 -- 1 = Accept was blocked while shown (NULL: before tracking)
+)
+"""
+_last_rec: dict = {}
+
+
+SLOT_MIN = 10   # one recommendation per parameter per 10-min slot: at most 144 x 3 = 432 a day
+# Plant 16 Nov: calciner coal is now an instantaneous value (re-searched every
+# advisor run), so it is no longer counted from this date: SAFR + calciner temp
+# only, at most 144 x 2 = 288 a day. Days before keep coal (432 cap).
+COAL_TAG = "467RL400_TPH"
+COAL_UNCOUNTED_FROM = "2026-11-16"
+
+
+def _counts(tag: str, day) -> bool:
+    """Does this parameter count in the admin dashboard on this day?"""
+    if tag not in CHECK_TOL:
+        return False
+    return not (tag == COAL_TAG and str(day) >= COAL_UNCOUNTED_FROM)
+
+
+def _slot(ts) -> int | None:
+    """10-min slot of the day (0..143) of a timestamp; None when unreadable."""
+    t = pd.to_datetime(ts, format="mixed", errors="coerce")
+    return None if pd.isna(t) else (t.hour * 60 + t.minute) // SLOT_MIN
+
+
+def _standing(recs: list[dict]) -> dict[tuple, int]:
+    """(day, slot, tag) -> id of the decision still standing there: the last
+    accept / decline of that parameter in that 10-min slot, none once undone.
+    ``recs`` in id order. Every admin panel counts decisions through this."""
+    out: dict[tuple, int] = {}
+    for r in recs:
+        if not _counts(r["tag"], r["day"]):
+            continue
+        s = _slot(r["advisory_ts"]) if r.get("advisory_ts") else None
+        k = (r["day"], _slot(r["decided_at"]) if s is None else s, r["tag"])
+        if r["action"] in ("accepted", "declined"):
+            out[k] = r["id"]
+        elif r["action"] == "undone":
+            out.pop(k, None)
+    return out
+
+
+def _counted(start: str) -> tuple[set[tuple], dict[tuple, int | None]]:
+    """(day, slot, tag) recommendations counted for the admin, per parameter
+    (calciner coal, SAFR, predicted calciner temp): advice shown on the CCR
+    screen whose value differs from that parameter's last counted one by more
+    than the check tolerance (CHECK_TOL: coal 2.5, SAFR 1.5, calciner temp 5).
+    A parameter counts at most once per 10-min slot (SLOT_MIN), so a day holds
+    at most 432 (288 from COAL_UNCOUNTED_FROM: coal no longer counted). Smaller moves are the same advice still standing. Every day
+    starts fresh (its first advice counts), so a day's count does not depend
+    on how far back the window reaches. Also returns (day, slot) -> 1 when
+    Accept was blocked at some point the advice was shown in that slot, 0 when
+    never, None when not recorded (rows before the ``blocked`` column)."""
+    adv = db.q("SELECT * FROM advisor_log "
+               "WHERE day >= :s AND data_source != 'historical' ORDER BY id", {"s": start})
+    adv["ts"] = pd.to_datetime(adv["ts"], format="mixed", errors="coerce")
+    if "blocked" not in adv.columns:
+        adv["blocked"] = None
+    out: set[tuple] = set()
+    blocked: dict[tuple, int | None] = {}
+    anchor: dict = {}
+    day = None
+    for r in adv.itertuples():
+        if not (r.shown == 1 or (pd.isna(r.shown) and r.issued)) or pd.isna(r.ts):
+            continue
+        if r.day != day:
+            day, anchor = r.day, {}
+        cur = dict(json.loads(r.recommended_json or "{}"))
+        if pd.notna(r.predicted_temp):
+            cur[analysis.CV] = float(r.predicted_temp)
+        s = (r.ts.hour * 60 + r.ts.minute) // SLOT_MIN
+        if pd.notna(r.blocked):
+            blocked[(r.day, s)] = max(int(r.blocked), blocked.get((r.day, s)) or 0)
+        else:
+            blocked.setdefault((r.day, s), None)
+        for t, v in cur.items():
+            if _counts(t, r.day) and (t not in anchor or abs(float(v) - anchor[t]) > CHECK_TOL[t]):
+                out.add((r.day, s, t))
+                anchor[t] = float(v)
+    return out, blocked
+
+
+def _ensure_adv(con) -> None:
+    con.execute(text(_ADV_DDL))
+    con.execute(text("CREATE INDEX IF NOT EXISTS ix_advisor_log_day ON advisor_log(day)"))
+    cols = {row[1] for row in con.execute(text("PRAGMA table_info(advisor_log)"))}
+    if "shown" not in cols:
+        con.execute(text("ALTER TABLE advisor_log ADD COLUMN shown INTEGER"))
+    if "blocked" not in cols:
+        con.execute(text("ALTER TABLE advisor_log ADD COLUMN blocked INTEGER"))
+
+
+def log_advisory(r: dict) -> int | None:
+    """Record one optimiser result and return its row id; never raises
+    (logging must not break the advisor)."""
+    global _last_rec
+    try:
+        rec = r.get("recommended") or {}
+        if not rec:
+            return None
+        lim = r.get("lever_limits") or {}
+        with db.engine().begin() as con:
+            _ensure_adv(con)
+            if not _last_rec:                        # after a restart: compare with the last row
+                last = con.execute(text("SELECT recommended_json FROM advisor_log "
+                                        "ORDER BY id DESC LIMIT 1")).fetchone()
+                _last_rec = json.loads(last[0]) if last and last[0] else {}
+            issued = not _last_rec or any(
+                t not in _last_rec or abs(float(v) - float(_last_rec[t]))
+                > ISSUE_TOL_FRAC * max(float((lim.get(t) or {}).get("max", 0))
+                                       - float((lim.get(t) or {}).get("min", 0)), 1e-9)
+                for t, v in rec.items())
+            tb = r.get("target_band") or {}
+            pt = ((r.get("predicted") or {}).get("temp") or {}).get("mean")
+            row = con.execute(text(
+                "INSERT INTO advisor_log (day, ts, data_source, operating_state, band_lo, "
+                "band_hi, predicted_temp, recommended_json, issued, shown) VALUES "
+                "(:day, :ts, :src, :st, :lo, :hi, :pt, :rec, :iss, 0)"),
+                {"day": dt.date.today().isoformat(), "ts": r.get("ts"), "src": r.get("source"),
+                 "st": r.get("operating_state"), "lo": tb.get("low"), "hi": tb.get("high"),
+                 "pt": pt, "rec": json.dumps(rec), "iss": int(issued)})
+        _last_rec = dict(rec)
+        return row.lastrowid
+    except Exception:
+        return None
+
+
+def mark_shown(log_id: int, blocked: bool = False) -> None:
+    """The CCR screen has displayed the advice logged as ``log_id``, with Accept
+    blocked or not (once blocked while shown, it stays marked); never raises."""
+    try:
+        with db.engine().begin() as con:
+            _ensure_adv(con)
+            con.execute(text("UPDATE advisor_log SET shown = 1, blocked = CASE WHEN :b = 1 "
+                             "THEN 1 ELSE COALESCE(blocked, 0) END WHERE id = :i"),
+                        {"i": int(log_id), "b": int(bool(blocked))})
+    except Exception:
+        pass
+
+
+def advisory_summary(day: str | None = None) -> dict:
+    """Advisories computed and NEW recommendations issued on one date (live data only)."""
+    day = day or dt.date.today().isoformat()
+    dt.date.fromisoformat(day)
+    try:
+        d = db.q("SELECT COUNT(*) AS computed FROM advisor_log "
+                 "WHERE day = :d AND data_source != 'historical'", {"d": day})
+        return {"day": day, "computed": int(d["computed"][0]),
+                "issued": sum(1 for k in _counted(day)[0] if k[0] == day)}
+    except Exception:                                # table not created yet
+        return {"day": day, "computed": 0, "issued": 0}
+
+
+def summary(n_days: int = 30) -> list[dict]:
+    """Admin Recommendation Summary, one row for every date in the window
+    (newest first, zeros included), counted PER PARAMETER (calciner coal, SAFR,
+    calciner temp) and at most once per parameter per 10-min slot, so a day
+    holds at most 432: new recommendations shown on the CCR screen, accepted /
+    declined (one Accept all click counts once for each of its parameters; a
+    decision later undone is left out) and no action (shown, never decided),
+    split into blocked (Accept was blocked), available and not_recorded.
+    Live data only."""
+    start = (dt.date.today() - dt.timedelta(days=max(1, int(n_days)) - 1)).isoformat()
+    out: dict[str, dict] = {}
+
+    def row(day: str) -> dict:
+        return out.setdefault(day, {"day": day, "total": 0, "accepted": 0, "declined": 0, "no_action": 0,
+                                    "blocked": 0, "available": 0, "not_recorded": 0})
+
+    try:
+        counted, blocked = _counted(start)
+    except Exception:                                # table not created yet
+        counted, blocked = set(), {}
+    _ensure()
+    dec = db.q("SELECT id, day, advisory_ts, decided_at, tag, action FROM operator_decisions "
+               "WHERE day >= :s ORDER BY id", {"s": start})
+    recs = dec.where(pd.notna(dec), None).to_dict("records") if len(dec) else []
+    act = {r["id"]: r["action"] for r in recs}
+    standing = _standing(recs)
+    for day, _, _ in counted | set(standing):        # a decided slot is always a recommendation
+        row(day)["total"] += 1
+    for (day, _, _), i in standing.items():
+        row(day)[act[i]] += 1
+    for day, slot, tag in counted - set(standing):   # no action: Accept blocked or not
+        b = blocked.get((day, slot))
+        row(day)["not_recorded" if b is None else "blocked" if b else "available"] += 1
+    for o in out.values():
+        o["no_action"] = o["total"] - o["accepted"] - o["declined"]
+    for i in range(max(1, int(n_days))):            # every day in the window, zeros included
+        row((dt.date.today() - dt.timedelta(days=i)).isoformat())
+    return [out[d] for d in sorted(out, reverse=True)]
+
+
+# Admin view: was a DECLINE wrong? A recommendation made at time R is for
+# R + horizon (the advisor's T+10). At that target time the system takes the
+# single plant reading nearest to it; if it is within the parameter's
+# tolerance of the recommended value, the plant ended up where the advice
+# said — the decline was not correct.
+#   calciner coal ±2.5 t/h · SAFR ±1.5 t/h · calciner outlet temp ±5 °C
+# (plant_settings.json advisor.decline_check_tol overrides per tag).
+CHECK_TOL = {"467RL400_TPH": 2.5, "261WF080_TPH": 1.5, analysis.CV: 5.0}
+READING_MAX_GAP_S = 120                # the nearest reading must be this close to the target time
+
+
+def _lever_series(tag: str, start: dt.datetime, end: dt.datetime) -> pd.Series:
+    """Actual values of one tag in [start, end]: live feed (process_live,
+    'YYYY-MM-DDTHH:MM:SS') first, historian (process_1min) for anything missing."""
+    parts = []
+    for table, fmt in (("process_live", "%Y-%m-%dT%H:%M:%S"),
+                       ("process_1min", "%Y-%m-%d %H:%M:%S")):
+        try:
+            d = db.q(f'SELECT ts, "{tag}" AS v FROM {table} WHERE ts >= :a AND ts <= :b',
+                     {"a": start.strftime(fmt), "b": end.strftime(fmt)})
+        except Exception:
+            continue                                  # table or column absent here
+        if len(d):
+            d["ts"] = pd.to_datetime(d["ts"], format="mixed", errors="coerce")
+            d["v"] = pd.to_numeric(d["v"], errors="coerce")
+            parts.append(d.dropna())
+    if not parts:
+        return pd.Series(dtype=float)
+    s = pd.concat(parts).drop_duplicates("ts").set_index("ts")["v"].sort_index()
+    return s[(s.index >= start) & (s.index <= end)]
+
+
+def check_decline(rec: float, target: dt.datetime, series: pd.Series, now: dt.datetime,
+                  tol: float, max_gap_s: float = READING_MAX_GAP_S) -> dict:
+    """The single reading nearest to the target time vs rec ± tol.
+    status: reached (decline not correct) | not_reached | pending (target time
+    not yet passed) | no_data (no reading within max_gap_s of the target)."""
+    if now < target:
+        return {"status": "pending", "tolerance": tol}
+    if not len(series):
+        return {"status": "no_data", "tolerance": tol}
+    gaps = abs((series.index - target).total_seconds())
+    i = int(gaps.argmin())
+    if gaps[i] > max_gap_s:
+        return {"status": "no_data", "tolerance": tol}
+    t, v = series.index[i], float(series.iloc[i])
+    return {"status": "reached" if abs(v - rec) <= tol else "not_reached", "tolerance": tol,
+            "actual_at": t.isoformat(timespec="seconds"), "actual_value": v,
+            "diff": v - rec}
+
+
+def declined_but_reached(day: str | None = None) -> dict:
+    """Every decline on one date (calciner coal, SAFR, calciner outlet temp),
+    each checked at its recommendation's target time. Declines later undone are
+    left out (the decision was withdrawn); one per parameter per 10-min slot,
+    the same rule as the Recommendation Summary."""
+    out = _checked(day, "declined")
+    return {**out, "declines": len(out["rows"])}
+
+
+def accepted_reached(day: str | None = None) -> dict:
+    """Every accept on one date, checked the same way: did the plant reach the
+    recommended value (± tolerance) at the target time? Undone accepts left out;
+    one per parameter per 10-min slot, as in the Recommendation Summary."""
+    out = _checked(day, "accepted")
+    return {**out, "accepts": len(out["rows"])}
+
+
+def _checked(day: str | None, action: str) -> dict:
+    """Decisions of one action on one date, each checked at its target time."""
+    import config
+    from twin.optimize import ADVISOR_HORIZON, ADVISOR_LEVERS
+    _ensure()
+    day = day or dt.date.today().isoformat()
+    dt.date.fromisoformat(day)
+    adv = config.plant_settings().get("advisor") or {}
+    tols = {**CHECK_TOL, **{k: float(v) for k, v in (adv.get("decline_check_tol") or {}).items()}}
+    rows = db.q("SELECT id, day, decided_at, operator, param_id, tag, param_name, unit, action, "
+                "reason, note, current_value, recommended_value, operating_state, "
+                "advisory_ts, horizon_min FROM operator_decisions WHERE day = :d ORDER BY id",
+                {"d": day})
+    now = dt.datetime.now()
+    recs = rows.where(pd.notna(rows), None).to_dict("records") if len(rows) else []
+    keep = set(_standing(recs).values())             # same 10-min rule as the summary
+    out = []
+    for r in recs:
+        if (r["action"] != action or r["id"] not in keep
+                or r["tag"] not in (*ADVISOR_LEVERS, analysis.CV)
+                or r["recommended_value"] is None):
+            continue
+        decided = dt.datetime.fromisoformat(r["decided_at"])
+        made = pd.to_datetime(r["advisory_ts"], errors="coerce") if r["advisory_ts"] else None
+        made = made.to_pydatetime() if made is not None and not pd.isna(made) else decided
+        h = int(r["horizon_min"] or ADVISOR_HORIZON)
+        target = made + dt.timedelta(minutes=h)
+        tol = float(tols.get(r["tag"], 0.05 * abs(float(r["recommended_value"]))))
+        gap = dt.timedelta(seconds=READING_MAX_GAP_S)
+        raw = _lever_series(r["tag"], target - gap, target + gap)
+        row = {**r, "recommended_at": made.isoformat(timespec="seconds"), "horizon_min": h,
+               "target_at": target.isoformat(timespec="seconds"),
+               **check_decline(float(r["recommended_value"]), target, raw, now, tol)}
+        out.append(row)
+    n = {k: sum(1 for x in out if x["status"] == k)
+         for k in ("reached", "not_reached", "pending", "no_data")}
+    return {"day": day, "horizon_min": ADVISOR_HORIZON, "tolerances": tols,
+            "counts": n, "rows": out}
+
+
+PERF_START = dt.date(2026, 11, 2)    # first day of the admin "Total" (as the daily report)
+_perf_cache: dict[str, dict] = {}    # settled days (before yesterday) never change
+
+
+def _perf_day(day: str) -> dict:
+    if day in _perf_cache:
+        return _perf_cache[day]
+    a, d = _checked(day, "accepted"), _checked(day, "declined")
+    p = {"accepted": len(a["rows"]), "declines": len(d["rows"]),
+         "not_correct": d["counts"]["reached"], "justified": d["counts"]["not_reached"]}
+    if day < (dt.date.today() - dt.timedelta(days=1)).isoformat():
+        _perf_cache[day] = p
+    return p
+
+
+def performance(scope: str = "total") -> dict:
+    """Admin Advisory Performance summed over a period: ``total`` = since
+    PERF_START, ``week`` = today and the 6 days before. Same per-day checks
+    (and 10-min rule) as the day view."""
+    today = dt.date.today()
+    start = PERF_START if scope == "total" else today - dt.timedelta(days=6)
+    out = {"scope": scope, "start": start.isoformat(), "end": today.isoformat(),
+           "accepted": 0, "declines": 0, "not_correct": 0, "justified": 0}
+    d = start
+    while d <= today:
+        for k, v in _perf_day(d.isoformat()).items():
+            out[k] += v
+        d += dt.timedelta(days=1)
+    return out
+
+
+def summary_checked(n_days: int = 7) -> list[dict]:
+    """``summary`` rows plus each day's declines split by the target-time check:
+    not_correct (plant reached the advice anyway) and justified (it did not)."""
+    rows = summary(n_days)
+    for r in rows:
+        p = _perf_day(r["day"])
+        r["not_correct"], r["justified"] = p["not_correct"], p["justified"]
+    return rows
+
+
+def actions(scope: str = "total", day: str | None = None) -> dict:
+    """Admin Action Performed: recommendations shown, acted on (accepted +
+    declined) and not acted on (Accept blocked / available but no action /
+    not recorded), summed over ``total`` (since PERF_START), ``week`` (today
+    and the 6 days before) or one ``day``. Same counting as ``summary``."""
+    today = dt.date.today()
+    if scope == "day":
+        start = end = dt.date.fromisoformat(day or today.isoformat())
+    else:
+        start, end = (PERF_START if scope == "total" else today - dt.timedelta(days=6)), today
+    keys = ("total", "accepted", "declined", "no_action", "blocked", "available", "not_recorded")
+    out = {"scope": scope, "start": start.isoformat(), "end": end.isoformat(), **{k: 0 for k in keys}}
+    for r in summary((today - start).days + 1):
+        if start.isoformat() <= r["day"] <= end.isoformat():
+            for k in keys:
+                out[k] += r[k]
+    return out
+
+
+def days() -> list[dict]:
+    """Every date that has decisions, with counts — the date-wise index.
+    accepted / declined leave out decisions later undone (same rule as the
+    admin checks), so the day buttons match the admin tiles."""
+    _ensure()
+    d = db.q("SELECT day, tag, action FROM operator_decisions ORDER BY id")
+    out: dict[str, dict] = {}
+    last: dict[tuple, str] = {}                  # (day, tag) -> action still standing
+    for r in d.to_dict("records"):
+        o = out.setdefault(r["day"], {"day": r["day"], "n": 0, "accepted": 0, "declined": 0})
+        o["n"] += 1
+        k = (r["day"], r["tag"])
+        if not _counts(r["tag"], r["day"]):
+            continue                              # same parameters as the admin tiles
+        if r["action"] == "undone":
+            if last.get(k) in ("accepted", "declined"):
+                o[last[k]] -= 1
+            last[k] = "undone"
+        elif r["action"] in ("accepted", "declined"):
+            o[r["action"]] += 1
+            last[k] = r["action"]
+    return sorted(out.values(), key=lambda x: x["day"], reverse=True)

@@ -1,0 +1,44 @@
+{
+ "generated_at": "2026-08-27T13:19:58",
+ "rows": 419193,
+ "test_rows": 62879,
+ "task": "423CI400_TT_4 @ t+5min vs raw truth",
+ "results": {
+  "base": {
+   "mae": 6.725,
+   "best_iter": 532,
+   "train_s": 10.3
+  },
+  "huber": {
+   "mae": 6.426,
+   "best_iter": 2000,
+   "train_s": 94.3
+  },
+  "smooth5": {
+   "mae": 6.695,
+   "best_iter": 388,
+   "train_s": 10.1
+  },
+  "slow_lr": {
+   "mae": 6.65,
+   "best_iter": 946,
+   "train_s": 45.4
+  },
+  "arx": {
+   "mae": 6.489,
+   "train_s": 0.1
+  },
+  "blend": {
+   "mae": 6.614,
+   "w_arx": 0.15
+  },
+  "persistence": {
+   "mae": 7.951
+  }
+ },
+ "verdict": {
+  "best": "huber",
+  "mae": 6.426,
+  "vs_base_pct": 4.45
+ }
+}

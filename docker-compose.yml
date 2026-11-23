@@ -1,0 +1,95 @@
+# CCR Kiln-3 digital twin + advisor — whole system in Docker.
+# Replaces the PM2 setup (ecosystem.config.js) one-for-one:
+#   ccr-backend -> backend   ccr-livefeed -> livefeed   ccr-shadow -> shadow
+#   ccr-optimizer -> optimizer   ccr-monitor + ccr-retrain -> scheduler
+#   ccr-frontend -> frontend   (+ optional eLIMS free-lime feed: profile "elims")
+#
+#   cp ops/docker/compose.env.example .env.compose   # then edit
+#   docker compose --env-file .env.compose up -d --build
+#
+# STOP the PM2 apps first (pm2 stop all) — two live feeds would double-read
+# OPC and two shadows would double-write the same SQLite database.
+name: ccr-twin
+
+x-app: &app
+  image: ccr-twin-app:latest
+  pull_policy: never              # built locally by the backend service
+  restart: unless-stopped
+  environment:
+    TZ: Asia/Kolkata
+    PYTHONUNBUFFERED: "1"
+  volumes:
+    - ./data:/app/data            # SQLite DB + plant_settings.json (host-owned)
+    - ./models:/app/models        # twin_gbt.pkl, metrics, live_bias, logs
+    - ./.env:/app/.env:ro         # DB settings (USE_SQLITE / DATABASE_URL)
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "5" }
+
+services:
+  backend:                        # API + /advisor page
+    <<: *app
+    build:
+      context: .
+      dockerfile: ops/docker/Dockerfile
+      args:
+        APP_UID: "${APP_UID:-1000}"
+    command: ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8010"]
+    ports:
+      - "${BACKEND_PORT:-8010}:8010"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/api/health', timeout=10)"]
+      interval: 60s
+      timeout: 15s
+      start_period: 180s          # first request loads the ~115 MB model
+      retries: 3
+
+  livefeed:                       # KEPServer OPC UA -> live_now / process_live, every 2 s
+    <<: *app
+    command: ["python", "-m", "etl.live_feed", "--interval", "2"]
+    depends_on: [backend]
+
+  shadow:                         # twin beside the CCR: predict, mature, live bias
+    <<: *app
+    command: ["python", "-m", "twin.shadow", "--interval", "30"]
+    depends_on: [livefeed]
+
+  optimizer:                      # plant fuel-advisory loop (logs optimizer_log)
+    <<: *app
+    command: ["python", "-m", "twin.optimizer_loop", "--interval", "45"]
+    environment:
+      TZ: Asia/Kolkata
+      PYTHONUNBUFFERED: "1"
+      OPTIMIZER_MODE: cost
+    depends_on: [livefeed]
+
+  scheduler:                      # monitor every 6 h, guarded retrain Sun 02:00
+    <<: *app
+    command: ["python", "ops/docker/scheduler.py"]
+    depends_on: [backend]
+
+  elims:                          # optional: eLIMS clinker free-lime feed every 15 min
+    <<: *app
+    profiles: ["elims"]           # enable with: --profile elims (needs .env.elims)
+    command: ["python", "-m", "etl.freelime_feed", "--interval", "900"]
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./.env:/app/.env:ro
+      - ./.env.elims:/app/.env.elims:ro
+
+  frontend:                       # Next.js dashboard
+    build:
+      context: .
+      dockerfile: ops/docker/Dockerfile.frontend
+      args:
+        # the address BROWSERS use to reach the backend (CCR screens included)
+        NEXT_PUBLIC_API_BASE: "${PUBLIC_API_BASE:-http://localhost:8010}"
+    image: ccr-twin-frontend:latest
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3010}:3010"
+    depends_on: [backend]
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }

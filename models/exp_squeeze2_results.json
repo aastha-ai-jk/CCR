@@ -1,0 +1,30 @@
+{
+ "generated_at": "2026-08-27T13:38:54",
+ "rows": 419193,
+ "results": {
+  "huber_6k": {
+   "mae": 6.743,
+   "best_iter": 4628,
+   "train_s": 188.9
+  },
+  "huber_slow": {
+   "mae": 6.699,
+   "best_iter": 8000,
+   "train_s": 376.2
+  },
+  "arx": {
+   "mae": 6.489
+  },
+  "huber_arx": {
+   "mae": 6.63,
+   "w_arx": 0.15
+  },
+  "persistence": {
+   "mae": 7.951
+  }
+ },
+ "verdict": {
+  "best": "arx",
+  "mae": 6.489
+ }
+}

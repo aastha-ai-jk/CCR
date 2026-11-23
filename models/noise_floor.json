@@ -1,0 +1,12 @@
+{
+ "n_1s_rows": 24875288,
+ "sensor_sigma_degC": 0.0,
+ "mae_floor_from_noise_alone": 0.0,
+ "true_5min_change": {
+  "mean_abs": 11.645,
+  "p50_abs": 8.483,
+  "p90_abs": 25.733,
+  "std": 16.403
+ },
+ "note": "MAE vs raw truth >= noise floor + unexplained share of the true 5-min change. mean_abs(true change) is what a zero-skill (persistence-on-denoised) model would score."
+}

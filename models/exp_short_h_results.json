@@ -1,0 +1,31 @@
+{
+ "generated_at": "2026-09-02T12:21:57",
+ "rows": 422531,
+ "recipe": "v7: 89 feats, huber GBT + ARX blend w=0.4",
+ "horizons": {
+  "t+1": {
+   "gbt": 3.41,
+   "arx": 3.556,
+   "blend": 3.362,
+   "persistence": 3.874,
+   "skill_pct": 13.2,
+   "best_iter": 2000
+  },
+  "t+2": {
+   "gbt": 5.215,
+   "arx": 5.242,
+   "blend": 5.033,
+   "persistence": 6.084,
+   "skill_pct": 17.3,
+   "best_iter": 2000
+  },
+  "t+3": {
+   "gbt": 5.717,
+   "arx": 5.772,
+   "blend": 5.524,
+   "persistence": 7.227,
+   "skill_pct": 23.6,
+   "best_iter": 2000
+  }
+ }
+}

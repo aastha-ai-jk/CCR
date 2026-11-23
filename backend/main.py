@@ -1,0 +1,1472 @@
+"""FastAPI backend for the Calcination Combustion Control console.
+
+Run:  python -m uvicorn backend.main:app --reload --port 8000
+"""
+from __future__ import annotations
+
+import datetime as _dt
+import logging
+import threading
+import time
+
+import pandas as pd
+from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+
+import config
+from backend import db, analysis
+
+log = logging.getLogger("ccr.main")
+
+app = FastAPI(title="Calcination Combustion Control API", version="0.1")
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+)
+
+KEY_TAGS = ["423CI400_TT_4", "467RL400_TPH", "LAFR_FT", "K3V10_F1", "261WF080_TPH",
+            "467RL300_TPH", "353RL130_TPH", "423AM823_CO_PPM", "423AM823_O2",
+            "423AM822_CO_PPM", "423AM822_O2", "423AM822_NO", "433MD140_TQ",
+            "443KH050_TT1", "423DU415_TT", "423CN_TEMP"]
+
+
+def _clean_records(df: pd.DataFrame) -> list[dict]:
+    """to_dict + guarantee JSON-safe values (NaN/NaT -> None)."""
+    recs = df.to_dict("records")
+    for r in recs:
+        for k, v in r.items():
+            if v is not None and not isinstance(v, (list, dict, str, bool)):
+                try:
+                    if pd.isna(v):
+                        r[k] = None
+                except (TypeError, ValueError):
+                    pass
+    return recs
+
+
+def _san(v):
+    if v is None or isinstance(v, (str, bool)):
+        return v
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return v
+
+
+def _snapshot(tags: list[str] | None = None) -> dict:
+    """Latest process state — prefers the live OPC feed (`live_now`) when it is
+    fresh (< 120 s), otherwise falls back to the newest historical row."""
+    cat = db.tag_catalog()
+    tags = tags or list(cat["tag"])
+    # etl.live_feed rewrites live_now (drop + recreate) every tick, so a read can
+    # land in that gap. Retry briefly before falling back to historical.
+    lr = None
+    for attempt in range(4):
+        try:
+            lr = db.q("SELECT * FROM live_now LIMIT 1")
+            break
+        except Exception:
+            time.sleep(0.15)
+    if lr is not None and len(lr):
+        row = lr.iloc[0].to_dict()
+        ts = row.get("ts")
+        age = None
+        try:
+            age = (_dt.datetime.now() - _dt.datetime.fromisoformat(str(ts))).total_seconds()
+        except Exception:
+            pass
+        if age is None or age < 120:
+            # include EVERY live column (31 tags + extra cyclone temps), not
+            # just the dim_tag set, so the mimic can show all cyclones live
+            exclude = {"ts", "source", "feed_gate", "index"}
+            vals = {k: _san(v) for k, v in row.items() if k not in exclude}
+            for t in tags:
+                vals.setdefault(t, None)
+            return {"ts": ts, "values": vals,
+                    "source": row.get("source", "opc"),
+                    "age_sec": None if age is None else round(age, 1)}
+    cols = ", ".join(f'"{t}"' for t in tags)
+    r = db.q(f"SELECT ts, {cols} FROM process_1min ORDER BY ts DESC LIMIT 1")
+    snap = _clean_records(r)[0]
+    ts = snap.pop("ts", None)
+    return {"ts": ts, "values": snap, "source": "historical", "age_sec": None}
+
+
+@app.get("/api/health")
+def health():
+    n = db.q("SELECT COUNT(*) AS n FROM process_1min")["n"][0]
+    rng = db.q("SELECT MIN(ts) AS a, MAX(ts) AS b FROM process_1min")
+    return {"status": "ok", "backend": "sqlite" if config.USE_SQLITE else "postgres",
+            "process_rows": int(n), "from": str(rng["a"][0]), "to": str(rng["b"][0])}
+
+
+@app.get("/api/tags")
+def tags():
+    return _clean_records(db.tag_catalog())
+
+
+@app.get("/api/data-quality")
+def data_quality():
+    return _clean_records(db.q("SELECT * FROM data_quality ORDER BY pct_valid"))
+
+
+@app.get("/api/roadmap")
+def roadmap():
+    return _clean_records(db.q("SELECT * FROM roadmap_milestone ORDER BY ordinal"))
+
+
+@app.get("/api/series")
+def series(tags: str = Query(...), start: str | None = None, end: str | None = None,
+           bucket: str = "5min", in_load: bool = False, window: str | None = None):
+    # Charts on every open page ask for the same ranges; share one read for 30 s.
+    return _admin_cached(("series", tags, start, end, bucket, in_load, window),
+                         lambda: _series(tags, start, end, bucket, in_load, window), ttl=30)
+
+
+def _series(tags, start, end, bucket, in_load, window):
+    tlist = db.safe_tags(tags.split(","))
+    if not tlist:
+        return {"tags": [], "points": []}
+
+    # A "window" (hour|day|week|month) anchors to the NEWEST data across the
+    # historian AND the live feed (the historian only grows on the weekly
+    # ingest — anchoring to it alone left the "live" overview days stale) and
+    # picks a bucket so each range shows ~200-300 points. Explicit start/end
+    # override it; the bucket is derived per window.
+    if window and not (start or end):
+        anchors = [db.q("SELECT MAX(ts) AS m FROM process_1min")["m"][0]]
+        try:
+            anchors.append(db.q("SELECT MAX(ts) AS m FROM process_live")["m"][0])
+        except Exception:
+            pass
+        end_dt = max(pd.to_datetime(a, format="mixed") for a in anchors if a)
+        spec = {"hour": (pd.Timedelta(hours=1), "1min"), "day": (pd.Timedelta(days=1), "5min"),
+                "week": (pd.Timedelta(days=7), "30min"), "month": (pd.Timedelta(days=30), "3h")}
+        span, wbucket = spec.get(window, spec["week"])
+        start = (end_dt - span).strftime("%Y-%m-%d %H:%M:%S")
+        end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+        bucket = wbucket
+
+    cols = ", ".join(f'"{t}"' for t in tlist)
+    where, params = [], {}
+    if in_load:
+        where.append("feed_gate=1")
+    if start:
+        where.append("ts >= :start"); params["start"] = start
+    if end:
+        where.append("ts <= :end"); params["end"] = end
+    w = ("WHERE " + " AND ".join(where)) if where else ""
+    df = db.q(f"SELECT ts, {cols} FROM process_1min {w} ORDER BY ts", params)
+    df["ts"] = pd.to_datetime(df["ts"], format="mixed")
+    df = df.set_index("ts").apply(pd.to_numeric, errors="coerce")
+
+    # Extend with 1-min aggregates from the live feed for minutes the weekly
+    # ingest hasn't folded into the historian yet. NB the two tables use
+    # different ts text formats ('...T...' vs '... ...'), so SQL gets only a
+    # coarse date-prefix filter and the precise bounds are applied in pandas.
+    if start or end:
+        try:
+            feed = config.KILN_FEED_TAG
+            lcols = ", ".join(f'"{t}"' for t in dict.fromkeys([*tlist, feed]))
+            ldf = db.q(f"SELECT ts, {lcols} FROM process_live WHERE ts >= :d",
+                       {"d": (start or "1970-01-01")[:10]})
+            if len(ldf):
+                ldf["ts"] = pd.to_datetime(ldf["ts"], format="mixed")
+                ldf = (ldf.set_index("ts").apply(pd.to_numeric, errors="coerce")
+                       .resample("1min").mean())
+                if in_load and feed in ldf.columns:
+                    ldf = ldf[ldf[feed] > config.KILN_FEED_MIN_TPH]
+                ldf = ldf[[t for t in tlist if t in ldf.columns]]
+                df = pd.concat([df, ldf[~ldf.index.isin(df.index)]]).sort_index()
+        except Exception:
+            pass                                  # live table absent -> historian only
+        if start:
+            df = df[df.index >= pd.to_datetime(start)]
+        if end:
+            df = df[df.index <= pd.to_datetime(end)]
+
+    if bucket and bucket != "raw":
+        df = df.resample(bucket).mean()
+    df = df.round(2).reset_index()
+    df["ts"] = df["ts"].dt.strftime("%Y-%m-%d %H:%M")
+    return {"tags": tlist, "bucket": bucket, "points": _clean_records(df)}
+
+
+@app.get("/api/correlation")
+def correlation(tags: str, start: str | None = None, end: str | None = None,
+                bucket: str = "15min"):
+    return analysis.correlation(tags.split(","), start, end, bucket)
+
+
+@app.get("/api/crosscorr")
+def crosscorr(a: str, b: str, start: str | None = None, end: str | None = None,
+              max_lag_min: int = 30):
+    return analysis.cross_correlation(a, b, start, end, max_lag_min)
+
+
+@app.get("/api/lab/hotmeal")
+def lab_hotmeal(limit: int = 500):
+    return _clean_records(db.q(
+        "SELECT * FROM lab_hotmeal ORDER BY ts DESC LIMIT :n", {"n": limit}))
+
+
+@app.get("/api/lab/clinker")
+def lab_clinker(limit: int = 500):
+    return _clean_records(db.q(
+        "SELECT * FROM lab_clinker ORDER BY ts DESC LIMIT :n", {"n": limit}))
+
+
+_LAB_INFO: dict = {"info": {}}
+
+
+def _live_inputs() -> tuple[dict, dict, dict, dict]:
+    """Live snapshot -> (snapshot meta, values, twin conditions, twin levers)."""
+    s = _snapshot()
+    snap = dict(s["values"])
+    snap["ts"] = s["ts"]
+    # Lab votes (free lime, liter weight, liquid, DOC): newest of live eLIMS and
+    # the lab files, used only when fresh (P1 / A5). Stale ones are left out of
+    # the state vote; _LAB_INFO keeps what was seen for the advisor screen.
+    from etl.lab_live import latest_lab
+    adv = config.plant_settings().get("advisor", {}) or {}
+    conditions, _LAB_INFO["info"] = latest_lab(
+        db.q, max_age_h=adv.get("lab_max_age_h"), lag_h=adv.get("elims_lag_h"))
+    # PLC state-setting vars + current temp so the band/state votes use live data
+    conditions["current_temp"] = snap.get("423CI400_TT_4")
+    for t in analysis.STATE_PLC:
+        if snap.get(t) is not None:
+            conditions[t] = snap[t]
+    # v2 twin context: hot-side temps + secondary-air/PH-outlet, live not median
+    try:
+        from twin.features import SERVE_CONTEXT_TAGS
+        for t in SERVE_CONTEXT_TAGS:
+            if snap.get(t) is not None:
+                conditions[t] = snap[t]
+    except Exception:
+        pass
+    levers = {k: snap.get(k) for k in analysis.FEATURES if snap.get(k) is not None}
+    # live lever values ride in conditions too: the twin's what-if layer
+    # measures every lever change against this same snapshot
+    for t in analysis.MV:
+        if snap.get(t) is not None:
+            conditions[t] = snap[t]
+    return s, snap, conditions, levers
+
+
+@app.get("/api/overview")
+def overview():
+    s, snap, conditions, levers = _live_inputs()
+
+    # actual (not predicted) interlock status from the latest snapshot
+    names = db.tag_names()
+    interlocks = []
+    for tag, (op, lim) in config.INTERLOCKS.items():
+        pv = snap.get(tag)
+        ok = None if pv is None else (pv < lim if op == "<" else pv > lim)
+        interlocks.append({"tag": tag, "name": names.get(tag, tag),
+                           "rule": f"{op} {lim}", "value": pv, "pass": ok})
+
+    state = analysis.simulate(levers, conditions)
+    return {"snapshot": snap, "conditions": conditions,
+            "operating_state": state["operating_state"],
+            "target_band": state["target_band"], "state_votes": state["state_votes"],
+            "interlocks": interlocks, "source": s["source"], "age_sec": s["age_sec"]}
+
+
+@app.get("/api/twin/forecast")
+def twin_forecast():
+    """Twin forecast of calciner outlet temp for the CURRENT plant state:
+    t+5 prediction (mean/p10/p90) plus the t+5/10/15/30 trajectory when the
+    GBT twin is serving. `method` says whether it is the twin or the fallback."""
+    s, snap, conditions, levers = _live_inputs()
+    sim = analysis.simulate(levers, conditions)
+    return _json_safe({
+        "ts": s["ts"], "source": s["source"], "age_sec": s["age_sec"],
+        "tag": analysis.CV, "actual_now": snap.get(analysis.CV),
+        "method": sim["method"], "horizon_min": sim["horizon_min"],
+        "prediction": sim["prediction"][analysis.CV],
+        "trajectory": sim.get("trajectory"),
+        "operating_state": sim["operating_state"], "target_band": sim["target_band"],
+    })
+
+
+# Digital twin = the plant DELTA minutes ahead. Levers are the live values with
+# every ACTIVE accepted setpoint applied now (backend.decisions.setpoints); the
+# calciner temp + safety analysers are the twin's t+DELTA prediction; every
+# other tag has no model and stays live (basis "live"). Cached per live
+# snapshot + active-setpoint set, so the 2.5 s dashboard poll stays cheap.
+_future_cache: dict = {"key": None, "out": None}
+
+
+@app.get("/api/twin/future")
+def twin_future():
+    from backend import decisions
+    s, snap, conditions, levers = _live_inputs()
+    sp = decisions.setpoints(snap)
+    active = {t: v["accepted"] for t, v in sp.items() if v["status"] == "active"}
+    key = (s["ts"], tuple(sorted(active.items())))
+    if _future_cache["key"] == key:
+        return _future_cache["out"]
+
+    base = analysis.simulate(levers, conditions)
+    twin = analysis.simulate({**levers, **active}, conditions) if active else base
+    pred = twin["prediction"]
+    values = {}
+    for tag, live_v in snap.items():
+        if tag == "ts":
+            continue
+        if tag in pred:
+            values[tag] = {"twin": pred[tag]["mean"], "live": live_v, "basis": "twin"}
+        elif tag in active:
+            values[tag] = {"twin": active[tag], "live": live_v, "basis": "setpoint"}
+        else:
+            values[tag] = {"twin": live_v, "live": live_v, "basis": "live"}
+    try:
+        twin_ts = (_dt.datetime.fromisoformat(str(s["ts"]).replace(" ", "T")[:19])
+                   + _dt.timedelta(minutes=analysis.DELTA)).isoformat(timespec="seconds")
+    except ValueError:
+        twin_ts = None
+    cv_twin, cv_base = pred[analysis.CV], base["prediction"][analysis.CV]
+    out = _json_safe({
+        "live_ts": s["ts"], "twin_ts": twin_ts, "horizon_min": analysis.DELTA,
+        "source": s["source"], "age_sec": s["age_sec"], "method": twin["method"],
+        "values": values,
+        "prediction": cv_twin,                       # with active setpoints
+        "baseline_prediction": cv_base,              # live levers only
+        "setpoint_effect_c": round(cv_twin["mean"] - cv_base["mean"], 1),
+        # calciner temp at every trained horizon (t+5/10/15/30), same split
+        "trajectory": twin.get("trajectory"),
+        "baseline_trajectory": base.get("trajectory"),
+        "setpoints": list(sp.values()),
+        "operating_state": twin["operating_state"], "target_band": twin["target_band"],
+        "interlocks": twin["interlocks"], "all_interlocks_ok": twin["all_interlocks_ok"],
+    })
+    _future_cache.update(key=key, out=out)
+    return out
+
+
+# CCR advisor: recommendation for the next DELTA minutes over the advisor
+# levers (the 4 calciner fuel levers); kiln coal, kiln feed, PH fan speed and
+# kiln speed are fixed by the plant team and stay at their live values. One optimisation takes
+# ~40 s on a laptop, so it runs in a background thread at most every
+# ADVISOR_REFRESH_SEC and the endpoint serves the latest result.
+ADVISOR_REFRESH_SEC = 60
+ADVISOR_TRIALS = 120
+
+
+def _latest_clinker() -> dict | None:
+    """Newest clinker lab result (ts, free_lime, liter_weight) from lab_clinker
+    and, where the eLIMS live feed runs, lab_freelime_live."""
+    from etl.lab_live import ELIMS_LAG_H
+    lag_h = float(((_adv_setting("elims_lag_h", {}) or {}).get("clinker")) or ELIMS_LAG_H["clinker"])
+    rows = []
+    for sql, lag in (("SELECT ts, free_lime, liter_weight FROM lab_clinker "
+                      "WHERE free_lime IS NOT NULL OR liter_weight IS NOT NULL ORDER BY ts DESC LIMIT 20", lag_h),
+                     ("SELECT ts, free_lime, liter_weight FROM lab_freelime_live "
+                      "WHERE free_lime IS NOT NULL ORDER BY ts DESC LIMIT 20", lag_h)):
+        try:
+            got = db.q(sql)
+        except Exception:
+            try:                                   # live table from before liter weight
+                got = db.q(sql.replace("free_lime, liter_weight", "free_lime, NULL AS liter_weight"))
+            except Exception:
+                continue                           # table absent on this install
+        # eLIMS time minus ELIMS_LAG_H (0 since 19 Nov: the eLIMS time as-is)
+        got["t"] = pd.to_datetime(got["ts"], format="mixed", errors="coerce") - pd.Timedelta(hours=lag)
+        rows.append(got)
+    if not rows:
+        return None
+    d = pd.concat(rows, ignore_index=True)
+    # eLIMS stores "not measured" as 0: implausible values count as missing
+    from etl.lab_live import VALID
+    for col in ("free_lime", "liter_weight"):
+        lo, hi = VALID[col]
+        v = pd.to_numeric(d[col], errors="coerce")
+        d[col] = v.where((v >= lo) & (v <= hi))
+    d = d.dropna(subset=["t"]).dropna(subset=["free_lime", "liter_weight"], how="all").sort_values("t")
+    if not len(d):
+        return None
+    r = d.iloc[-1]
+    num = lambda v: None if pd.isna(v) else float(v)
+    return {"ts": r["t"].isoformat(timespec="seconds"),
+            "free_lime": num(r["free_lime"]), "liter_weight": num(r["liter_weight"])}
+
+
+def _guard_lab() -> dict:
+    """Latest clinker lab + the hot meal DOC (GR3) when its sample is fresh."""
+    c = dict(_latest_clinker() or {})
+    d = (_LAB_INFO["info"] or {}).get("doc") or {}
+    if d.get("used") and d.get("value") is not None:
+        c.update(doc=d["value"], doc_ts=d.get("ts"))
+    return c
+
+
+def _adv_setting(key: str, default):
+    """data/plant_settings.json "advisor" value (re-read each call), else default."""
+    v = (config.plant_settings().get("advisor") or {}).get(key)
+    return default if v is None else v
+_advisor = {"result": None, "computed_at": 0.0, "busy": False, "inputs": {}}
+_advisor_lock = threading.Lock()
+
+# "Instant" advice: recompute as soon as the plant moves noticeably since the
+# inputs of the last advisory (any of these by more than its threshold), at
+# most every ADVISOR_MIN_GAP_SEC, and at least every refresh_sec regardless.
+ADVISOR_MIN_GAP_SEC = 15
+COAL_REFRESH_SEC = 15      # instantaneous coal: coal-only re-search between full runs
+# Calciner coal is not a trigger since 16 Nov: its moves are followed by the
+# 15-s coal-only refresh (_coal_run), which needs the full run to be idle.
+ADVISOR_TRIGGER = {analysis.CV: 2.0,              # calciner outlet temp, degC
+                   "261WF080_TPH": 0.5,           # SAFR, t/h
+                   "LAFR_FT": 50.0, "K3V10_F1": 50.0,   # LAFR (held, still a model input), l/h
+                   config.KILN_FEED_TAG: 5.0}     # kiln feed, t/h
+
+
+def _advisor_inputs_moved(values: dict) -> bool:
+    last = _advisor.get("inputs") or {}
+    if not last:
+        return True
+    for tag, thr in ADVISOR_TRIGGER.items():
+        a, b = values.get(tag), last.get(tag)
+        if a is not None and b is not None and abs(float(a) - float(b)) > thr:
+            return True
+    return False
+
+
+COAL_MAX_MOVE_PCT = 5.0     # plant 17 Nov: calciner coal moves at most ±5 % per advice
+
+
+def _coal_move_pct(twin_opt) -> dict:
+    """Per-lever move cap: calciner coal ±5 % of its live value (SAFR keeps the
+    general ±10 %). plant_settings advisor.coal_max_move_pct overrides."""
+    return {twin_opt.COAL: float(_adv_setting("coal_max_move_pct", COAL_MAX_MOVE_PCT))}
+
+
+def _instant_coal(r: dict, inputs: dict, twin_opt) -> dict:
+    """Instantaneous coal firing (plant, 16 Nov): when the set is HELD (A8), SAFR
+    stays at the held value but coal is searched afresh on the latest data, with
+    the same rules (least coal, band at T+horizon, ±10 % move cap, limits). The
+    T+10 temperature, band check and economics then follow the new coal, so the
+    screen shows one consistent set. A fresh (not held) set is already
+    instantaneous. Any failure keeps the held set."""
+    COAL, SAFR = twin_opt.COAL, "261WF080_TPH"
+    rec = r.get("recommended") or {}
+    if not r.get("held") or rec.get(COAL) is None or rec.get(SAFR) is None:
+        return r
+    try:
+        c = twin_opt.optimize({**inputs, SAFR: float(rec[SAFR])}, levers=[COAL],
+                              steps={COAL: (_adv_setting("step", {}) or {}).get(COAL, 0.1)},
+                              n_trials=int(_adv_setting("coal_trials", 30)),
+                              clinker=_guard_lab(), objective_mode="least_coal",
+                              horizon=int(_adv_setting("horizon_min", twin_opt.ADVISOR_HORIZON)),
+                              max_move_pct=float(_adv_setting("max_move_pct", 10.0)),
+                              lever_move_pct=_coal_move_pct(twin_opt))
+        if c.get("error") or (c.get("recommended") or {}).get(COAL) is None:
+            return r
+        out = dict(r)
+        out["recommended"] = {**rec, COAL: c["recommended"][COAL]}
+        for k in ("predicted", "trajectory", "reach_min", "band_confidence", "in_band",
+                  "all_limits_met", "limits_excess", "interlocks", "quality"):
+            out[k] = c.get(k)
+        base_t = (r.get("baseline") or {}).get("temp")
+        new_t = ((c.get("predicted") or {}).get("temp") or {}).get("mean")
+        # "current" = the inputs of THIS search (a 15-s coal refresh has newer ones)
+        base_lv = {**((r.get("baseline") or {}).get("levers") or {}),
+                   **{t: round(float(inputs[t]), 2) for t in (COAL, SAFR) if inputs.get(t) is not None}}
+        out["baseline"] = {**(r.get("baseline") or {}), "levers": base_lv}
+        out["delta"] = {**(r.get("delta") or {}),
+                        "coal": round(float(c["recommended"][COAL]) - float(base_lv[COAL]), 2),
+                        "temp": None if base_t is None or new_t is None else round(new_t - base_t, 1)}
+        out["objective"] = {**(r.get("objective") or {}), "coal": c["recommended"][COAL]}
+        out["heat"] = {**(r.get("heat") or {}),
+                       "recommended_kcal_h": (c.get("heat") or {}).get("recommended_kcal_h")}
+        eco_r, eco_b = (c.get("economics") or {}).get("recommended"), (r.get("economics") or {}).get("baseline")
+        if eco_r and eco_b:
+            out["economics"] = {**r["economics"], "recommended": eco_r, "savings": {
+                "coal_tph": round(eco_b["coal_tph"] - eco_r["coal_tph"], 2),
+                "cost_per_ton": round(eco_b["cost_per_ton"] - eco_r["cost_per_ton"], 1),
+                "tsr_pts": round(eco_r["tsr_pct"] - eco_b["tsr_pct"], 2),
+                "specific_heat_kcal_kg": round(eco_b["specific_heat_kcal_kg"] - eco_r["specific_heat_kcal_kg"], 1),
+                "is_estimate": eco_r.get("is_estimate")}}
+        out["coal_instant"] = True
+        out["hold_reason"] = (r.get("hold_reason") or "kept") + "; coal re-searched (instantaneous)"
+        return out
+    except Exception:
+        log.warning("instantaneous coal search failed; held set kept", exc_info=True)
+        return r
+
+
+def _advisor_inputs() -> tuple[dict, dict, dict]:
+    """Live snapshot + model inputs for an advisor run. "Current" value of each
+    advised lever = its 2-minute mean, not the noisy 2-s reading (SAFR
+    weigh-feeder jumps 1-2 t/h between samples): anchors the ±10 % move cap
+    (A10) and the held-advice check (A8)."""
+    s, snap, conditions, levers = _live_inputs()
+    try:
+        from backend.decisions import _lever_series
+        from twin.optimize import ADVISOR_LEVERS
+        t_now = _dt.datetime.fromisoformat(str(s["ts"]))
+        for t in ADVISOR_LEVERS:
+            m = _lever_series(t, t_now - _dt.timedelta(seconds=int(_adv_setting("current_avg_sec", 120))), t_now)
+            if len(m) >= 3:
+                conditions[t] = levers[t] = float(m.mean())
+    except Exception:
+        pass                                          # fall back to the instant reading
+    return s, conditions, levers
+
+
+def _coal_run() -> None:
+    """Instantaneous coal (plant, 16 Nov): between full advisor runs, every
+    coal_refresh_sec (15 s) re-search ONLY coal on the latest data, SAFR kept at
+    the advice on screen. The full run (every refresh_sec, or when the plant
+    moves) still decides SAFR with the A8 hold."""
+    try:
+        from twin import optimize as twin_opt
+        prev = _advisor.get("result") or {}
+        if not prev.get("recommended"):
+            return
+        s, conditions, levers = _advisor_inputs()
+        feed = s["values"].get(config.KILN_FEED_TAG)
+        if (feed is None or float(feed) < config.KILN_FEED_MIN_TPH
+                or prev.get("source") != s["source"]):
+            return                                    # the full run handles these
+        # Stale SAFR (18 Nov): the plant's SAFR is now >hold.max_dev_pct (10 %) away
+        # from the SAFR on screen -> no coal-only refresh around it; ask for a
+        # full run (SAFR + coal afresh) at the next poll instead.
+        SAFR = "261WF080_TPH"
+        rs, ls = (prev.get("recommended") or {}).get(SAFR), levers.get(SAFR)
+        max_dev = float((_adv_setting("hold", {}) or {}).get("max_dev_pct", 10.0))
+        if rs is not None and ls is not None and                 abs(float(rs) - float(ls)) > max(abs(float(ls)) * max_dev / 100.0, 0.1):
+            _advisor["computed_at"] = 0.0
+            return
+        r = _instant_coal({**prev, "held": True}, {**conditions, **levers}, twin_opt)
+        if not r.get("coal_instant"):
+            return
+        r["ts"], r["source"] = s["ts"], s["source"]
+        r["held_since"] = prev.get("held_since") or prev.get("ts")
+        r["lab_inputs"] = dict(_LAB_INFO["info"])
+        from twin import reasoning
+        reasoning.attach(r)
+        with _advisor_lock:
+            if _advisor.get("result") is not prev or _advisor["busy"]:
+                return                                # a full run replaced it meanwhile
+            from backend import decisions
+            r["log_id"] = decisions.log_advisory(r)
+            _advisor["result"] = r
+    except Exception:
+        log.warning("coal refresh failed", exc_info=True)
+    finally:
+        _advisor["coal_at"] = time.time()
+        _advisor["coal_busy"] = False
+
+
+def _advisor_run() -> None:
+    try:
+        from twin import optimize as twin_opt
+        s, conditions, levers = _advisor_inputs()
+        _advisor["inputs"] = {t: s["values"].get(t) for t in ADVISOR_TRIGGER}
+        # Kiln stopped / not in load: no fuel advice (control actions only apply
+        # above KILN_FEED_MIN_TPH, per the combustion control logic).
+        feed = s["values"].get(config.KILN_FEED_TAG)
+        if feed is None or float(feed) < config.KILN_FEED_MIN_TPH:
+            _advisor.update(result={"available": False, "kiln_running": False,
+                                    "kiln_feed": feed, "ts": s["ts"], "source": s["source"],
+                                    "lab_inputs": dict(_LAB_INFO["info"])},
+                            computed_at=time.time())
+            return
+        # A8: the advice on screen is re-scored and kept unless clearly beaten;
+        # never held beyond its own horizon (then a fresh search decides).
+        prev = _advisor.get("result") or {}
+        horizon = int(_adv_setting("horizon_min", twin_opt.ADVISOR_HORIZON))
+        held_since = prev.get("held_since") or prev.get("ts")
+        try:
+            prev_age = (_dt.datetime.fromisoformat(str(s["ts"])) -
+                        _dt.datetime.fromisoformat(str(held_since))).total_seconds() / 60.0
+        except Exception:
+            prev_age = None
+        incumbent = (prev.get("recommended") if prev.get("recommended") and prev_age is not None
+                     and prev_age < horizon and prev.get("source") == s["source"] else None)
+        # Held advice must still pass the total-heat cap (GR8) against the plant as
+        # it is NOW; else it would stay on screen yet be blocked -> search afresh.
+        if incumbent:
+            try:
+                from backend import guardrails
+                from twin import economics
+                econ = config.fuel_economics()
+                cur = {t: float(conditions[t]) for t in econ if conditions.get(t) is not None}
+                h = guardrails.heat_change(economics._heat_per_h(cur, econ)[1],
+                                           economics._heat_per_h({**cur, **incumbent}, econ)[1])
+                if h["flag"]:
+                    incumbent = None
+            except Exception:
+                pass                                  # the optimizer's own hold rules still apply
+        r = twin_opt.optimize({**conditions, **levers},
+                              incumbent=incumbent,
+                              steps=_adv_setting("step", {"467RL400_TPH": 0.1, "261WF080_TPH": 0.1}),
+                              hold=_adv_setting("hold", {"temp_c": 2.0, "coal_tph": 0.5,
+                                                         # 18 Nov: 10 (was 20) - drop a held
+                                                         # set once the plant is >10 % away,
+                                                         # so a stale SAFR is not kept
+                                                         "max_dev_pct": 10.0}),
+                              n_trials=int(_adv_setting("trials", ADVISOR_TRIALS)),
+                              levers=twin_opt.ADVISOR_LEVERS,
+                              clinker=_guard_lab(),
+                              objective_mode="least_coal",   # plant aim; settings can override
+                              horizon=int(_adv_setting("horizon_min", twin_opt.ADVISOR_HORIZON)),
+                              # A10: at most ±10 % of the live value per recommendation
+                              # (calciner coal ±5 %, plant 17 Nov)
+                              max_move_pct=float(_adv_setting("max_move_pct", 10.0)),
+                              lever_move_pct=_coal_move_pct(twin_opt))
+        r = _instant_coal(r, {**conditions, **levers}, twin_opt)
+        r["ts"], r["source"] = s["ts"], s["source"]
+        r["held_since"] = held_since if r.get("held") and incumbent else s["ts"]
+        r["lab_inputs"] = dict(_LAB_INFO["info"])      # which lab values voted, and their age
+        from twin import reasoning                # "why" text: template, + LLM when enabled
+        reasoning.attach(r)
+        from backend import decisions               # advisor_log: computed / new-recommendation count
+        r["log_id"] = decisions.log_advisory(r)
+        _advisor.update(result=r, computed_at=time.time())
+    except Exception as e:                       # never kill the thread silently
+        _advisor.update(result={"available": False, "error": repr(e)},
+                        computed_at=time.time())
+    finally:
+        _advisor["busy"] = False
+
+
+@app.get("/api/twin/advisor")
+def twin_advisor(screen: int = 0):
+    """Latest advisory setpoints for the advisor levers (ADVISORY ONLY), plus
+    the live current value of each lever. Kicks off a background
+    re-optimisation at once when there is no advice yet, when the plant has moved
+    noticeably since the last one (ADVISOR_TRIGGER, at most every
+    ADVISOR_MIN_GAP_SEC), or when it is older than refresh_sec. ``screen=1``
+    (the CCR advisor page) marks the advice as shown, for the admin count."""
+    from twin.optimize import ADVISOR_LEVERS, FIXED_LEVERS
+    s = _snapshot()
+    with _advisor_lock:
+        age = time.time() - _advisor["computed_at"]
+        due = (_advisor["result"] is None
+               or age > float(_adv_setting("refresh_sec", ADVISOR_REFRESH_SEC))
+               or (age > float(_adv_setting("min_gap_sec", ADVISOR_MIN_GAP_SEC))
+                   and _advisor_inputs_moved(s["values"])))
+        # Instantaneous coal (16 Nov) goes first: a coal-only refresh whenever the
+        # coal on screen is older than coal_refresh_sec (15 s); the full run (SAFR
+        # + coal, A8 hold) takes the next free moment. Never both at once.
+        coal_due = (bool((_advisor["result"] or {}).get("recommended"))
+                    and time.time() - max(_advisor["computed_at"], _advisor.get("coal_at", 0.0))
+                    > float(_adv_setting("coal_refresh_sec", COAL_REFRESH_SEC)))
+        idle = not _advisor["busy"] and not _advisor.get("coal_busy")
+        if idle and coal_due:
+            _advisor["coal_busy"] = True
+            threading.Thread(target=_coal_run, daemon=True).start()
+        elif idle and due:
+            _advisor["busy"] = True
+            threading.Thread(target=_advisor_run, daemon=True).start()
+    cat = db.tag_catalog().set_index("tag")
+    live = {t: {"name": str(cat.loc[t, "name"]),
+                "uom": None if pd.isna(cat.loc[t, "uom"]) else str(cat.loc[t, "uom"]),
+                "current": s["values"].get(t)} for t in ADVISOR_LEVERS}
+    r = _advisor["result"]
+    out = {"live": live, "live_ts": s["ts"], "live_source": s["source"],
+           "computing": _advisor["busy"], "horizon_min": analysis.DELTA,
+           "fixed_levers": FIXED_LEVERS}
+    if r is None:
+        out.update(available=False, pending=True)
+    else:
+        out.update(r)
+        out.setdefault("available", "recommended" in r)
+        out["age_sec"] = round(time.time() - _advisor["computed_at"], 1)
+    # Hard roof / floor (backend/guardrails.py): live and recommended values,
+    # current data only. Reported here; blocking Accept comes separately.
+    from backend import guardrails
+    out["guardrails"] = guardrails.evaluate(_fresh_values(s), _advisor_recommended(r))  # GR4: parameter limits
+    out["guardrails"]["combustion"] = _combustion(s)          # GR1: actual CO / O2
+    out["guardrails"]["direction"] = _direction(s, r)         # GR2: heat vs band
+    out["guardrails"]["drift"] = _drift(s)                    # GR6: model drift
+    out["guardrails"]["uncertainty"] = _uncertainty(r)        # GR7: P10-P90 range
+    out["guardrails"]["heat"] = _heat_change(s, r)            # GR8: total heat change
+    out["validation"] = _current_validation()["report"]
+    if screen and r and r.get("log_id"):
+        blocked = _accept_blocked(_fresh_values(s), _advisor_recommended(r),
+                                  out["guardrails"], out["validation"])
+        if not r.get("shown") or (blocked and not r.get("blocked")):
+            r["shown"], r["blocked"] = True, bool(r.get("blocked") or blocked)
+            from backend import decisions
+            decisions.mark_shown(r["log_id"], blocked)
+    return _json_safe(out)
+
+
+def _accept_blocked(live: dict, rec: dict, g: dict, val: dict | None) -> bool:
+    """Server copy of the advisor page's "Accept blocked" rule (setBlock in
+    static/ccr-kiln3-advisor.html), for the admin count: a parameter without a
+    current value or recommendation, a red guardrail, live CO / O2 unsafe on a
+    raise, or a data-check error on a parameter / all / the live feed."""
+    from twin.optimize import ADVISOR_LEVERS
+    tags = (*ADVISOR_LEVERS, analysis.CV)
+    for i in (val or {}).get("issues") or []:
+        if i.get("severity") == "error" and (i.get("check") == "freshness"
+                                             or i.get("scope") == "all" or i.get("scope") in tags):
+            return True
+    comb = bool((g.get("combustion") or {}).get("breaches"))
+    for t in tags:
+        lv, rv = live.get(t), rec.get(t)
+        if not isinstance(lv, (int, float)) or not isinstance(rv, (int, float)):
+            return True
+        if ((g.get("params") or {}).get(t) or {}).get("breach") or (comb and rv > lv):
+            return True
+    return False
+
+
+# Data validation (backend/validation.py): every input reading and every
+# recommendation is checked continuously. A background thread re-evaluates
+# every VALIDATION_INTERVAL_S and logs problems to validation_events; request
+# handlers use the latest result (recomputed if older than VALIDATION_MAX_AGE_S).
+VALIDATION_INTERVAL_S = 10
+VALIDATION_MAX_AGE_S = 15
+_validation = {"inputs": [], "rec": [], "report": None, "at": 0.0}
+_validation_lock = threading.Lock()
+
+
+def _recent_live(minutes: int = 30) -> pd.DataFrame | None:
+    """The live feed's last `minutes` of 2-s rows, oldest first (None if unavailable)."""
+    try:
+        df = db.q("SELECT * FROM process_live ORDER BY ts DESC LIMIT :n", {"n": int(minutes * 33)})
+    except Exception:
+        return None
+    if df is None or not len(df):
+        return None
+    t = pd.to_datetime(df["ts"], format="mixed", errors="coerce")
+    df = df[t >= t.max() - pd.Timedelta(minutes=minutes)]
+    return df.iloc[::-1].reset_index(drop=True)
+
+
+def _plc_ranges() -> dict:
+    from backend import validation
+    cat = db.tag_catalog().set_index("tag")
+    out = {}
+    for t in validation.LEVERS:
+        if t in cat.index and pd.notna(cat.loc[t, "y_min"]) and pd.notna(cat.loc[t, "y_max"]):
+            out[t] = (float(cat.loc[t, "y_min"]), float(cat.loc[t, "y_max"]))
+    return out
+
+
+def _current_validation(max_age: float = VALIDATION_MAX_AGE_S) -> dict:
+    """Latest validation of the live inputs and the twin advisor's recommendation."""
+    from backend import validation
+    with _validation_lock:
+        if _validation["report"] is not None and time.time() - _validation["at"] <= max_age:
+            return _validation
+    s = _snapshot()
+    inputs = validation.check_inputs(s, _recent_live() if s.get("source") != "historical" else None)
+    # The ranges come from production history (feed above 461 t/h). Below that
+    # there is no fuel advice anyway, so out-of-range readings are not alarmed.
+    feed = (s.get("values") or {}).get(config.KILN_FEED_TAG)
+    if feed is not None and float(feed) < config.KILN_FEED_MIN_TPH:
+        inputs = [i for i in inputs if i["check"] not in ("range", "rare value")]
+    r = _advisor["result"]
+    rec_issues = []
+    rec = _advisor_recommended(r)                     # {} unless current and live-based
+    if rec:
+        rec_issues = validation.check_recommendation(
+            {k: v for k, v in rec.items() if k != analysis.CV}, s.get("values", {}),
+            rec.get(analysis.CV), r.get("interlocks"), _plc_ranges())
+    rep = validation.report(inputs, rec_issues)
+    with _validation_lock:
+        _validation.update(inputs=inputs, rec=rec_issues, report=rep, at=time.time())
+        return dict(_validation)
+
+
+def _validation_loop() -> None:
+    from backend import validation
+    while True:
+        try:
+            v = _current_validation(max_age=0)
+            validation.log_events(db.engine(), v["report"])
+        except Exception as e:                       # never let the monitor die
+            print(f"[validation] check failed: {e!r}")
+        time.sleep(VALIDATION_INTERVAL_S)
+
+
+@app.on_event("startup")
+def _start_validation_monitor() -> None:
+    threading.Thread(target=_validation_loop, name="validation-monitor", daemon=True).start()
+
+
+@app.get("/api/validation")
+def get_validation():
+    """Current validation of every live input and of the twin advisor's
+    recommendation: status, which levers are blocked, and every issue."""
+    import json as _json
+    from backend import validation
+    v = _current_validation()
+    meta = {}
+    try:
+        raw = _json.loads(validation.LIMITS_PATH.read_text(encoding="utf-8"))
+        meta = {"limits_generated": raw.get("_generated"), "limits_rows": raw.get("_rows"),
+                "tags_with_limits": len(raw.get("tags", {}))}
+    except Exception:
+        pass
+    return _json_safe({**(v["report"] or {}), "age_sec": round(time.time() - v["at"], 1), **meta})
+
+
+@app.get("/api/validation/events")
+def get_validation_events(limit: int = Query(100, ge=1, le=2000), open_only: bool = False):
+    """Validation problems over time: when each started, was last seen, and cleared."""
+    from backend import validation
+    from sqlalchemy import text
+    with db.engine().begin() as con:
+        con.execute(text(validation._EVENTS_DDL))
+    where = "WHERE cleared_at IS NULL" if open_only else ""
+    df = db.q(f"SELECT * FROM validation_events {where} ORDER BY id DESC LIMIT :n", {"n": limit})
+    return _json_safe({"n": int(len(df)), "events": _clean_records(df)})
+
+
+def _combustion(s: dict) -> dict:
+    """GR1: live CO / O2 against the safety interlocks (current data only).
+    Judged on the last avg_sec average (brief spikes don't count); rows where
+    an analyser purges (O2 above 15 %) are left out of that analyser's average."""
+    from backend import guardrails
+    cat = db.tag_catalog().set_index("tag")
+    names = {t: str(cat.loc[t, "name"]) for t in config.INTERLOCKS if t in cat.index}
+    vals = _fresh_values(s)
+    if not vals:
+        return guardrails.combustion({}, names)
+    avg_sec = float(guardrails.combustion_settings().get("avg_sec") or 120)
+    d = _recent_live(minutes=max(1, int(avg_sec // 60) + 1))
+    if d is not None and len(d):
+        t = pd.to_datetime(d["ts"], format="mixed", errors="coerce")
+        d = d[t >= t.max() - pd.Timedelta(seconds=avg_sec)]
+        probe = {**guardrails._PROBE, **{o: o for o in guardrails._PROBE.values()}}
+        vals = dict(vals)
+        for tag in config.INTERLOCKS:
+            if tag not in d:
+                continue
+            v = pd.to_numeric(d[tag], errors="coerce")
+            o2 = probe.get(tag)
+            if o2 in d:
+                v = v[pd.to_numeric(d[o2], errors="coerce") <= guardrails.PURGE_O2]
+            if v.notna().any():
+                vals[tag] = float(v.mean())
+            else:                                  # whole window purging: no judgement
+                vals.pop(tag, None)
+    return guardrails.combustion(vals, names)
+
+
+def _direction(s: dict, r: dict | None) -> dict:
+    """GR2: does the current advice move total calciner heat the right way for
+    where the PREDICTED T+10 temperature (the advice's own target) lands against
+    the band? Judged on current advice only (29 Oct: was the live temperature,
+    which flagged correct moves made ahead of a forecast rise or fall)."""
+    from backend import guardrails
+    ok = bool(_advisor_recommended(r)) and bool(_fresh_values(s))
+    pred = ((r or {}).get("predicted") or {}).get("temp") or {}
+    return guardrails.direction(pred.get("mean") if ok else None,
+                                (r or {}).get("target_band"), (r or {}).get("heat"))
+
+
+def _drift(s: dict) -> dict:
+    """GR6: recent T+10 forecast errors from shadow_log (kiln running only).
+    Judged only while the live feed is current."""
+    from backend import guardrails
+    if not _fresh_values(s):
+        return guardrails.drift([])
+    win = guardrails.drift_settings()["window_min"]
+    try:
+        d = db.q("SELECT ts, feed_gate, pred10_mean, actual10, matured10 FROM shadow_log "
+                 "ORDER BY rowid DESC LIMIT 2000")
+    except Exception:
+        return guardrails.drift([])
+    t = pd.to_datetime(d["ts"], format="mixed", errors="coerce")
+    d = d[(t >= pd.Timestamp(_dt.datetime.now()) - pd.Timedelta(minutes=win + 10))
+          & (d["matured10"].fillna(0).astype(int) == 1)
+          & (d["feed_gate"].fillna(0).astype(int) == 1)]
+    err = pd.to_numeric(d["actual10"], errors="coerce") - pd.to_numeric(d["pred10_mean"], errors="coerce")
+    return guardrails.drift(err.dropna().tolist())
+
+
+def _uncertainty(r: dict | None) -> dict:
+    """GR7: P10-P90 of the predicted T+10 temperature, current advice only."""
+    from backend import guardrails
+    temp = ((r or {}).get("predicted") or {}).get("temp") if _advisor_recommended(r) else None
+    return guardrails.uncertainty(temp)
+
+
+def _heat_change(s: dict, r: dict | None) -> dict:
+    """GR8: total calciner heat of the recommendation vs the live heat (2-min
+    average of every calciner fuel; the advised levers replaced by the advice)."""
+    from backend import guardrails
+    from twin import economics
+    rec = _advisor_recommended(r)
+    rec.pop(analysis.CV, None)
+    live = _fresh_values(s)
+    if not rec or not live:
+        return guardrails.heat_change(None, None)
+    econ = config.fuel_economics()
+    cur = {t: live.get(t) for t in econ}
+    d = _recent_live(minutes=3)
+    if d is not None and len(d):
+        t = pd.to_datetime(d["ts"], format="mixed", errors="coerce")
+        d = d[t >= t.max() - pd.Timedelta(seconds=120)]
+        for f in econ:
+            if f in d and pd.to_numeric(d[f], errors="coerce").notna().any():
+                cur[f] = float(pd.to_numeric(d[f], errors="coerce").mean())
+    cur = {f: float(v) for f, v in cur.items() if v is not None}
+    h0 = economics._heat_per_h(cur, econ)[1]
+    h1 = economics._heat_per_h({**cur, **rec}, econ)[1]
+    return guardrails.heat_change(h0, h1)
+
+
+def _fresh_values(s: dict) -> dict:
+    """Live values to judge -- none when the snapshot is historical (not current)."""
+    return {} if s.get("source") in (None, "historical") else dict(s.get("values") or {})
+
+
+def _advisor_recommended(r: dict | None) -> dict:
+    """Recommended levers + predicted T+10 temp (under the CV tag), current advice only."""
+    if not r or not r.get("recommended") or r.get("source") in (None, "historical"):
+        return {}
+    out = dict(r["recommended"])
+    t = ((r.get("predicted") or {}).get("temp") or {}).get("mean")
+    if t is not None:
+        out[analysis.CV] = t
+    return out
+
+
+@app.get("/api/latest")
+def latest():
+    """Latest value of every tag — feeds the live process mimic. Uses the live
+    OPC feed when available, else the newest historical row."""
+    cat = db.tag_catalog()
+    s = _snapshot()
+    units = {t: (None if pd.isna(u) else str(u)) for t, u in zip(cat["tag"], cat["uom"])}
+    return {"ts": s["ts"], "values": s["values"], "names": db.tag_names(),
+            "units": units, "source": s["source"], "age_sec": s["age_sec"]}
+
+
+@app.get("/api/live")
+def live():
+    """Alias of /api/latest kept explicit for the live dashboards."""
+    return latest()
+
+
+@app.get("/api/simulate/defaults")
+def sim_defaults():
+    cat = db.tag_catalog().set_index("tag")
+    out = {}
+    for f in analysis.FEATURES:
+        out[f] = {"name": str(cat.loc[f, "name"]), "uom": cat.loc[f, "uom"],
+                  "min": float(cat.loc[f, "y_min"]) if pd.notna(cat.loc[f, "y_min"]) else 0,
+                  "max": float(cat.loc[f, "y_max"]) if pd.notna(cat.loc[f, "y_max"]) else 100,
+                  "default": round(float(analysis.feature_defaults()[f]), 2)}
+    return {"features": out, "targets": analysis.TARGETS}
+
+
+class SimReq(BaseModel):
+    levers: dict = {}
+    conditions: dict = {}
+    k: int = 200
+
+
+@app.post("/api/simulate")
+def simulate(req: SimReq):
+    return analysis.simulate(req.levers, req.conditions, req.k)
+
+
+# ---------------------------------------------------------------------------
+# Digital-twin (GBT) endpoints — optimise / metrics / backtest.
+# ---------------------------------------------------------------------------
+def _json_safe(obj):
+    """Recursively replace NaN/Inf floats with None so FastAPI can serialise."""
+    import math
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    return obj
+
+
+class OptReq(BaseModel):
+    conditions: dict = {}
+
+
+@app.post("/api/optimize")
+def optimize(req: OptReq):
+    # Enrich with the live snapshot so the trust region centres on the plant's
+    # ACTUAL current setpoints (caller-supplied values always win).
+    try:
+        snap = _snapshot()["values"]
+        from twin.features import SERVE_CONTEXT_TAGS
+        from twin.optimize import OPT_LEVERS
+        fill = ["423CI400_TT_4", *analysis.STATE_PLC, *SERVE_CONTEXT_TAGS, *OPT_LEVERS]
+        for t in fill:
+            if req.conditions.get(t) is None and snap.get(t) is not None:
+                req.conditions[t] = snap[t]
+        if req.conditions.get("current_temp") is None and snap.get("423CI400_TT_4") is not None:
+            req.conditions["current_temp"] = snap["423CI400_TT_4"]
+    except Exception:
+        pass
+    """Advisory setpoint optimisation over the four calciner fuel levers."""
+    from twin import optimize as twin_opt
+    return _json_safe(twin_opt.optimize(req.conditions))
+
+
+@app.get("/api/twin/metrics")
+def twin_metrics():
+    """Serve models/metrics.json (GBT + NN + persistence) or availability flag."""
+    import json
+    p = config.ROOT / "models" / "metrics.json"
+    if not p.exists():
+        return {"available": False}
+    try:
+        data = json.loads(p.read_text())
+    except Exception:
+        return {"available": False}
+    if isinstance(data, dict):
+        data.setdefault("available", True)
+    return _json_safe(data)
+
+
+@app.get("/api/twin/backtest")
+def twin_backtest(start: str | None = None, end: str | None = None,
+                  max_points: int = 800):
+    """Replay a held-out feed_gate=1 window: engineer features from the
+    HISTORICAL frame exactly as training does, batch-predict the calciner temp
+    at t+DELTA, and compare to the realised value. (A per-row rebuild through
+    the serving path is wrong here — v7 serving pulls LIVE history, which must
+    never leak into a historical replay.)"""
+    from twin import features as tf
+    from twin import model as twin_model
+    CV = analysis.CV
+    if not twin_model.is_available():
+        return {"available": False, "series": [], "mae": None, "rmse": None,
+                "r2": None, "n": 0, "tag": CV}
+
+    delta = analysis.DELTA
+    cols = ", ".join(f'"{c}"' for c in tf._raw_columns())
+    where, params = ["feed_gate=1"], {}
+    if start:
+        where.append("ts >= :start"); params["start"] = start
+    if end:
+        where.append("ts <= :end"); params["end"] = end
+    w = "WHERE " + " AND ".join(where)
+    df = db.q(f"SELECT ts, {cols} FROM process_1min {w} ORDER BY ts", params)
+    if not len(df):
+        return {"available": True, "series": [], "mae": None, "rmse": None,
+                "r2": None, "n": 0, "tag": CV}
+
+    df["ts"] = pd.to_datetime(df["ts"], format="mixed")
+    for c in tf._raw_columns():
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    for mv in analysis.MV:
+        df[mv] = df[mv].ffill()
+    df = tf._engineer(df.sort_values("ts").reset_index(drop=True))
+    feats = tf.feature_columns()
+    df["actual_fwd"] = df[CV].shift(-delta)
+    dt_fwd = (df["ts"].shift(-delta) - df["ts"]).dt.total_seconds()
+    df = df[dt_fwd.between(4 * 60, 7 * 60) & df["actual_fwd"].notna()
+            & df[feats].notna().all(axis=1) & df[CV].notna()]
+    if not len(df):
+        return {"available": True, "series": [], "mae": None, "rmse": None,
+                "r2": None, "n": 0, "tag": CV}
+
+    # decimate AFTER engineering so lag/rolling features stay intact
+    step = max(1, len(df) // max(1, max_points))
+    df = df.iloc[::step].head(max_points)
+
+    out = twin_model.predict_frame(df[feats], df[CV].to_numpy(float))
+    series, actuals, preds = [], [], []
+    for i, rd in enumerate(df.to_dict("records")):
+        actual = float(rd["actual_fwd"])
+        series.append({"ts": rd["ts"].strftime("%Y-%m-%d %H:%M"),
+                       "actual": round(actual, 1),
+                       "pred": round(float(out["mean"][i]), 1),
+                       "p10": round(float(out["p10"][i]), 1),
+                       "p90": round(float(out["p90"][i]), 1)})
+        actuals.append(actual); preds.append(float(out["mean"][i]))
+
+    if actuals:
+        a = pd.Series(actuals, dtype=float); p = pd.Series(preds, dtype=float)
+        err = p - a
+        mae = float(err.abs().mean())
+        rmse = float((err ** 2).mean() ** 0.5)
+        ss_tot = float(((a - a.mean()) ** 2).sum())
+        r2 = float(1 - (err ** 2).sum() / ss_tot) if ss_tot > 0 else None
+    else:
+        mae = rmse = r2 = None
+
+    return _json_safe({"series": series, "mae": mae, "rmse": rmse, "r2": r2,
+                       "n": len(series), "tag": CV, "horizon_min": delta,
+                       "available": True})
+
+
+@app.get("/api/bench")
+def bench():
+    """Model Bench: side-by-side results of the 3-approach training bake-off
+    (twin.bench). Static artifact — regenerated by `python -m twin.bench`."""
+    import json as _json
+    from pathlib import Path as _Path
+    p = _Path(__file__).resolve().parent.parent / "models" / "bench_results.json"
+    if not p.exists():
+        return _json_safe({"available": False,
+                           "note": "run `python -m twin.bench` to generate results"})
+    return _json_safe({"available": True, **_json.loads(p.read_text())})
+
+
+@app.get("/api/monitor")
+def monitor(limit: int = 40):
+    """Multi-day monitoring: accuracy trail (monitor_log.jsonl), the live
+    conformal calibration, and the latest AFR fuel-quality readings."""
+    import json as _json
+    from pathlib import Path as _Path
+    mdir = _Path(__file__).resolve().parent.parent / "models"
+    out: dict = {"available": True}
+    log_p = mdir / "monitor_log.jsonl"
+    if log_p.exists():
+        lines = log_p.read_text().strip().splitlines()[-int(limit):]
+        out["log"] = [_json.loads(l) for l in lines]
+    else:
+        out["log"] = []
+    conf_p = mdir / "conformal.json"
+    out["conformal"] = _json.loads(conf_p.read_text()) if conf_p.exists() else None
+    try:
+        out["afr_recent"] = _clean_records(
+            db.q("SELECT * FROM afr_quality ORDER BY ts DESC LIMIT 120").iloc[::-1])
+    except Exception:
+        out["afr_recent"] = []
+    return _json_safe(out)
+
+
+@app.get("/api/shadow")
+def shadow(limit: int = 240):
+    """Shadow mode: the twin's live prediction/recommendation log beside the CCR,
+    with running tracking accuracy over matured (horizon-elapsed) predictions."""
+    try:
+        rows = db.q(f"SELECT * FROM shadow_log ORDER BY ts DESC LIMIT {int(limit)}")
+    except Exception:
+        return _json_safe({"available": False, "rows": [], "series": [], "n": 0,
+                           "note": "shadow runner is starting — no log yet."})
+    if not len(rows):
+        return _json_safe({"available": True, "series": [], "n": 0, "matured": 0,
+                           "running_mae": None})
+    matured = rows[rows["matured"] == 1]
+    mae = float(matured["abs_error"].mean()) if len(matured) else None
+    within = (float((matured["abs_error"] <= 5).mean()) if len(matured) else None)
+    latest = rows.iloc[0].to_dict()
+    return _json_safe({
+        "available": True,
+        "n": int(len(rows)),
+        "matured": int(len(matured)),
+        "running_mae": mae,
+        "pct_within_5C": within,
+        "horizon_min": analysis.DELTA,
+        "current": {k: latest.get(k) for k in (
+            "ts", "actual_now", "pred_mean", "pred_p10", "pred_p90", "state",
+            "band_lo", "band_hi", "in_band_now", "cur_coal", "rec_coal",
+            "delta_coal", "cur_afr", "rec_afr", "delta_afr", "rec_in_band",
+            "interlocks_ok")},
+        "series": _clean_records(rows.iloc[::-1]),
+    })
+
+
+@app.get("/api/admin/accuracy")
+def admin_accuracy(days: int = Query(7, ge=1, le=60)):
+    """P8: day-wise accuracy of the twin's checked predictions (shadow_log),
+    kiln running only. T+10 is the advisor's horizon; T+5 for comparison.
+    error = actual - predicted; within_5 = share with |error| <= 5 C."""
+    cut = (_dt.date.today() - _dt.timedelta(days=days - 1)).isoformat()
+    try:
+        d = db.q("SELECT ts, feed_gate, pred_mean, actual_future, matured, "
+                 "pred10_mean, actual10, matured10 FROM shadow_log WHERE ts >= :c",
+                 {"c": cut})
+    except Exception:
+        return {"available": False, "days": [], "note": "no T+10 tracking yet (shadow runner)"}
+    # one row for every day in the window (newest first); a day without
+    # checked predictions keeps t10 / t5 = None
+    out = {(_dt.date.today() - _dt.timedelta(days=i)).isoformat(): {} for i in range(days)}
+    for day in out:
+        out[day] = {"day": day, "t10": None, "t5": None}
+    if len(d):
+        d = d[d["feed_gate"].fillna(0).astype(int) == 1].copy()
+        d["day"] = d["ts"].astype(str).str[:10]
+        for day, g in d.groupby("day"):
+            if day not in out:
+                continue
+            row = out[day]
+            for h, pc, ac, mc in ((10, "pred10_mean", "actual10", "matured10"),
+                                  (5, "pred_mean", "actual_future", "matured")):
+                m = g[(g[mc].fillna(0).astype(int) == 1) & g[ac].notna() & g[pc].notna()]
+                err = (m[ac].astype(float) - m[pc].astype(float))
+                row[f"t{h}"] = None if not len(m) else {
+                    "n": int(len(m)), "mae": round(float(err.abs().mean()), 2),
+                    "bias": round(float(err.mean()), 2),
+                    "within_5": round(float((err.abs() <= 5).mean()) * 100, 1),
+                    "p90_abs": round(float(err.abs().quantile(0.9)), 2)}
+    return _json_safe({"available": True, "days": list(out.values())})
+
+
+def _latest_optimizer_row():
+    try:
+        r = db.q("SELECT * FROM optimizer_log ORDER BY ts DESC LIMIT 1")
+    except Exception:
+        return None
+    return _clean_records(r)[0] if len(r) else None
+
+
+@app.get("/api/fuel")
+def fuel():
+    """Live fuel KPIs from the newest advisory (written by the ccr-optimizer
+    loop). All economics carry is_estimate until real prices/GCV are supplied."""
+    row = _latest_optimizer_row()
+    if row is None:
+        return _json_safe({"available": False,
+                           "reason": "ccr-optimizer loop has not logged an advisory yet"})
+    return _json_safe({
+        "available": True, "advisory": True, "mode": row.get("mode"),
+        "ts": row.get("ts"), "is_estimate": bool(row.get("is_estimate")),
+        "current": {"coal_tph": row.get("cur_coal"), "afr_total": row.get("cur_afr"),
+                    "cost_per_ton": row.get("cur_cost"), "tsr_pct": row.get("cur_tsr"),
+                    "specific_heat_kcal_kg": row.get("cur_spheat")},
+        "recommended": {"coal_tph": row.get("rec_coal"), "afr_total": row.get("rec_afr"),
+                        "cost_per_ton": row.get("rec_cost"), "tsr_pct": row.get("rec_tsr"),
+                        "specific_heat_kcal_kg": row.get("rec_spheat")},
+        "savings": {"cost_per_ton": row.get("save_cost"), "tsr_pts": row.get("save_tsr")},
+        "temp_in_band": bool(row.get("in_band_now")),
+        "quality_ok": bool(row.get("quality_ok")),
+        "interlocks_ok": bool(row.get("interlocks_ok")),
+    })
+
+
+@app.get("/api/savings")
+def savings(limit: int = Query(500, ge=1, le=5000)):
+    """M&V trend: predicted vs realised coal/₹/TSR from optimizer_log, split by
+    whether the operator actually moved toward the advice (followed)."""
+    try:
+        r = db.q("SELECT * FROM optimizer_log ORDER BY ts DESC LIMIT :n", {"n": limit})
+    except Exception:
+        r = None
+    if r is None or not len(r):
+        return _json_safe({"available": False,
+                           "reason": "no optimizer advisories logged yet"})
+    matured = r[r["matured"] == 1]
+    followed = matured[matured["followed"] == 1]
+
+    def _avg(df, col):
+        return float(df[col].mean()) if len(df) and df[col].notna().any() else None
+
+    return _json_safe({
+        "available": True, "advisory": True,
+        "n": int(len(r)), "matured": int(len(matured)), "followed": int(len(followed)),
+        "is_estimate": bool(r.iloc[0].get("is_estimate")),
+        "predicted_avg": {"cost_per_ton": _avg(r, "save_cost"), "tsr_pts": _avg(r, "save_tsr")},
+        "realized_followed_avg": {"coal_tph": _avg(followed, "realized_coal"),
+                                  "cost_per_ton": _avg(followed, "realized_cost"),
+                                  "tsr_pts": _avg(followed, "realized_tsr")},
+        "series": _clean_records(r.iloc[::-1]),
+    })
+
+
+@app.get("/fuel", response_class=HTMLResponse)
+@app.get("/fuel-dashboard", response_class=HTMLResponse)
+def fuel_dashboard():
+    """Self-contained live preview of the fuel optimiser (KPIs, advisory,
+    sensitivities, M&V). Same-origin, no build step."""
+    from backend._fuel_dashboard import HTML
+    return HTML
+
+
+class DecisionReq(BaseModel):
+    tag: str
+    action: str                      # accepted | declined | undone
+    param_id: str | None = None
+    param_name: str | None = None
+    unit: str | None = None
+    reason: str | None = None
+    note: str | None = None
+    current_value: float | None = None
+    recommended_value: float | None = None
+    operator: str | None = None
+
+
+@app.post("/api/decisions")
+def post_decision(req: DecisionReq):
+    """Record an operator Accept / Decline / Undo on a twin recommendation,
+    with the twin's advisory context at that moment. Never writes to the plant."""
+    from fastapi import HTTPException
+    from backend import decisions
+    snap = _snapshot()
+    if req.action == "accepted":
+        why = _accept_refusal(req, snap)
+        if why:                                  # Decline / Undo are never blocked
+            raise HTTPException(status_code=409, detail=why)
+    try:
+        return _json_safe(decisions.record(req.model_dump(), _advisor["result"], snap))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+def _accept_refusal(req: DecisionReq, snap: dict) -> str | None:
+    """Why an Accept must be refused, or None. Checks every value known for the
+    parameter -- the server's own live and recommended values AND the request's
+    -- against the guardrail limits. Fail-safe: if the check itself fails, refuse."""
+    try:
+        from backend import guardrails, validation
+        live = _fresh_values(snap).get(req.tag)
+        rec = _advisor_recommended(_advisor["result"]).get(req.tag)
+        why = guardrails.refuse_accept(req.tag, {
+            "live": live, "recommended": rec,
+            "submitted current": req.current_value,
+            "submitted recommended": req.recommended_value})
+        if why:
+            return why
+        # GR1: live CO / O2 unsafe -> no Accept that adds fuel
+        why = guardrails.refuse_fuel_raise(
+            req.tag, live if live is not None else req.current_value,
+            rec if rec is not None else req.recommended_value, _combustion(snap))
+        if why:
+            return why
+        # GR2 direction, GR6 drift, GR7 uncertainty, GR8 heat change are CAUTIONS
+        # (29 Oct): shown in amber on the advisor rows, they do not block Accept.
+        # Only safety (limits, live CO / O2, data checks) refuses it.
+        # never judge an Accept on a cached result: re-check the data now
+        return validation.refuse_accept(req.tag, _current_validation(max_age=0)["report"])
+    except Exception as e:
+        return (f"Refused: guardrail check could not run ({e!r}). "
+                "Accept is blocked until it works again; Decline is still allowed.")
+
+
+@app.get("/api/decisions")
+def get_decisions(day: str | None = None, limit: int = Query(500, ge=1, le=5000)):
+    """Operator decisions for one date (YYYY-MM-DD, default today)."""
+    from fastapi import HTTPException
+    from backend import decisions
+    try:
+        return _json_safe(decisions.list_day(day, limit))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get("/api/advisor/summary")
+def get_advisor_summary(day: str | None = None):
+    """Advisories computed and new recommendations issued on one date (default today)."""
+    from fastapi import HTTPException
+    from backend import decisions
+    try:
+        return _json_safe(decisions.advisory_summary(day))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+# Admin results are shared for _ADMIN_TTL_S seconds and computed by one request
+# at a time per key. Each admin panel re-polls every 60 s (and retries) whether or
+# not its last request finished, so several open admin pages used to run the same
+# advisor_log / decision checks side by side; once the backend fell behind they
+# piled up and starved every other endpoint. Failures are not cached.
+_ADMIN_TTL_S = 30
+_admin_cache: dict = {}
+_admin_locks: dict = {}
+_admin_locks_guard = threading.Lock()
+
+
+def _admin_cached(key: tuple, fn, ttl: float | None = None):
+    with _admin_locks_guard:
+        lock = _admin_locks.setdefault(key, threading.Lock())
+    with lock:
+        hit = _admin_cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] < (_ADMIN_TTL_S if ttl is None else ttl):
+            return hit[1]
+        val = fn()
+        now = time.monotonic()
+        _admin_cache[key] = (now, val)
+        if len(_admin_cache) > 256:              # drop entries past the longest TTL (600 s)
+            for k in [k for k, (t, _) in list(_admin_cache.items()) if now - t > 600]:
+                _admin_cache.pop(k, None)
+        return val
+
+
+@app.get("/api/admin/declined-reached")
+def get_declined_reached(day: str | None = None):
+    """Admin: declined lever recommendations on one date, each checked for whether
+    the plant reached the recommended value (± tolerance) within the window anyway."""
+    from fastapi import HTTPException
+    from backend import decisions
+    try:
+        return _json_safe(_admin_cached(("declined", day), lambda: decisions.declined_but_reached(day)))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get("/api/admin/accepted-reached")
+def get_accepted_reached(day: str | None = None):
+    """Admin: accepted lever recommendations on one date, each checked for whether
+    the plant reached the recommended value (± tolerance) at the target time."""
+    from fastapi import HTTPException
+    from backend import decisions
+    try:
+        return _json_safe(_admin_cached(("accepted", day), lambda: decisions.accepted_reached(day)))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get("/api/admin/summary")
+def get_admin_summary(days: int = Query(30, ge=1, le=365)):
+    """Admin: date-wise recommendations shown, accepted, declined (split into
+    not correct / justified) and no action."""
+    from backend import decisions
+    return _json_safe(_admin_cached(("summary", days), lambda: decisions.summary_checked(days)))
+
+
+@app.get("/api/admin/performance")
+def get_admin_performance(scope: str = Query("total", pattern="^(total|week)$")):
+    """Admin: Advisory Performance summed since 2 Nov (total) or over the last 7 days (week)."""
+    from backend import decisions
+    return _json_safe(_admin_cached(("performance", scope), lambda: decisions.performance(scope)))
+
+
+@app.get("/api/admin/actions")
+def get_admin_actions(scope: str = Query("total", pattern="^(total|week|day)$"), day: str | None = None):
+    """Admin: recommendations shown, acted on and not acted on (Accept blocked or available)."""
+    from fastapi import HTTPException
+    from backend import decisions
+    try:
+        return _json_safe(_admin_cached(("actions", scope, day), lambda: decisions.actions(scope, day)))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get("/api/decisions/days")
+def get_decision_days():
+    """Date-wise index: every day with decisions and its counts."""
+    from backend import decisions
+    return _json_safe(decisions.days())
+
+
+@app.get("/advisor", response_class=HTMLResponse)
+def advisor_page():
+    """CCR Kiln-3 advisor prototype. Only the predicted calciner temperature is
+    live (from /api/twin/forecast, same-origin); every other element is mock."""
+    from pathlib import Path
+    return (Path(__file__).parent / "static" / "ccr-kiln3-advisor.html").read_text(encoding="utf-8")
+
+
+@app.get("/api/optimizer")
+def optimizer_latest():
+    """Latest logged advisory + its per-lever sensitivities (what drives temp vs
+    cost vs TSR) — read from optimizer_log, so this is instant (no re-optimise)."""
+    import json as _json
+    latest = _latest_optimizer_row()
+    correlation = None
+    if latest and latest.get("sensitivities"):
+        try:
+            correlation = {"mode": latest.get("mode"),
+                           "sensitivities": _json.loads(latest["sensitivities"])}
+        except (ValueError, TypeError):
+            pass
+    return _json_safe({"available": latest is not None, "advisory": True,
+                       "latest": latest, "correlation": correlation})

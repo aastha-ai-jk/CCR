@@ -1,0 +1,21 @@
+# Never bake data, models, secrets or build caches into images:
+# data/ and models/ are mounted volumes, .env files are mounted read-only.
+.git
+.claude
+**/__pycache__
+**/*.pyc
+.venv
+venv
+data/
+models/
+.env
+.env.*
+frontend/node_modules
+frontend/.next
+frontend/.env.local
+ops/2026-09-25-advisor/dist
+docs/
+experiments/
+*.xlsx
+*.docx
+*.log

@@ -1,0 +1,6 @@
+OT URL : opc.tcp://192.168.100.139:49320 or opc.tcp://10.4.222.139
+Tag Address : ns=2;s=("tag name")
+Tag 1 (Calciner Outlet Temperature) 	- "L3.L3_New.Root.423CI400_TT_4.Value"
+Tag 2 (Calciner Outlet Pressure)	- "L3.L3_New.Root.423CI400_PT_4.Value"
+Tag 3 (Calciner Oxygen) 		- "L3.L3_New.Root.423AM823_O2.Value"
+Tag 4 (Calciner CO) 			- "L3.L3_New.Root.423AM823_CO.Value"

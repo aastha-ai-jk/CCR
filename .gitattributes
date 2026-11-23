@@ -1,0 +1,4 @@
+*.sqlite filter=lfs diff=lfs merge=lfs -text
+
+# shell scripts run on Linux (GPU box, edge devices): always LF
+*.sh text eol=lf
